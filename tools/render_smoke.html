@@ -9,13 +9,19 @@
   #viewport { position: fixed; inset: 0; }
   #viewport canvas { display: block; }
   #hud { position: fixed; left: 12px; top: 12px; background: rgba(11,15,20,0.72); border: 1px solid #253040;
-         border-radius: 8px; padding: 10px 12px; min-width: 260px; backdrop-filter: blur(4px); }
+         border-radius: 8px; padding: 10px 12px; min-width: 280px; max-width: 360px; backdrop-filter: blur(4px); }
   #hud h1 { font-size: 13px; margin: 0 0 6px; color: #e6eef8; font-weight: 600; }
   #hud label { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; }
   #hud .row { margin: 6px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   #hud input[type=range] { width: 160px; }
-  #hud button { background: #1a2433; color: #e6eef8; border: 1px solid #2f3d52; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
+  #hud button, #hud select { background: #1a2433; color: #e6eef8; border: 1px solid #2f3d52; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
+  #hud button[aria-pressed=true] { background: #2c4a6e; border-color: #4a7fb5; }
   #stats { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #9fb3c8; white-space: pre; }
+  #legend { display: grid; grid-template-columns: 22px 1fr; gap: 3px 8px; align-items: center; margin-top: 6px; }
+  #legend .sw { width: 22px; height: 12px; border-radius: 3px; border: 1px solid #2a3646; background-color: #10161e; }
+  #legend .sw.cell, #legend .sw.fiber, #legend .sw.load { height: 10px; }
+  #legend .sw.gel, #legend .sw.field { border-radius: 50%; width: 16px; height: 16px; justify-self: center; }
+  #legend .lb { color: #b8c6d6; }
   #err { position: fixed; left: 12px; bottom: 12px; color: #ff8a80; font-family: ui-monospace, monospace; font-size: 11px; white-space: pre-wrap; max-width: 60vw; }
 </style>
 <script type="importmap">
@@ -27,19 +33,18 @@
 <div id="viewport"><canvas id="c"></canvas></div>
 <div id="hud">
   <h1>Tissue Weather — render smoke</h1>
+  <div class="row"><span>tissue</span><span id="tissues"></span></div>
   <div class="row"><span>t = <b id="tval">0.0</b> d</span>
     <input id="t" type="range" min="0" max="60" step="0.1" value="0">
     <button id="play">Play</button></div>
-  <div class="row">
-    <label><input id="fibers" type="checkbox" checked> fibers</label>
-    <label><input id="cells" type="checkbox" checked> cells</label>
-    <label><input id="g" type="checkbox"> g (teal)</label>
-    <label><input id="m" type="checkbox"> m (magenta)</label>
-    <label><input id="auto" type="checkbox" checked> auto-rotate</label>
-  </div>
-  <div class="row"><span>strain</span><input id="strain" type="range" min="0" max="1" step="0.01" value="0.6">
-    <span id="strainval">0.60</span></div>
+  <div class="row" id="layerRow"></div>
+  <div class="row" id="fieldRow"></div>
+  <div class="row"><label><input id="auto" type="checkbox"> auto-rotate</label>
+    <span id="gelStyle"></span></div>
+  <div class="row"><span id="loadLabel">load</span><input id="load" type="range" min="0" max="1" step="0.01" value="0.6">
+    <span id="loadval">0.60</span></div>
   <div id="stats"></div>
+  <div id="legend"></div>
 </div>
 <div id="err"></div>
 
@@ -47,9 +52,60 @@
 import { TissueRenderer } from '../src/render.js';
 
 // ---------------------------------------------------------------------------
-// Fake state generator — exact layout of SPEC 1.1–1.2 / model.js contract.
-// Deterministic (seeded), animated in t (days): density rises, fibers align
-// to z, matrix matures, cells activate and align; a wound at day 4 heals.
+// Fake tissue definitions in the EXTENDING.md §1 shape (only the renderer-facing
+// parts: species, fields, cellTypes, dials). No rules — states are synthesised.
+// ---------------------------------------------------------------------------
+const TISSUES = {
+  fibrous: {
+    key: 'fibrous', name: 'Fibrous connective tissue',
+    species: [
+      { key: 'new', label: 'Provisional matrix', kind: 'fiber', color: '#cfe8ff' },
+      { key: 'mat', label: 'Mature collagen I', kind: 'fiber', color: '#e0a24a' },
+    ],
+    fields: [
+      { key: 'g', label: 'Growth factor (TGF-β)', color: '#3fd6c4' },
+      { key: 'm', label: 'Protease (MMP)', color: '#e05bd0' },
+    ],
+    cellTypes: [
+      { key: 'fibroblast', label: 'Fibroblast → myofibroblast', colors: ['#4ea3ff', '#ff7a3d'],
+        shape: { by: 'a', aspectMin: 1.0, aspectMax: 2.5 }, radius: 0.03, motile: true },
+    ],
+    dials: [
+      { key: 'Gext', label: 'Growth-factor bath', default: 0.5 },
+      { key: 'strain', label: 'Mechanical load', default: 0.5, role: 'load' },
+      { key: 'protease', label: 'Protease activity', default: 0.5 },
+      { key: 'nCells', label: 'Cell number', default: 160, role: 'cellCount' },
+    ],
+  },
+  cartilage: {
+    key: 'cartilage', name: 'Articular cartilage in a hydrogel',
+    species: [
+      { key: 'scaffold', label: 'Hydrogel scaffold', kind: 'scaffold', color: '#a9d8e8' },
+      { key: 'gag', label: 'Proteoglycan (aggrecan)', kind: 'gel', color: '#b48cff' },
+      { key: 'col2', label: 'Collagen II network', kind: 'fiber', color: '#e8f1ff' },
+      { key: 'col1', label: 'Collagen I (fibrous)', kind: 'fiber', color: '#e0a24a' },
+    ],
+    fields: [
+      { key: 'tgf', label: 'TGF-β', color: '#3fd6c4' },
+      { key: 'o2', label: 'Oxygen', color: '#ffd166' },
+      { key: 'cat', label: 'Catabolic signal (IL-1)', color: '#ff5c8a' },
+    ],
+    cellTypes: [
+      { key: 'chondrocyte', label: 'Chondrocyte (quiet → synthetic)', colors: ['#5fc9c0', '#ffb347'],
+        shape: { by: 'b', aspectMin: 1.0, aspectMax: 1.5 }, radius: 0.034, motile: false },
+    ],
+    dials: [
+      { key: 'o2ext', label: 'Oxygen bath', default: 0.6 },
+      { key: 'load', label: 'Compressive load', default: 0.3, role: 'load' },
+      { key: 'il1', label: 'Inflammatory tone', default: 0.2 },
+      { key: 'nCells', label: 'Cell number', default: 160, role: 'cellCount' },
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Fake state generators — exact layout of EXTENDING.md §3 `state`.
+// Deterministic (seeded), animated in t (days).
 // ---------------------------------------------------------------------------
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -62,17 +118,18 @@ function mulberry32(seed) {
 }
 const ramp = (t, tau) => 1 - Math.exp(-Math.max(0, t) / tau);
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const sstep = (a, b, x) => { const u = clamp01((x - a) / (b - a)); return u * u * (3 - 2 * u); };
 
-let fakeCache = null;
-function buildFakeBase(N, nCells) {
-  const V = N * N * N, rand = mulberry32(1234567 + N * 1000 + nCells);
-  const rvec = new Float32Array(3 * V), spat = new Float32Array(V), jit = new Float32Array(V), wound = new Float32Array(V);
+function buildBase(tissue, N, nCells) {
+  const V = N * N * N, rand = mulberry32(1234567 + N * 1000 + nCells + tissue.key.length * 77);
+  const rvec = new Float32Array(3 * V), spat = new Float32Array(V), spat2 = new Float32Array(V), jit = new Float32Array(V), wound = new Float32Array(V), zc = new Float32Array(V);
   const wc = [0.72, 0.32, 0.5], wr = 0.24;
   for (let v = 0; v < V; v++) {
     const i = (v / (N * N)) | 0, j = ((v / N) | 0) % N, k = v % N;
     const x = (i + 0.5) / N, y = (j + 0.5) / N, z = (k + 0.5) / N;
     spat[v] = 0.55 + 0.45 * Math.sin(3.1 * x + 1.7) * Math.cos(2.3 * y - 0.4) * Math.cos(2.9 * z + 0.8);
-    jit[v] = rand();
+    spat2[v] = 0.5 + 0.5 * Math.sin(5.3 * x - 0.9) * Math.sin(4.1 * y + 2.2) * Math.cos(3.7 * z - 1.1);
+    jit[v] = rand(); zc[v] = z;
     const zz = rand() * 2 - 1, ph = rand() * Math.PI * 2, s = Math.sqrt(1 - zz * zz);
     rvec[3 * v] = s * Math.cos(ph); rvec[3 * v + 1] = s * Math.sin(ph); rvec[3 * v + 2] = zz;
     const d = Math.hypot(x - wc[0], y - wc[1], z - wc[2]);
@@ -86,67 +143,127 @@ function buildFakeBase(N, nCells) {
     cu[c] = rand();
   }
   const F = () => new Float32Array(V);
+  const speciesKeys = tissue.species.map((s) => s.key), fieldKeys = tissue.fields.map((f) => f.key);
+  const dials = {}; for (const d of tissue.dials) dials[d.key] = d.default;
+  dials.nCells = nCells;
   const state = {
-    N, rho: F(), rhoMat: F(), fa: F(), fx: F(), fy: F(), fz: F(), g: F(), m: F(), E: F(),
-    nCells, cx: new Float32Array(3 * nCells), cp: new Float32Array(3 * nCells), alpha: new Float32Array(nCells),
-    dials: { Gext: 0.5, strain: 0.6, protease: 0.4, nCells },
+    N, L: 1, h: 1 / N, time: 0, dt: 0.02, dials, nCells, wound: null, tissue: tissue.key,
+    speciesKeys, species: speciesKeys.map(F),
+    fiberTotal: F(), fa: F(), fx: F(), fy: F(), fz: F(), E: F(), inflam: F(),
+    fieldKeys, fields: fieldKeys.map(F),
+    cx: new Float32Array(3 * nCells), cp: new Float32Array(3 * nCells), ca: new Float32Array(nCells), cb: new Float32Array(nCells), ctype: new Uint8Array(nCells),
   };
-  return { N, nCells, V, rvec, spat, jit, wound, cx0, cph, cr, cu, wc, wr, state };
+  return { tissue: tissue.key, N, nCells, V, rvec, spat, spat2, jit, wound, zc, cx0, cph, cr, cu, wc, wr, state };
 }
 
-function makeFakeState(N, nCells, t, dials = {}) {
-  if (!fakeCache || fakeCache.N !== N || fakeCache.nCells !== nCells) fakeCache = buildFakeBase(N, nCells);
-  const B = fakeCache, S = B.state, V = B.V;
+// Fibrous: density rises, fibers align to z, matrix matures, cells activate; a wound at day 4 heals.
+function fakeFibrous(B, t, dials) {
+  const S = B.state, V = B.V, sp = S.species, fd = S.fields;
   const Gext = dials.Gext ?? 0.5, strain = dials.strain ?? 0.6, protease = dials.protease ?? 0.4;
-  S.dials.Gext = Gext; S.dials.strain = strain; S.dials.protease = protease; S.dials.nCells = nCells;
-  const dens = 0.06 + 1.05 * ramp(t, 22);          // mean density trajectory
-  const align = ramp(t, 18) * (0.35 + 0.65 * strain); // alignment toward z
-  const matur = ramp(t, 28);                        // maturity fraction
-  const ws = t < 4 ? 0 : 0.9 * Math.exp(-(t - 4) / 18); // wound strength (injury at day 4)
+  S.dials.Gext = Gext; S.dials.strain = strain; S.dials.protease = protease; S.time = t;
+  const dens = 0.06 + 1.05 * ramp(t, 22), align = ramp(t, 18) * (0.35 + 0.65 * strain), matur = ramp(t, 28);
+  const ws = t < 4 ? 0 : 0.9 * Math.exp(-(t - 4) / 18);
   for (let v = 0; v < V; v++) {
-    const sp = B.spat[v], jt = B.jit[v], w = B.wound[v] * ws;
-    let rho = dens * (0.6 + 0.6 * sp) * (0.9 + 0.2 * jt);
-    rho *= 1 - 0.85 * w;
-    rho = Math.min(2, rho);
-    let fa = clamp01((0.06 + 0.04 * jt + 0.85 * align * (0.7 + 0.3 * sp)) * (1 - w));
+    const s = B.spat[v], jt = B.jit[v], w = B.wound[v] * ws;
+    let rho = Math.min(2, dens * (0.6 + 0.6 * s) * (0.9 + 0.2 * jt) * (1 - 0.85 * w));
+    const fa = clamp01((0.06 + 0.04 * jt + 0.85 * align * (0.7 + 0.3 * s)) * (1 - w));
     const bz = align * (1 - w);
     let fx = (1 - bz) * B.rvec[3 * v], fy = (1 - bz) * B.rvec[3 * v + 1], fz = (1 - bz) * B.rvec[3 * v + 2] + bz * (B.rvec[3 * v + 2] < 0 ? -1 : 1);
-    const fl = Math.hypot(fx, fy, fz) || 1; fx /= fl; fy /= fl; fz /= fl;
-    const phi = clamp01(matur * (0.75 + 0.25 * sp) * (1 - w));
-    const rhoMat = phi * rho;
-    const x = B.rvec[3 * v]; // reuse as cheap pseudo-coordinate noise
-    const g = clamp01(Gext * (0.75 + 0.35 * sp) + 0.5 * w + 0.05 * x);
-    const m = clamp01(protease * (0.6 + 0.5 * (1 - sp)) * (1 - 0.6 * ramp(t, 25)) + 0.8 * w);
-    S.rho[v] = rho; S.rhoMat[v] = rhoMat; S.fa[v] = fa; S.fx[v] = fx; S.fy[v] = fy; S.fz[v] = fz;
-    S.g[v] = g; S.m[v] = m;
+    const fl = Math.hypot(fx, fy, fz) || 1;
+    const phi = clamp01(matur * (0.75 + 0.25 * s) * (1 - w));
+    sp[0][v] = rho * (1 - phi); sp[1][v] = rho * phi; S.fiberTotal[v] = rho;
+    S.fa[v] = fa; S.fx[v] = fx / fl; S.fy[v] = fy / fl; S.fz[v] = fz / fl;
+    fd[0][v] = clamp01(Gext * (0.75 + 0.35 * s) + 0.5 * w + 0.05 * B.rvec[3 * v]);
+    fd[1][v] = clamp01(protease * (0.6 + 0.5 * (1 - s)) * (1 - 0.6 * ramp(t, 25)) + 0.8 * w);
     S.E[v] = 0.3 + 20 * rho * rho * (1 + 3 * phi) * (1 + strain);
+    S.inflam[v] = w;
   }
   const act = ramp(t, 9), pal = 0.9 * ramp(t, 14) * (0.4 + 0.6 * strain);
-  for (let c = 0; c < nCells; c++) {
-    for (let d = 0; d < 3; d++) {
-      const x = B.cx0[3 * c + d] + 0.035 * Math.sin(0.35 * t + B.cph[3 * c + d]);
-      S.cx[3 * c + d] = Math.min(0.97, Math.max(0.03, x));
-    }
+  for (let c = 0; c < B.nCells; c++) {
+    for (let d = 0; d < 3; d++) S.cx[3 * c + d] = Math.min(0.97, Math.max(0.03, B.cx0[3 * c + d] + 0.035 * Math.sin(0.35 * t + B.cph[3 * c + d])));
     const dw = Math.hypot(S.cx[3 * c] - B.wc[0], S.cx[3 * c + 1] - B.wc[1], S.cx[3 * c + 2] - B.wc[2]);
     const inW = dw < B.wr ? ws : 0;
-    let px = (1 - pal) * B.cr[3 * c], py = (1 - pal) * B.cr[3 * c + 1], pz = (1 - pal) * B.cr[3 * c + 2] + pal * (B.cr[3 * c + 2] < 0 ? -1 : 1);
+    const px = (1 - pal) * B.cr[3 * c], py = (1 - pal) * B.cr[3 * c + 1], pz = (1 - pal) * B.cr[3 * c + 2] + pal * (B.cr[3 * c + 2] < 0 ? -1 : 1);
     const pl = Math.hypot(px, py, pz) || 1;
     S.cp[3 * c] = px / pl; S.cp[3 * c + 1] = py / pl; S.cp[3 * c + 2] = pz / pl;
-    S.alpha[c] = clamp01(act * (0.35 + 0.65 * B.cu[c]) * (0.6 + 0.8 * Gext) + 0.6 * inW);
+    S.ca[c] = clamp01(act * (0.35 + 0.65 * B.cu[c]) * (0.6 + 0.8 * Gext) + 0.6 * inW);
+    S.cb[c] = 0; S.ctype[c] = 0;
   }
   return S;
 }
 
+// Cartilage: the hydrogel scaffold dissolves patchily (τ 10–38 d), proteoglycan haze
+// rises, a thin isotropic collagen II network builds slowly, a little oriented
+// collagen I appears in the superficial zone (top). Deep zone fibers align to z.
+// Round chondrocytes, non-motile; b (synthetic state) elongates them slightly.
+function fakeCartilage(B, t, dials) {
+  const S = B.state, V = B.V, sp = S.species, fd = S.fields;
+  const o2ext = dials.o2ext ?? 0.6, load = dials.load ?? 0.3, il1 = dials.il1 ?? 0.2;
+  S.dials.o2ext = o2ext; S.dials.load = load; S.dials.il1 = il1; S.time = t;
+  const gagR = ramp(t, 22), col2R = ramp(t, 45), col1R = ramp(t, 30);
+  for (let v = 0; v < V; v++) {
+    const s = B.spat[v], s2 = B.spat2[v], jt = B.jit[v], z = B.zc[v];
+    const tau = 10 + 28 * s2;   // 10–38 d: patchy dissolution
+    const scaf = 0.9 * Math.exp(-t / tau) * (0.85 + 0.3 * jt);
+    const gag = (0.03 + 0.95 * gagR) * (0.55 + 0.45 * s) * (0.9 + 0.2 * jt) * (1 - 0.35 * il1);
+    const surf = sstep(0.62, 0.95, z), deep = 1 - sstep(0.25, 0.5, z);
+    const col2 = 0.6 * col2R * (0.7 + 0.3 * s2);
+    const col1 = 0.32 * col1R * surf * (0.8 + 0.4 * jt);
+    sp[0][v] = scaf; sp[1][v] = gag; sp[2][v] = col2; sp[3][v] = col1;
+    S.fiberTotal[v] = col2 + col1;
+    // orientation: deep → columns along z, superficial → tangential (x), middle → isotropic
+    const faDeep = 0.55 * ramp(t, 40) * deep, faSurf = 0.65 * col1R * surf;
+    const fa = clamp01(0.06 + 0.04 * jt + faDeep + faSurf);
+    const bz = faDeep, bx = faSurf;
+    let fx = (1 - bz - bx) * B.rvec[3 * v] + bx * (B.rvec[3 * v] < 0 ? -1 : 1);
+    let fy = (1 - bz - bx) * B.rvec[3 * v + 1];
+    let fz = (1 - bz - bx) * B.rvec[3 * v + 2] + bz * (B.rvec[3 * v + 2] < 0 ? -1 : 1);
+    const fl = Math.hypot(fx, fy, fz) || 1;
+    S.fa[v] = fa; S.fx[v] = fx / fl; S.fy[v] = fy / fl; S.fz[v] = fz / fl;
+    fd[0][v] = clamp01(0.15 + 0.6 * gag * (0.6 + 0.4 * s2));
+    fd[1][v] = clamp01(o2ext * (0.3 + 0.7 * z) * (1 - 0.25 * gagR));
+    fd[2][v] = clamp01(il1 + 1.4 * (0.9 - scaf) * Math.exp(-t / 40) * (0.6 + 0.4 * s2));
+    S.E[v] = 1 + 60 * (gag + col2) * (gag + col2) * (1 + load);
+    S.inflam[v] = 0;
+  }
+  const actR = ramp(t, 15), synR = ramp(t, 35);
+  for (let c = 0; c < B.nCells; c++) {
+    for (let d = 0; d < 3; d++) S.cx[3 * c + d] = B.cx0[3 * c + d];   // non-motile
+    const z = S.cx[3 * c + 2];
+    const deep = 1 - sstep(0.25, 0.5, z), surf = sstep(0.62, 0.95, z);
+    const px = (1 - deep) * B.cr[3 * c] + surf * (B.cr[3 * c] < 0 ? -1 : 1), py = (1 - deep - surf) * B.cr[3 * c + 1], pz = (1 - deep - surf) * B.cr[3 * c + 2] + deep * (B.cr[3 * c + 2] < 0 ? -1 : 1);
+    const pl = Math.hypot(px, py, pz) || 1;
+    S.cp[3 * c] = px / pl; S.cp[3 * c + 1] = py / pl; S.cp[3 * c + 2] = pz / pl;
+    S.ca[c] = clamp01(actR * (0.3 + 0.7 * B.cu[c]) * (0.5 + 0.5 * o2ext * (0.3 + 0.7 * z)));
+    S.cb[c] = clamp01(synR * (0.4 + 0.6 * deep) * (0.5 + 0.5 * B.cu[c]));
+    S.ctype[c] = 0;
+  }
+  return S;
+}
+
+const FAKES = { fibrous: fakeFibrous, cartilage: fakeCartilage };
+let base = null;
+function makeFakeState(N, nCells, t, dials = {}, tissueKey = currentTissue) {
+  const tissue = TISSUES[tissueKey] || TISSUES.fibrous;
+  if (!base || base.tissue !== tissue.key || base.N !== N || base.nCells !== nCells) base = buildBase(tissue, N, nCells);
+  return FAKES[tissue.key](base, t, dials);
+}
+
 // ---------------------------------------------------------------------------
-// Page wiring: URL params → t, N, n, layers, strain; HUD; stats; test hooks.
+// Page wiring: URL params → tissue, t, N, n, layers, fields, load; HUD; stats; hooks.
+//   ?tissue=cartilage&t=20&N=12&n=160&K=3&fibers=0&gel=0&scaffold=0&cells=0&fields=tgf,o2
+//   &load=0.4&auto=0&hud=0&play=1&speed=4&opt.<rendererOpt>=<value>
 // ---------------------------------------------------------------------------
 const q = new URLSearchParams(location.search);
 const num = (k, d) => (q.has(k) && !Number.isNaN(+q.get(k)) ? +q.get(k) : d);
 const flag = (k, d) => (q.has(k) ? q.get(k) !== '0' && q.get(k) !== 'false' : d);
 const N = num('N', 12), nCells = num('n', 160), K = num('K', 3);
+let currentTissue = TISSUES[q.get('tissue')] ? q.get('tissue') : 'fibrous';
 let t = num('t', 0), speed = num('speed', 4), playing = flag('play', false);
-const layers = { fibers: flag('fibers', true), cells: flag('cells', true), g: flag('g', false), m: flag('m', false) };
-const dials = { Gext: num('Gext', 0.5), strain: num('strain', 0.6), protease: num('protease', 0.4) };
+const layers = { fibers: flag('fibers', true), cells: flag('cells', true), scaffold: flag('scaffold', true), gel: flag('gel', true), fields: {} };
+for (const k of (q.get('fields') || '').split(',').filter(Boolean)) layers.fields[k] = true;
+const dials = {};
+for (const [k, v] of q) if (!Number.isNaN(+v) && v !== '' && !['t', 'N', 'n', 'K', 'speed'].includes(k) && !k.startsWith('opt.')) dials[k] = +v;
 const errBox = document.getElementById('err');
 const errors = [];
 const logErr = (msg) => { errors.push(msg); errBox.textContent = errors.slice(-6).join('\n'); };
@@ -155,32 +272,78 @@ window.addEventListener('unhandledrejection', (e) => logErr('rejection: ' + (e.r
 if (!flag('hud', true)) document.getElementById('hud').hidden = true;
 
 // Any `opt.<name>=<value>` URL parameter is passed straight into TissueRenderer opts (tuning).
-const rendererOpts = { K, autoRotate: flag('auto', true), toneMapping: q.get('tm') || 'aces', exposure: num('exposure', 1.08) };
+// autoRotate is only passed when `auto` is in the URL, so the prefers-reduced-motion default is testable.
+const rendererOpts = { K, toneMapping: q.get('tm') || 'aces', exposure: num('exposure', 1.08) };
+if (q.has('auto')) rendererOpts.autoRotate = flag('auto', true);
 for (const [k, v] of q) if (k.startsWith('opt.')) rendererOpts[k.slice(4)] = v === 'true' ? true : v === 'false' ? false : (v !== '' && !Number.isNaN(+v)) ? +v : v;
 const canvas = document.getElementById('c');
 const renderer = new TissueRenderer(canvas, rendererOpts);
 
 // HUD
 const $ = (id) => document.getElementById(id);
+const loadKeyOf = (tk) => (TISSUES[tk].dials.find((d) => d.role === 'load') || {}).key || null;
+function applyTissue(tk) {
+  currentTissue = tk;
+  const T = TISSUES[tk];
+  renderer.setTissue(T);
+  for (const b of $('tissues').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.key === tk));
+  // load dial (if the tissue has one)
+  const lk = loadKeyOf(tk);
+  $('loadLabel').textContent = lk ? (T.dials.find((d) => d.key === lk).label) : 'no load dial';
+  $('load').disabled = !lk;
+  if (lk) { if (!(lk in dials)) dials[lk] = 'load' in q ? num('load', T.dials.find((d) => d.key === lk).default) : T.dials.find((d) => d.key === lk).default; $('load').value = dials[lk]; $('loadval').textContent = (+dials[lk]).toFixed(2); }
+  // field toggles
+  const fr = $('fieldRow'); fr.textContent = '';
+  for (const f of T.fields) {
+    const lab = document.createElement('label'), cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = !!layers.fields[f.key]; cb.dataset.field = f.key;
+    cb.onchange = () => { layers.fields[f.key] = cb.checked; };
+    lab.append(cb, document.createTextNode(' ' + f.key)); fr.append(lab);
+  }
+  // legend
+  const lg = $('legend'); lg.textContent = '';
+  for (const sw of renderer.legendSwatches()) {
+    const s = document.createElement('span'); s.className = 'sw ' + sw.kind; s.style.background = sw.css;
+    const l = document.createElement('span'); l.className = 'lb'; l.textContent = `${sw.label}  (${sw.key})`;
+    lg.append(s, l);
+  }
+}
+for (const tk of Object.keys(TISSUES)) {
+  const b = document.createElement('button'); b.textContent = tk; b.dataset.key = tk; b.setAttribute('aria-pressed', 'false');
+  b.onclick = () => applyTissue(tk); $('tissues').append(b);
+}
 $('t').value = t; $('tval').textContent = t.toFixed(1);
-$('strain').value = dials.strain; $('strainval').textContent = dials.strain.toFixed(2);
-for (const k of ['fibers', 'cells', 'g', 'm']) { $(k).checked = layers[k]; $(k).onchange = () => { layers[k] = $(k).checked; }; }
-$('auto').checked = flag('auto', true);
+const lr = $('layerRow');
+for (const k of ['fibers', 'cells', 'scaffold', 'gel']) {
+  const lab = document.createElement('label'), cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.id = k; cb.checked = layers[k]; cb.onchange = () => { layers[k] = cb.checked; };
+  lab.append(cb, document.createTextNode(' ' + k)); lr.append(lab);
+}
+$('auto').checked = renderer.controls.autoRotate;
 $('auto').onchange = () => renderer.setAutoRotate($('auto').checked);
 $('t').oninput = () => { t = +$('t').value; playing = false; $('play').textContent = 'Play'; };
-$('strain').oninput = () => { dials.strain = +$('strain').value; $('strainval').textContent = dials.strain.toFixed(2); };
+$('load').oninput = () => { const lk = loadKeyOf(currentTissue); if (lk) { dials[lk] = +$('load').value; $('loadval').textContent = dials[lk].toFixed(2); } };
 $('play').textContent = playing ? 'Pause' : 'Play';
 $('play').onclick = () => { playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play'; };
+{
+  const gs = $('gelStyle'), other = (rendererOpts.gelStyle === 'points') ? 'spheres' : 'points';
+  const a = document.createElement('a'); a.style.color = '#8fb8d8';
+  const u = new URL(location.href); u.searchParams.set('opt.gelStyle', other); a.href = u.toString(); a.textContent = `gel: ${rendererOpts.gelStyle || 'spheres'} → ${other}`;
+  gs.append(a);
+}
+applyTissue(currentTissue);
 
 // stats
-let frames = 0, statFrames = 0, sumUpd = 0, sumRen = 0, fps = 0, winStart = performance.now(), winFrames = 0;
+let frames = 0, statFrames = 0, fps = 0, winStart = performance.now(), winFrames = 0;
 const upd = [], ren = [];
-function resetStats() { statFrames = 0; sumUpd = 0; sumRen = 0; upd.length = 0; ren.length = 0; winStart = performance.now(); winFrames = 0; fps = 0; }
+function resetStats() { statFrames = 0; upd.length = 0; ren.length = 0; winStart = performance.now(); winFrames = 0; fps = 0; }
 function stats() {
   const mean = (a) => a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0;
   const sorted = [...upd].sort((a, b) => a - b);
+  const r = renderer.stats;
   return { frames: statFrames, fps: +fps.toFixed(2), updateMs: +mean(upd).toFixed(3), updateMsP95: +(sorted[Math.floor(sorted.length * 0.95)] || 0).toFixed(3),
-           renderCpuMs: +mean(ren).toFixed(3), fibersVisible: renderer.stats.fibersVisible, cells: renderer.stats.cells, N, nCells, K, t: +t.toFixed(2) };
+           renderCpuMs: +mean(ren).toFixed(3), fibersVisible: r.fibersVisible, cells: r.cells, gelVisible: r.gelVisible, strutsVisible: r.strutsVisible,
+           N, nCells, K, t: +t.toFixed(2), tissue: currentTissue };
 }
 let readyResolve; const ready = new Promise((r) => { readyResolve = r; });
 const frameWaiters = [];
@@ -189,7 +352,7 @@ function loop(now) {
   const dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
   if (playing) { t = Math.min(60, t + speed * dt); $('t').value = t; if (t >= 60) { playing = false; $('play').textContent = 'Play'; } }
   $('tval').textContent = t.toFixed(1);
-  state = makeFakeState(N, nCells, t, dials);
+  state = makeFakeState(N, nCells, t, dials, currentTissue);
   const a = performance.now();
   renderer.update(state, layers);
   const b = performance.now();
@@ -198,31 +361,40 @@ function loop(now) {
   upd.push(b - a); ren.push(c - b); if (upd.length > 240) { upd.shift(); ren.shift(); }
   frames++; statFrames++; winFrames++;
   if (now - winStart >= 1000) { fps = winFrames * 1000 / (now - winStart); winStart = now; winFrames = 0; }
-  if (frames % 15 === 0) { const s = stats(); $('stats').textContent = `fps ${s.fps}  update ${s.updateMs} ms  render(cpu) ${s.renderCpuMs} ms\nfibers ${s.fibersVisible}/${N * N * N * K}  cells ${s.cells}  N=${N} K=${K}`; }
+  if (frames % 15 === 0) {
+    const s = stats();
+    $('stats').textContent = `fps ${s.fps}  update ${s.updateMs} ms  render(cpu) ${s.renderCpuMs} ms\nfibers ${s.fibersVisible}/${N * N * N * K}  cells ${s.cells}  gel ${s.gelVisible}  struts ${s.strutsVisible}  N=${N} K=${K}`;
+  }
   if (frames === 1) readyResolve(true);
   for (let i = frameWaiters.length - 1; i >= 0; i--) { if (--frameWaiters[i].n <= 0) { frameWaiters[i].r(); frameWaiters.splice(i, 1); } }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 
-// Reads back the rendered frame to check it is not blank (for the harness).
+// Reads back the rendered frame: mean luminance, lit fraction, colour fractions and the
+// bounding box of lit pixels (fractions of width/height) — used by the harness for
+// blank-frame and framing checks.
 function probePixels() {
   const url = renderer.screenshot();
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      const w = 160, h = Math.max(1, Math.round(160 * img.height / img.width));
+      const w = 200, h = Math.max(1, Math.round(200 * img.height / img.width));
       const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
       const ctx = cv.getContext('2d'); ctx.drawImage(img, 0, 0, w, h);
       const d = ctx.getImageData(0, 0, w, h).data;
-      let lum = 0, lit = 0, hist = { blue: 0, amber: 0 };
-      for (let i = 0; i < d.length; i += 4) {
-        const l = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
-        lum += l; if (l > 40) lit++;
-        if (d[i + 2] > d[i] + 25) hist.blue++; else if (d[i] > d[i + 2] + 25) hist.amber++;
+      let lum = 0, lit = 0, blue = 0, amber = 0, violet = 0, x0 = w, x1 = -1, y0 = h, y1 = -1;
+      for (let p = 0, i = 0; i < d.length; i += 4, p++) {
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        lum += l;
+        if (l > 40) { lit++; const x = p % w, y = (p / w) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        if (b > r + 25 && b > g + 10) blue++; else if (r > b + 25 && g > b) amber++; else if (r > g + 20 && b > g + 20) violet++;
       }
       const n = d.length / 4;
-      resolve({ dataUrlLength: url.length, meanLum: +(lum / n).toFixed(1), litFrac: +(lit / n).toFixed(3), blueFrac: +(hist.blue / n).toFixed(3), amberFrac: +(hist.amber / n).toFixed(3) });
+      resolve({ dataUrlLength: url.length, meanLum: +(lum / n).toFixed(1), litFrac: +(lit / n).toFixed(3),
+                blueFrac: +(blue / n).toFixed(3), amberFrac: +(amber / n).toFixed(3), violetFrac: +(violet / n).toFixed(3),
+                bbox: x1 < 0 ? null : { x0: +(x0 / w).toFixed(3), x1: +((x1 + 1) / w).toFixed(3), y0: +(y0 / h).toFixed(3), y1: +((y1 + 1) / h).toFixed(3) } });
     };
     img.src = url;
   });
@@ -234,13 +406,16 @@ function glInfo() {
            dpr: renderer.renderer.getPixelRatio(), width: canvas.width, height: canvas.height, triangles: renderer.renderer.info.render.triangles, calls: renderer.renderer.info.render.calls };
 }
 window.__smoke = {
-  ready, renderer, makeFakeState, errors,
+  ready, renderer, makeFakeState, errors, tissues: TISSUES,
+  get tissue() { return currentTissue; },
+  setTissue: (k) => applyTissue(k),
   setTime: (v) => { t = v; playing = false; },
-  setLayers: (L) => { Object.assign(layers, L); for (const k of ['fibers', 'cells', 'g', 'm']) $(k).checked = layers[k]; },
+  setLayers: (L) => { Object.assign(layers, L); for (const k of ['fibers', 'cells', 'scaffold', 'gel']) $(k).checked = layers[k]; },
   setDials: (D) => Object.assign(dials, D),
   setPlaying: (p) => { playing = !!p; },
   waitFrames: (n) => new Promise((r) => frameWaiters.push({ n, r })),
   stats, resetStats, probePixels, glInfo,
+  get layers() { return layers; },
   get state() { return state; },
 };
 </script>
