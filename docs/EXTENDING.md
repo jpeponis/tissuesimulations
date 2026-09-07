@@ -52,6 +52,10 @@ export const TISSUE_FIBROUS = {
   ],
   // D in L²/day (engine clamps the diffusion number to 1/6); bath: dial key whose value the
   // field relaxes toward at rate kBath (/day); decay /day. Sources come from rules (below).
+  // Optional boundary: 'bath' (default: relaxation toward the bath dial everywhere) or
+  // 'face:+z' / 'face:-z' (Dirichlet: that z layer is held at the bath dial value after every
+  // step, no bulk relaxation, all other walls zero-flux — e.g. oxygen entering from the medium
+  // face; consumption is a negative cell fieldSrc, the field is clamped ≥ 0).
 
   // ---- cell types (one or more; each cell carries a type index)
   cellTypes: [
@@ -59,8 +63,12 @@ export const TISSUE_FIBROUS = {
       colors: ['#4ea3ff', '#ff7a3d'],     // colour lerped by the primary state a
       shape: { by: 'a', aspectMin: 1.0, aspectMax: 2.5 },  // ellipsoid aspect along polarity
       radius: 0.03, motile: true,
-      stateLabels: { a: 'activation', b: null } },
+      init: { a: 0.05, b: 0, c: 0 },      // starting values of the three per-cell scalars (default 0)
+      cRange: [0, 1],                     // optional clamp range of c (default [0, 1]); a and b are always [0, 1]
+      stateLabels: { a: 'activation', b: null, c: null } },
   ],
+  // Each cell carries a type index and three scalars: a (primary, colour/shape), b (secondary)
+  // and c (e.g. a pericellular pool of confined matrix that is released later).
 
   // ---- dials (UI + engine). role: 'cellCount' is handled by the engine; role: 'load'
   //      marks the dial used for passive fiber alignment along z and the strain term.
@@ -71,7 +79,7 @@ export const TISSUE_FIBROUS = {
     { key: 'protease', label: 'Protease activity', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2', metaphor: 'temperature', biology: '…', watch: '…' },
     { key: 'nCells', label: 'Cell number', min: 40, max: 400, step: 10, default: 160, format: 'cells', role: 'cellCount', metaphor: 'droplet nuclei', biology: '…', watch: '…' },
   ],
-  // format: 'fixed2' | 'percent' | 'cells' | 'int' | (v) => string
+  // format: 'fixed2' | 'percent' | 'cells' | 'int' | 'onoff' (0/1 toggle shown as Off/On) | (v) => string
 
   // ---- scenarios (ordered)
   scenarios: [
@@ -89,7 +97,7 @@ export const TISSUE_FIBROUS = {
     …
   ],
   // stat paths: species.<key> | species.<key>.fraction | species.total | fiber.total | fa | globalFA
-  //             logE | E | cells.a | cells.b | fields.<key> | deposition | degradation | ratio (dep/deg)
+  //             logE | E | cells.a | cells.b | cells.c | fields.<key> | deposition | degradation | ratio (dep/deg)
   // ops: gt lt between (value: [lo, hi]) ; optional `rel: {stat, op}` compares two stats.
 
   // ---- readouts: which charts the panel shows (in order). type: 'stack' | 'lines' | 'log' | 'flux'
@@ -139,7 +147,7 @@ read inputs and write outputs into typed arrays on that object.
 Inputs (read-only):
 ```
 ctx.i           cell index               ctx.type   cell type index
-ctx.a, ctx.b    primary/secondary state  ctx.dt
+ctx.a, ctx.b, ctx.c  cell state scalars  ctx.dt
 ctx.rho[s]      local species densities (Float32Array, per species index)
 ctx.fiberTotal  Σ fiber species          ctx.fa, ctx.fz  local FA and |f_z| (principal axis)
 ctx.field[f]    local field values       ctx.E      local stiffness (kPa, from last voxel pass)
@@ -150,6 +158,7 @@ ctx.rng()       seeded uniform
 Outputs (write; engine zeroes them before the call):
 ```
 ctx.out.a, ctx.out.b        new state values (engine clamps to [0,1])
+ctx.out.c                   third state value (engine clamps to cellType.cRange, default [0,1])
 ctx.out.secrete[s]          deposition rate into this voxel, density/day, per species
 ctx.out.pol                 orientation strength of fiber deposition (0 isotropic … 1 along polarity)
 ctx.out.align               traction realignment rate of T toward polarity (/day)
@@ -226,12 +235,12 @@ N, L, h, time, dt, dials{}, nCells, wound, tissue (key)
 species: Float32Array[nSpecies] (each N³)       // by species index; state.speciesKeys
 Txx..Tyz, fiberTotal (N³), fa, fx, fy, fz, E, inflam
 fields: Float32Array[nFields] (each N³)          // by field index; state.fieldKeys
-cx (3n), cp (3n), ca (n), cb (n), ctype (Uint8Array n)
+cx (3n), cp (3n), ca (n), cb (n), cc (n), ctype (Uint8Array n)
 ```
 `stats()`:
 ```
 t, species: { <key>: mean, total: Σ means, fiberTotal }, fraction: { <key>: mean/total },
-fa, globalFA, fz, logE, E, cells: { a, b, n }, fields: { <key>: mean },
+fa, globalFA, fz, logE, E, cells: { a, b, c, n }, fields: { <key>: mean },
 deposition, degradation (both as MEAN density change per day over the tissue — already divided by N³),
 ratio
 ```
@@ -270,7 +279,7 @@ default: fibers/cells/scaffold/gel on, fields off.
       "fa": [N³], "f": [3N³],
       "rho": [N³], "phiMat": [N³],                      // kept for format-1 readers: rho = fiberTotal,
                                                         // phiMat = fraction of the LAST fiber species
-      "cells": { "x": [3n], "p": [3n], "a": [n], "b": [n], "type": [n], "alpha": [n] } } ] }
+      "cells": { "x": [3n], "p": [3n], "a": [n], "b": [n], "c": [n], "type": [n], "alpha": [n] } } ] }
 ```
 `alpha` duplicates `a` for format-1 readers. The Blender importer reads
 format 2 (species-coloured fibers, gel spheres, scaffold struts) and still

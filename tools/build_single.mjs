@@ -1,12 +1,14 @@
 // Inlines src/*.js into one page. Two outputs:
 //   dist/tissue-weather.html          full standalone page (double-click, GitHub Pages)
 //   dist/tissue-weather.artifact.html body fragment (title+style first) for hosts that wrap the page
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const order = ['copy.js', 'model.js', 'plots.js', 'render.js', 'app.js'];
+// copy → engine → tissues/* (index.js last) → plots → render → app  (docs/EXTENDING.md §0)
+const tissueFiles = readdirSync(join(root, 'src', 'tissues')).filter((f) => f.endsWith('.js') && f !== 'index.js' && !f.startsWith('_')).sort().map((f) => `tissues/${f}`);
+const order = ['copy.js', 'engine.js', ...tissueFiles, 'tissues/index.js', 'plots.js', 'render.js', 'app.js'];
 const externalImports = new Set();
 let body = '';
 for (const f of order) {
