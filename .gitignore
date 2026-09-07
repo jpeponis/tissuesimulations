@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+node_modules/
+dist/shots/
+.DS_Store
+dist/cdn-cache/
