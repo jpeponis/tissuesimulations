@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tissue Weather</title>
+<meta name="description" content="A 3D interactive for teaching dynamic reciprocity: cells and extracellular matrix remodelling each other under growth factor, load and protease dials.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Tissue Weather — single deliberate dark-field treatment. The 3D viewport is a
+   dark-field micrograph; the panel is an instrument console beside it. Every
+   colour is painted explicitly so the page holds on any host ground. */
+:root {
+  color-scheme: dark;
+  --ground: #0b0f14;        /* viewport */
+  --panel: #10161e;         /* console */
+  --surface: #161e28;       /* cards, inputs */
+  --surface-2: #1c2632;
+  --rule: #243040;
+  --text: #e6edf3;
+  --muted: #8b9bb0;
+  --faint: #5d6d82;
+  --amber: #e0a24a;         /* mature collagen: the one accent */
+  --amber-ink: #f2c47a;
+  --cool: #7fc4ff;          /* new matrix */
+  --cell-q: #4ea3ff;        /* quiescent cell */
+  --cell-a: #ff7a3d;        /* activated cell */
+  --gf: #3fd6c4;            /* growth-factor haze */
+  --mmp: #e05bd0;           /* protease haze */
+  --focus: #ffd27a;
+  /* chart series, stepped for the dark surface (validated) */
+  --s-new: #3f97dc; --s-mat: #c4822a; --s-alpha: #e0602a; --s-fa: #8f7ae0; --s-e: #8fb8d8;
+  --font-ui: "Instrument Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --panel-w: 384px;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--ground); color: var(--text);
+  font-family: var(--font-ui); font-size: 14px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+a { color: var(--amber-ink); }
+
+#app { display: grid; grid-template-columns: 1fr var(--panel-w); height: 100vh; height: 100dvh; }
+#stage { position: relative; min-width: 0; min-height: 0; background: var(--ground); }
+#view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+/* HUD over the viewport */
+.hud { position: absolute; pointer-events: none; }
+.hud > * { pointer-events: auto; }
+.hud-top { left: 20px; top: 16px; right: 20px; display: grid; gap: 6px; max-width: 560px; }
+.brand { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 30px; line-height: 1; letter-spacing: -0.01em; }
+.brand em { font-style: italic; color: var(--amber-ink); }
+.brand small { font-family: var(--font-ui); font-size: 12px; color: var(--muted); margin-left: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+.clock { font-family: var(--font-mono); font-size: 13px; color: var(--muted); display: flex; gap: 14px; font-variant-numeric: tabular-nums; }
+.clock b { color: var(--text); font-weight: 500; }
+.equilibrium { margin: 4px 0 0; font-size: 15px; max-width: 46ch; color: var(--text); text-wrap: pretty; text-shadow: 0 1px 8px rgba(0,0,0,0.7); }
+.equilibrium[data-state="condensing"]::before, .equilibrium[data-state="evaporating"]::before, .equilibrium[data-state="steady"]::before {
+  content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px;
+}
+.equilibrium[data-state="condensing"]::before { background: var(--amber); }
+.equilibrium[data-state="evaporating"]::before { background: var(--cool); }
+.equilibrium[data-state="steady"]::before { background: var(--muted); }
+
+.hud-legend { left: 20px; bottom: 16px; display: grid; gap: 5px; font-size: 12px; color: var(--muted); }
+.legend-row { display: flex; align-items: center; gap: 8px; }
+.swatch { width: 34px; height: 8px; border-radius: 4px; flex: none; }
+.swatch.fiber { background: linear-gradient(90deg, #cfe8ff, #e0a24a); }
+.swatch.cell { background: linear-gradient(90deg, var(--cell-q), var(--cell-a)); }
+.swatch.gf { background: var(--gf); opacity: 0.8; }
+.swatch.mmp { background: var(--mmp); opacity: 0.8; }
+.swatch.load { background: repeating-linear-gradient(90deg, var(--faint) 0 6px, transparent 6px 9px); }
+
+.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.chip { border: 1px solid var(--rule); background: rgba(16,22,30,0.85); color: var(--muted); border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.chip[aria-pressed="true"] { color: var(--text); border-color: var(--faint); background: var(--surface-2); }
+.chip:hover { color: var(--text); }
+
+/* Console */
+#panel { background: var(--panel); border-left: 1px solid var(--rule); overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 18px; padding: 16px 18px 28px; }
+section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.scenarios { display: flex; flex-wrap: wrap; gap: 6px; }
+.scenario-btn { border: 1px solid var(--rule); background: var(--surface); border-radius: 6px; padding: 6px 10px; cursor: pointer; color: var(--muted); font-size: 13px; }
+.scenario-btn[aria-pressed="true"] { color: var(--text); border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+.scenario-btn:hover { color: var(--text); }
+.scenario-card { background: var(--surface); border-radius: 8px; padding: 12px 14px; display: grid; gap: 8px; }
+.scenario-card h3 { margin: 0; font-family: var(--font-display); font-size: 21px; font-weight: 400; letter-spacing: -0.005em; text-wrap: balance; }
+.scenario-card p { margin: 0; color: var(--text); }
+.scenario-card .goal { color: var(--muted); }
+.scenario-card ol { margin: 0; padding-left: 20px; display: grid; gap: 3px; }
+.scenario-card .question { border-left: 2px solid var(--amber); padding-left: 10px; color: var(--amber-ink); }
+.scenario-card details { color: var(--muted); font-size: 13px; }
+.scenario-card summary { cursor: pointer; color: var(--muted); }
+
+.dial { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "label value" "slider slider" "hint hint"; gap: 2px 10px; padding: 10px 0; border-top: 1px solid var(--rule); }
+.dial:first-of-type { border-top: 0; }
+.dial label { grid-area: label; font-weight: 500; display: flex; align-items: baseline; gap: 8px; }
+.dial .metaphor { font-family: var(--font-display); font-style: italic; color: var(--amber-ink); font-size: 15px; font-weight: 400; }
+.dial output { grid-area: value; font-family: var(--font-mono); font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; align-self: baseline; }
+.dial input[type=range] { grid-area: slider; width: 100%; margin: 6px 0 2px; accent-color: var(--amber); height: 22px; cursor: pointer; }
+.dial .hint { grid-area: hint; font-size: 12px; color: var(--muted); }
+.dial .hint b { color: var(--text); font-weight: 500; }
+
+.transport { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.transport button { border: 1px solid var(--rule); background: var(--surface); border-radius: 6px; padding: 8px 6px; cursor: pointer; font-weight: 500; font-size: 13px; }
+.transport button:hover { background: var(--surface-2); }
+.transport button.primary { background: var(--amber); color: #1a1206; border-color: var(--amber); }
+.transport button.primary:hover { background: var(--amber-ink); }
+.transport button.danger { color: var(--cell-a); }
+.speed { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.speed input { accent-color: var(--amber); }
+.speed output { font-family: var(--font-mono); color: var(--text); font-variant-numeric: tabular-nums; }
+
+.readout { display: grid; gap: 2px; margin-bottom: 10px; }
+.readout .head { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); }
+.readout .head b { color: var(--text); font-weight: 500; }
+.readout .head .val { font-family: var(--font-mono); color: var(--text); font-variant-numeric: tabular-nums; }
+.readout canvas { width: 100%; height: 84px; display: block; background: var(--surface); border-radius: 6px; }
+.readout .keys { display: flex; gap: 12px; font-size: 11px; color: var(--muted); }
+.readout .keys i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.gauge canvas { width: 100%; height: 62px; display: block; background: var(--surface); border-radius: 6px; }
+
+.about { color: var(--muted); font-size: 13px; }
+.about summary { cursor: pointer; color: var(--text); font-weight: 500; }
+.about p { margin: 8px 0; max-width: 60ch; }
+.about dl { margin: 8px 0; display: grid; gap: 8px; }
+.about dt { color: var(--text); font-style: italic; font-family: var(--font-display); font-size: 16px; }
+.about dd { margin: 0; }
+.about .tools { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.about .tools button, .about .tools a { border: 1px solid var(--rule); background: var(--surface); border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; color: var(--text); text-decoration: none; }
+.note { font-size: 12px; color: var(--faint); }
+
+#busy { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(11,15,20,0.6); color: var(--text); font-family: var(--font-mono); font-size: 13px; }
+#busy[hidden] { display: none; }
+
+@media (max-width: 900px) {
+  #app { grid-template-columns: 1fr; grid-template-rows: 58vh auto; height: auto; }
+  #panel { border-left: 0; border-top: 1px solid var(--rule); }
+  .hud-top { max-width: 70%; }
+  .brand { font-size: 24px; }
+  .equilibrium { font-size: 13px; }
+  .hud-legend { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+  <main id="stage" aria-label="3D tissue view">
+    <canvas id="view"></canvas>
+    <div class="hud hud-top">
+      <h1 class="brand"><em>Tissue Weather</em><small>dynamic reciprocity</small></h1>
+      <div class="clock"><span>day <b id="day">0.0</b></span><span id="scenario-name"></span><span id="fps" class="note"></span></div>
+      <p class="equilibrium" id="equilibrium" data-state="steady"></p>
+    </div>
+    <div class="hud hud-legend" id="legend"></div>
+    <div class="hud hud-layers" id="layers"></div>
+    <div id="busy" hidden>preparing tissue…</div>
+  </main>
+  <aside id="panel" aria-label="Controls and readouts">
+    <section>
+      <h2>Scenario</h2>
+      <div class="scenarios" id="scenarios" role="group" aria-label="Scenarios"></div>
+    </section>
+    <section class="scenario-card" id="scenario-card"></section>
+    <section>
+      <h2>Weather</h2>
+      <div id="dials"></div>
+    </section>
+    <section>
+      <h2>Run</h2>
+      <div class="transport">
+        <button id="btn-play" class="primary" aria-pressed="false">Play</button>
+        <button id="btn-step" title="Advance one day">+1 day</button>
+        <button id="btn-injure" class="danger" title="Wound the tissue at a random spot">Injure</button>
+        <button id="btn-reset" title="Restart this scenario">Reset</button>
+      </div>
+      <div class="speed">
+        <span>speed</span>
+        <input id="speed" type="range" min="0.25" max="20" step="0.25" value="2" aria-label="Simulated days per second">
+        <output id="speed-out">2 d/s</output>
+      </div>
+    </section>
+    <section>
+      <h2>Readouts</h2>
+      <div id="readouts"></div>
+    </section>
+    <details class="about" id="about">
+      <summary>What am I looking at?</summary>
+      <div id="about-body"></div>
+    </details>
+  </aside>
+</div>
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>
