@@ -1,0 +1,114 @@
+# CI for Tissue Weather. The repository has no runtime and no build dependencies:
+# `npm test` is `node --test`, the build is one Node script, and Three.js comes from a CDN at
+# run time. So there is nothing to `npm ci` and no lockfile to cache.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------- tests, build, dist freshness
+  node:
+    name: tests and single-file build (Node 20)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # conformance for every registered tissue, the golden regression, the engine API,
+      # the build constraints of docs/EXTENDING.md §0 and the developer tools
+      - name: npm test
+        run: npm test
+
+      # check-dist runs BEFORE build on purpose: it judges the COMMITTED dist/*.html against a
+      # fresh build in a temp dir. Run it after `npm run build` and it can only ever pass.
+      - name: npm run check-dist (is the committed dist/ up to date?)
+        run: npm run check-dist
+
+      - name: npm run build
+        run: npm run build
+
+      - name: dist/ is unchanged by a rebuild
+        run: git diff --exit-code -- dist
+
+  # ---------------------------------------------------------------- headless scenario run + plots
+  headless:
+    name: headless scenarios and matplotlib panel (Python 3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install matplotlib
+        run: python3 -m pip install --upgrade pip matplotlib
+
+      # 20 days is enough to prove the tissue runs and writes well-formed CSV/JSON without
+      # spending CI minutes on the 90-day default.
+      - name: Run the fibrous scenarios headless
+        run: node tools/run_headless.mjs --tissue fibrous --days 20 --out scratch/fibrous
+
+      - name: Show what was written
+        run: ls -la scratch/fibrous && head -2 scratch/fibrous/maturation.csv
+
+      # tools/plot_scenarios.py is allowed to fail: it plots a fixed set of column names, and the
+      # v0.2 CSV header is generated from the tissue definition. When the two agree the panel is
+      # uploaded below; when they do not, the run still reports the mismatch without failing CI.
+      - name: Plot the scenario panel
+        id: plots
+        continue-on-error: true
+        run: python3 tools/plot_scenarios.py --dir scratch/fibrous --out scratch/fibrous/scenarios.png
+
+      - name: Upload the scenario plots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenario-plots
+          path: |
+            scratch/fibrous/*.png
+            scratch/fibrous/*.csv
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------- optional browser smoke test
+  screenshot:
+    name: Playwright screenshot smoke (optional)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+
+      # Loads index.html over a local server, drives the app (deep link, play, dial, reset,
+      # injure, table toggle), probes accessibility and reports console errors.
+      # Needs the Three.js CDN; the tool serves it from dist/cdn-cache when the network is closed.
+      - name: Drive the app in headless Chromium
+        run: node tools/screenshot_app.mjs --tissue fibrous --days 10 --out dist/shots
+
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-screenshots
+          path: dist/shots/*.png
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,4 +1,15 @@
-# Tissue Weather — specification (v0.1)
+# Tissue Weather — specification (v0.1 design record)
+
+> **This is the v0.1 design record, kept for provenance.** It describes the app as it was first
+> specified and built, when the whole simulation lived in one `src/model.js`. v0.2 refactored that
+> into a generic engine plus plug-in tissue definitions, so for the **current structure** read
+> [`docs/EXTENDING.md`](EXTENDING.md) (the contract: tissue-definition shape, engine hooks, engine
+> API, renderer, export format, conformance) and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) (the
+> data flow, the single-file build and the file map). Where this document and those two disagree,
+> they win. Section 1 is still the best description of *why* the model is shaped the way it is,
+> §3 records the v0.1 tuning decisions, and the fibrous tissue reproduces the behaviour specified
+> here — `tests/golden/fibrous.json` holds it to that. Commands and paths below have been updated
+> to the v0.2 layout; the design text has not been rewritten.
 
 An interactive 3D simulation for teaching **dynamic reciprocity** and **tissue
 maturation / decay** in a tissue-engineering course. Students turn a few
@@ -23,18 +34,27 @@ Scientific anchors (see docs/MODEL.md for citations and numbers):
 
 ## 0. Repository layout and build constraints
 
+*(updated to the v0.2 layout; `src/model.js` became `src/engine.js` + `src/tissues/*.js`)*
+
 ```
 index.html            app shell: viewport + control panel + teaching text (repo version)
-src/model.js          pure simulation, ES module, runs in browser AND node (no DOM, no three)
-src/render.js         Three.js scene: fibers, cells, fields, load arrows; consumes model state
+src/engine.js         pure generic simulation engine, ES module, runs in browser AND node (no DOM, no three)
+src/tissues/*.js      tissue definitions (fibrous.js, cartilage.js, the starter _template.js)
+src/tissues/index.js  the registry: TISSUES + TISSUE_DEFAULT
+src/render.js         Three.js scene: fibers, gel, scaffold, cells, fields, load arrows; consumes engine state
 src/plots.js          2D canvas time-series + flux gauge (no deps)
-src/copy.js           student-facing text: dial explanations, scenarios, "try this" prompts
-src/app.js            wires model ↔ render ↔ UI; scenario presets; export JSON
+src/copy.js           shared student-facing copy helpers (per-tissue text lives in the definitions)
+src/app.js            wires engine ↔ render ↔ UI; the panel is generated from the definition; export JSON
 tools/build_single.mjs  inlines src/*.js into dist/tissue-weather.html (single-file artifact)
+tools/check_dist.mjs    rebuilds into a temp dir and fails if dist/ is stale
+tools/new_tissue.mjs    scaffolds and registers a new tissue definition
 tools/run_headless.mjs  node: run scenarios, dump CSV + JSON trajectory
 tools/plot_scenarios.py matplotlib check plots of the CSVs
-tests/model.test.mjs  node --test tests/*.test.mjs: invariants (mass ≥ 0, FA ∈ [0,1], scenarios diverge as expected)
+tests/engine.test.mjs   node --test tests/*.test.mjs: conformance per tissue, invariants, scenario checks, golden regression
+tests/build.test.mjs, tests/tools.test.mjs  build constraints and the developer tools
 blender/import_tissue.py  bpy script: JSON trajectory → animated fibers + cells (Blender 4.2 LTS)
+docs/EXTENDING.md     the v0.2 contract between the engine and a tissue definition
+docs/ARCHITECTURE.md  data flow, the single-file build, the file map
 docs/MODEL.md         equations, biology, parameter table with sources
 docs/TEACHING.md      lesson plan, guided experiments, misconception checks, where the metaphor breaks
 ```
@@ -42,15 +62,17 @@ docs/TEACHING.md      lesson plan, guided experiments, misconception checks, whe
 Hard constraints (the single-file artifact build depends on them):
 - Every `src/*.js` is an ES module with **named exports only**, **unique
   top-level identifiers across all files**, and local imports written exactly as
-  `import { a, b } from './model.js';` on one line. The build strips `export `
-  and local `import` lines and concatenates in order: copy, model, plots,
-  render, app.
+  `import { a, b } from './engine.js';` on one line. The build strips `export `
+  and local `import` lines and concatenates in order: copy, engine,
+  tissues/* (`index.js` last), plots, render, app. `tests/build.test.mjs`
+  enforces these three rules.
 - Three.js is loaded via an import map from
   `https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js` and
   `https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/` (addons). No other
   external hosts. No external CSS/images. Everything else inline.
-- `model.js` must not touch `window`, `document`, `performance`, or `Math.random`
-  directly — use an injected seeded PRNG (mulberry32) so runs are reproducible.
+- `engine.js` and every file under `src/tissues/` must not touch `window`,
+  `document`, `performance`, or `Math.random` directly — all randomness comes from
+  a seeded PRNG (mulberry32) so runs are reproducible.
 - Target 60 fps in a laptop browser with default settings (grid 12³, 160 cells).
 
 ## 1. Model
@@ -199,6 +221,11 @@ total degradation rate this step, rendered as a two-sided bar
 ```
 `tools/run_headless.mjs` writes the same format so Blender work never needs a browser.
 
+> **v0.2:** this is **format 1**. The current export is **format 2** — one array per matrix
+> species plus `meta.species` / `meta.cellTypes` — specified in
+> [`docs/EXTENDING.md`](EXTENDING.md) §5. It keeps `rho` and `phiMat` as aliases, and
+> `blender/import_tissue.py` still reads format 1.
+
 ## 2. Pedagogy (copy.js / docs/TEACHING.md)
 - Every dial has: a one-line biology label, the weather-metaphor hint, and a
   "what to watch" note. Scenario cards: goal, 3 steps, 1 question.
@@ -213,8 +240,8 @@ total degradation rate this step, rendered as a two-sided bar
 ## 3. Implementation notes — v0.1 as built
 
 The code departs from sections 1.2–1.5 where the spec's first-guess constants
-could not produce the scenario behaviours of 1.7. `src/model.js` carries the
-full tuning log in its header comment; `docs/MODEL.md` §4 lists the biology
+could not produce the scenario behaviours of 1.7. `src/tissues/fibrous.js` carries the
+full tuning log in its header comment (in v0.1 it lived in `src/model.js`); `docs/MODEL.md` §4 lists the biology
 reviewer's recommendations and which were adopted. Summary of the deviations:
 
 | item | spec | as built | why |

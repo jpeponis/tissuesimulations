@@ -1,6 +1,6 @@
 # Teaching with Tissue Weather
 
-A lesson plan for the *Tissue Weather* interactive (`docs/SPEC.md`) in an undergraduate or graduate tissue-engineering course. The session is built around **dynamic reciprocity**: the two-way loop in which cells build the extracellular matrix (ECM) and the matrix in turn instructs the cells (Bissell, Hall & Parry 1982). The cloud metaphor gets students in the door; the last ten minutes are about where it fails.
+A lesson plan for the *Tissue Weather* interactive (see the [README](../README.md) to get it running) in an undergraduate or graduate tissue-engineering course. The session is built around **dynamic reciprocity**: the two-way loop in which cells build the extracellular matrix (ECM) and the matrix in turn instructs the cells (Bissell, Hall & Parry 1982). The cloud metaphor gets students in the door; the last ten minutes are about where it fails.
 
 ## Learning objectives
 
@@ -25,6 +25,22 @@ By the end of the session a student can:
 - **48–50** Exit ticket: one place the metaphor breaks.
 
 Use 5 days per second for watching and 20 for the eight-week stretches.
+
+## Before class: the tissue picker and deep links
+
+**The tissue picker** sits at the top of the panel. Tissue Weather runs more than one tissue on the same engine: the default **fibrous connective tissue** (fibroblasts, collagen I under load) that this lesson uses throughout, and **cartilage in a degrading hydrogel** (round chondrocytes, proteoglycan gel, a scaffold that has to disappear at the right speed). Switching tissue replaces the dials, the scenarios, the readouts and the legend, because all of them are generated from the tissue's own definition — so the same lesson structure works for either, but the specific experiments below are written for the fibrous tissue. The cartilage tissue makes a good second session or a graduate extension: the same two arrows of dynamic reciprocity, a matrix whose stiffness comes from osmotic swelling rather than fibre tension, and a scaffold that is itself one of the variables.
+
+**Deep links** put the class where you want it in one click. The address bar keeps up with the current state — tissue, scenario, every dial and the playback speed — and the **Copy link** button copies it (use the button in embedded viewers, where the page is not allowed to rewrite the address bar). Paste those links into the slides, the LMS or the worksheet:
+
+```
+index.html?tissue=fibrous&scenario=maturation
+index.html?tissue=fibrous&scenario=fibrosis&speed=20
+index.html?tissue=fibrous&scenario=unloading&Gext=0.2&strain=0&protease=0.5&nCells=160
+```
+
+`tissue` and `scenario` take the keys shown in the picker and the scenario cards (`maturation`, `unloading`, `fibrosis`, `wound`, `sandbox`); each dial is set by its own key; `speed` is simulated days per real second. A value that does not exist is ignored and the scenario's own setting is used instead, so an old link never breaks a class.
+
+Three uses worth planning for: hand each pair a *different* dial setting of the same scenario and compare results at the board; put the "wrong" setting in the worksheet so students have to explain why it misbehaves; and ask students to send back the link of a state they could not explain — it reproduces exactly, seed and all.
 
 ## Guided experiments
 

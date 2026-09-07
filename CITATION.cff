@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use Tissue Weather in a course or in research, please cite it as below."
+title: "Tissue Weather"
+abstract: >-
+  A browser-based 3D teaching interactive for tissue engineering. A generic simulation engine
+  (voxel grid, matrix species, diffusible fields, cell agents, fiber orientation tensor) is
+  driven by plug-in tissue definitions; students turn environmental "weather" dials and watch
+  the extracellular matrix condense, align, mature, scar or evaporate through dynamic
+  reciprocity. Ships with fibrous connective tissue and cartilage in a degrading hydrogel,
+  a lesson plan, headless scenario tools and a Blender importer for cinematic renders.
+type: software
+authors:
+  - family-names: Peponis
+    given-names: John
+version: "0.2.0"
+date-released: "2026-09-07"
+license: MIT
+repository-code: "https://github.com/jpeponis/tissuesimulations"
+url: "https://jpeponis.github.io/tissuesimulations/"
+keywords:
+  - tissue engineering
+  - extracellular matrix
+  - dynamic reciprocity
+  - agent-based model
+  - teaching interactive
+  - simulation

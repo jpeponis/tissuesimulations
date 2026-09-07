@@ -1,5 +1,14 @@
 # Tissue Weather — scientific grounding of the model (v0.1)
 
+> **This is the v0.1 scientific record, and it is still current for the biology.** What changed
+> in v0.2 is only *where the numbers live*: the simulation was split into a generic engine and
+> plug-in tissue definitions, so the equations and constants below are now the `params` and
+> `makeRules()` of [`src/tissues/fibrous.js`](../src/tissues/fibrous.js) rather than a single
+> `src/model.js`. For the current structure read [`docs/EXTENDING.md`](EXTENDING.md) (the
+> contract) and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) (the map). The second tissue,
+> cartilage in a degrading hydrogel, has its own sourced specification in
+> [`docs/tissues/cartilage-hydrogel.md`](tissues/cartilage-hydrogel.md).
+
 Companion to `docs/SPEC.md` §1. Section 2 transcribes the equations of SPEC §1.2–1.5 and annotates
 each term with the process it stands for and the papers that justify its form. Section 3 tabulates
 every parameter against measured ranges. Section 4 lists concrete changes where the spec's defaults
@@ -257,6 +266,16 @@ relaxation of $T$ toward $\rho\hat z\hat z^{\mathsf T}$. Loerakker 2014 and Rist
 
 ## 3. Parameter table
 
+> **Where these values live now.** The "Spec default" column is the v0.1 specification, and the
+> "as built" values are listed in `docs/SPEC.md` §3. In v0.2 both are implemented as the `params`
+> block of [`src/tissues/fibrous.js`](../src/tissues/fibrous.js) (with the engine-level numerics —
+> `N`, `dt`, `rhoMax`, `kLoadFib`, `loadExp`, `fEvery`, `rCell`, `kRep` — in that file's `engine`
+> block, defaults in `ENGINE_DEFAULTS` in `src/engine.js`). That file's header carries the full
+> tuning log and says which recommendation of §4 was adopted. Change a number there, not here;
+> then re-run `npm test`, because `tests/golden/fibrous.json` holds the fibrous model to the
+> behaviour this table describes. The table itself stays: it is the measured range each constant
+> has to answer to.
+
 Physical conversions assume $L = 300\ \mu$m, so $h = 25\ \mu$m (about one fibroblast body width;
 cells in 3D are spindles 50–100 µm long) and 1 L/d = 12.5 µm/h.
 
@@ -290,7 +309,7 @@ cells in 3D are spindles 50–100 µm long) and 1 L/d = 12.5 µm/h.
 
 ## 4. Recommended changes
 
-> **Status in v0.1 (as built).** The implementation adopted items 1, 3, 4 (form; load-dependence retained), 5 (asymmetric τ only, no slow memory variable), 7, 8, 9 and 10; adopted 2 and 6 in part (`kGuide 6`, `σ 2.5 rad/√d`, a grip factor instead of the full tent); and did not adopt a pure stiffness gate (it kills the unloading scenario), the memory variable, or `rMat ≤ 0.03` (the >40 % unloading target then becomes unreachable; `rMat = 0.05`). The full table of built values is in `docs/SPEC.md` §3 and the header of `src/model.js`.
+> **Status in v0.1 (as built).** The implementation adopted items 1, 3, 4 (form; load-dependence retained), 5 (asymmetric τ only, no slow memory variable), 7, 8, 9 and 10; adopted 2 and 6 in part (`kGuide 6`, `σ 2.5 rad/√d`, a grip factor instead of the full tent); and did not adopt a pure stiffness gate (it kills the unloading scenario), the memory variable, or `rMat ≤ 0.03` (the >40 % unloading target then becomes unreachable; `rMat = 0.05`). The full table of built values is in `docs/SPEC.md` §3 and the header of `src/tissues/fibrous.js` (v0.1: `src/model.js`).
 
 1. **Fix the migration-speed conversion.** 30 µm/h is 720 µm/d = 2.4 L/d at L = 300 µm, not 0.7 L/d.
    Keep `v0 = 0.7 L/d` (≈ 9 µm/h, the low end of 3D fibroblast speeds; Hakkinen 2011, Sun 2004) and

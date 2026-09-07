@@ -1,92 +1,272 @@
 # Tissue Weather
 
-A browser-based 3D interactive for teaching **dynamic reciprocity** and
-**tissue maturation** in tissue engineering. A small cube of tissue is
-simulated as a cloud of extracellular-matrix (ECM) fibers and a population of
-fibroblast-like cells. Students turn four "weather" dials — growth-factor bath,
-mechanical load, protease activity, cell number — and watch the matrix
-condense, align, mature, scar, or evaporate as the cells respond to the very
-matrix they are building.
+**A browser-based 3D interactive for teaching *dynamic reciprocity* and tissue maturation in
+tissue engineering.** A small cube of tissue — extracellular matrix plus a population of cells —
+is simulated live. Students turn a handful of environmental "weather" dials and watch the matrix
+condense, align, mature, scar or evaporate as the cells respond to the very matrix they are
+building.
 
-The teaching metaphor: a tissue is like a cloud. Fibers are the droplets,
-soluble precursors and fragments are the vapour, and the environmental dials
-push the deposition ⟷ degradation equilibrium one way or the other. The
-interactive also shows where that metaphor breaks (slow turnover, crosslink
-irreversibility and hysteresis, cells as active agents that rewrite their own
-rules).
+The teaching metaphor: a tissue is like a cloud. Fibers are the droplets, soluble precursors and
+fragments are the vapour, and the dials push the deposition ⟷ degradation equilibrium one way or
+the other. The interactive also shows where that metaphor breaks — turnover takes weeks, not
+seconds; crosslinking is nearly irreversible, so the way down is not the way up; and cells are
+not droplets, they rewrite their own rules.
+
+Everything runs client-side. No install, no server, no account: one HTML file.
 
 ![Scaffold at day 0: a pale cloud of provisional fibers and round quiescent cells](docs/img/maturation-day0.png)
 ![The same tissue at day 40: dense amber fibers aligned with the load, spindle-shaped activated cells](docs/img/maturation-day40.png)
 
-Headless scenario curves (`node tools/run_headless.mjs` then `python3 tools/plot_scenarios.py`):
+## Two tissues
 
-![Scenario curves: density, maturity, alignment, stiffness, activation, deposition vs degradation](docs/img/scenarios.png)
+v0.2 split the simulation into a **generic engine** (`src/engine.js`: voxel grid, matrix species,
+diffusible fields, cell agents, fiber orientation tensor, numerics, stats, export) and **tissue
+definitions** (`src/tissues/*.js`) that say what the matrix is made of, what the cells do, which
+dials exist and which scenarios to teach. A tissue picker at the top of the panel switches
+between them; the dials, scenario cards, readouts, legend and About text are all generated from
+whichever definition is loaded.
 
-## Run it
+| tissue | what it teaches | dials | scenarios |
+|---|---|---|---|
+| **Fibrous connective tissue** (`fibrous`) | fibroblasts build, align and mature collagen I under load; stiffness feeds back on activation, which is what makes fibrosis self-sustaining and unloading self-defeating | growth-factor bath, mechanical load, protease activity, cell number | Scaffold to tissue · Unloading · Fibrosis · Wound healing · Sandbox |
+| **Articular cartilage in a hydrogel** (`cartilage`) | the deliberate anti-fibrous case: round, barely motile chondrocytes race a dissolving scaffold to build aggrecan and a collagen II network; stiffness comes from osmotic swelling held by collagen, not from fiber tension, and the cells can dedifferentiate into collagen I–making fibrocartilage | TGF-β3 bath, dynamic compression, oxygen tension, inflammation (IL-1), crosslink density, cell number, serum | Hydrogel to cartilage (the race) · Scaffold degrades too fast · Scaffold too dense · Fibrocartilage drift · Inflammatory breakdown |
 
-- **No install:** open `dist/tissue-weather.html` in a modern browser (Chrome,
-  Edge, Firefox, Safari 16.4+). It loads Three.js from jsdelivr, so it needs
-  internet access the first time.
-- **From source:** serve the repository root over HTTP (ES modules do not load
-  from `file://`) and open `index.html`:
-  ```
-  python3 -m http.server 8000
-  # then http://localhost:8000/
-  ```
-- **GitHub Pages:** Settings → Pages → *Deploy from a branch* → this branch,
-  folder `/ (root)`. `index.html` is Pages-ready as is.
+The cartilage tissue is specified — every number with a DOI, every scenario with
+machine-checkable targets — in
+[`docs/tissues/cartilage-hydrogel.md`](docs/tissues/cartilage-hydrogel.md), and implemented in
+`src/tissues/cartilage.js`. Both tissues run on the same engine, export the same trajectory
+format and are held to the same conformance tests; adding a third is one file and one registry
+line (see *Adding a tissue* below).
 
-Keyboard: space toggles play/pause. Drag to orbit, wheel to zoom.
+## Quick start — instructors
+
+**Get the page.** Any of these works; none needs Node, Python or a build step.
+
+- **Download and open.** `dist/tissue-weather.html` is the whole app in one file. Double-click
+  it. It fetches Three.js from jsdelivr the first time, so it needs internet on first load;
+  after that the browser cache carries it.
+- **GitHub Pages.** Settings → Pages → *Deploy from a branch* → your branch, folder `/ (root)`.
+  The site then lives at `https://<user>.github.io/<repo>/` — for this repository,
+  `https://jpeponis.github.io/tissuesimulations/`.
+- **From source.** Serve the repository root over HTTP (ES modules do not load from `file://`)
+  and open `index.html`: `npm run serve` → <http://localhost:8000/>.
+
+**Link straight to the moment you want.** The URL carries the whole state and the app keeps it
+current as you teach, so you can copy a link mid-demo (there is a **Copy link** button) and paste
+it into the slide deck or the LMS:
+
+```
+index.html?tissue=fibrous&scenario=fibrosis
+index.html?tissue=fibrous&scenario=maturation&Gext=0.9&strain=0.2&protease=0.2&nCells=240&speed=5
+index.html?tissue=cartilage&scenario=toofast&speed=20
+```
+
+`tissue` and `scenario` take the keys from the table above; every dial of that tissue is accepted
+by its own key; `speed` is simulated days per real second. Unknown or out-of-range values fall
+back to the scenario's own settings, so a stale link never breaks the page.
+
+**On a projector.**
+
+- Full-screen the browser. Above 900 px wide the 3D view and the panel sit side by side; below
+  that they stack, with the tissue on top — useful on a tall classroom screen.
+- Speed: **5 d/s** for watching something happen, **20 d/s** for the eight-week stretches. The
+  hint under the slider tells you what a week costs in real seconds.
+- The **Table** button under the readouts prints the current values as text — readable from the
+  back row, and it is also what a screen reader gets.
+- Press **R** between runs: the previous run stays on the charts as dashed ghost traces, which is
+  the whole point of the predict-then-run experiments. **Clear comparison** removes them.
+- The scene auto-rotates slowly and stops on your first drag. A machine set to
+  *prefers-reduced-motion* never auto-rotates.
+- Dark room, dark page: the background is near-black by design, so the fibers and cells carry the
+  contrast.
+
+**Teach with it.** [`docs/TEACHING.md`](docs/TEACHING.md) has the learning objectives, a
+50-minute outline, five guided experiments (predict → observe → explain), three misconceptions
+the interactive is built to break, an assessment worksheet and the full reference list.
+
+## Quick start — students
+
+1. Open the page. You are looking at a cube of tissue about 300 µm on a side: rods are matrix
+   fibers, the small bodies are cells (blue when quiet, orange when activated).
+2. Pick a scenario from the row of cards. Read its **goal**, then its **question** — answer it
+   out loud *before* you press Play.
+3. Press **Play** (or Space). Watch the readouts in the panel: matrix density, alignment and
+   activation, stiffness, and the flux gauge that shows deposition against degradation right now.
+   The sentence in the top-left corner of the 3D view says, in words, which way the equilibrium is
+   leaning and why.
+4. Turn one dial at a time and wait a simulated week. Ask which readout moved *first*.
+5. Press **R** to restart the scenario. The run you just did stays as dashed lines so you can
+   compare.
+6. Drag to orbit, scroll to zoom. The layer chips turn the growth-factor and protease clouds on.
+
+## Controls
+
+| key | action |
+|---|---|
+| `Space` | play / pause |
+| `R` | reset the scenario (the previous run stays as dashed ghost traces) |
+| `I` | injure — a spherical wound at a random spot (only for tissues that support it) |
+| `1` – `5` | load the *n*-th scenario (up to `9`; the fibrous tissue has five) |
+| `←` `→` | nudge the focused dial; `Home` / `End` jump to its extremes |
+| `Tab` | move between controls; the 3D view is focusable and describes itself |
+
+Buttons: **Play**, **+1 day**, **Reset**, **Injure** (hidden for tissues without an injury
+model), **Copy link**, **Table**, **Clear comparison**, and *Export trajectory (JSON for
+Blender)* in the About panel. Mouse: drag to orbit, wheel to zoom.
 
 ## What is in the box
 
 | path | what |
 |---|---|
-| `index.html`, `src/` | the app: `model.js` (simulation, no DOM), `render.js` (Three.js scene), `plots.js` (readouts), `copy.js` (student-facing text), `app.js` (wiring) |
-| `dist/tissue-weather.html` | single-file build of the app (`node tools/build_single.mjs`) |
-| `docs/SPEC.md` | the design specification the code implements |
-| `docs/MODEL.md` | equations, biology, parameter table with sources, known simplifications |
+| `index.html` | the app shell: layout, CSS, the Three.js import map, the teaching text |
+| `src/engine.js` | the generic simulation engine — grid, matrix species, orientation tensor, fields, cells, numerics, stats, export. Knows nothing about any particular tissue |
+| `src/tissues/` | the tissue definitions: `fibrous.js`, `cartilage.js`, the registry `index.js`, and `_template.js` (a commented starter that the test suite keeps working) |
+| `src/render.js` | the Three.js scene: fiber rods, gel haze, scaffold lattice, cells, field clouds, load arrows |
+| `src/plots.js` | the readouts: rolling time-series strips with ghost traces, and the flux gauge |
+| `src/copy.js` | the copy every tissue shares: the live equilibrium sentence and the formatters |
+| `src/app.js` | the wiring: picker, dials, scenario cards, readouts, legend, About, keyboard, deep links, export |
+| `dist/tissue-weather.html` | the single-file build (`npm run build`); `dist/tissue-weather.artifact.html` is the same page as a fragment |
+| `docs/EXTENDING.md` | **the contract**: what a tissue definition looks like and what the engine, renderer, app, tools and tests promise |
+| `docs/ARCHITECTURE.md` | the map: data flow, the single-file build, one line per file |
+| `docs/SPEC.md` | the v0.1 design record (kept for provenance) |
+| `docs/MODEL.md` | biology, equations, parameter table with sources, known simplifications |
 | `docs/TEACHING.md` | learning objectives, 50-minute lesson, guided experiments, misconceptions, assessment |
-| `blender/` | `import_tissue.py` turns an exported trajectory into an animated Blender scene for cinematic renders; see `blender/README.md` |
-| `tools/run_headless.mjs` | runs the scenarios in Node, writes CSV stats and JSON trajectories |
-| `tools/plot_scenarios.py` | matplotlib panel of the headless runs |
-| `tests/` | `node --test tests/*.test.mjs` — invariants and qualitative scenario checks |
+| `docs/tissues/cartilage-hydrogel.md` | the literature specification behind the cartilage tissue, every number with a DOI |
+| `tools/` | `build_single.mjs`, `check_dist.mjs`, `new_tissue.mjs`, `run_headless.mjs`, `make_golden.mjs`, `plot_scenarios.py`, `screenshot_app.mjs`, `render_smoke.mjs` |
+| `tests/` | `engine.test.mjs` (conformance for every tissue + the golden regression), `build.test.mjs`, `tools.test.mjs`, `golden/` |
+| `blender/` | `import_tissue.py` turns an exported trajectory into an animated Blender 4.2 scene; see [`blender/README.md`](blender/README.md) |
+| `CONTRIBUTING.md` | dev setup, the build constraints and why they exist, the PR checklist |
+
+## Running the tools
+
+Node ≥ 20, and **no dependencies** — there is nothing to install.
+
+| command | what it does |
+|---|---|
+| `npm test` | `node --test tests/*.test.mjs`: conformance for every registered tissue (schema, determinism, invariants, every scenario's checks, performance), the fibrous golden regression, the engine API, the build constraints and the tools |
+| `npm run build` | writes `dist/tissue-weather.html` and `dist/tissue-weather.artifact.html` |
+| `npm run check-dist` | rebuilds into a temp directory and fails if the committed `dist/` is stale |
+| `npm run headless` | runs every scenario of a tissue in Node → `scratch/<tissue>/<run>.csv` (stats over time) and `<run>.json` (a format-2 trajectory). Flags after `--`, e.g. `npm run headless -- --tissue fibrous --days 40` |
+| `npm run golden` | re-records the golden reference — read `CONTRIBUTING.md` first |
+| `npm run new-tissue -- <key> "<Name>"` | scaffolds and registers a new tissue definition |
+| `npm run screenshot` | drives the real app in headless Chromium (needs Playwright) and saves screenshots |
+| `npm run serve` | `python3 -m http.server 8000` from the repository root |
+| `python3 tools/plot_scenarios.py --dir scratch/fibrous` | matplotlib panels of the headless CSVs (needs matplotlib; the columns it plots have to match the CSV header, which each tissue generates from its own species and fields) |
+
+Headless scenario curves, from `npm run headless` and `tools/plot_scenarios.py`:
+
+![Scenario curves: density, maturity, alignment, stiffness, activation, deposition vs degradation](docs/img/scenarios.png)
+
+## Adding a tissue
+
+Five steps; the contract is [`docs/EXTENDING.md`](docs/EXTENDING.md) and the details are in its
+§8.
+
+1. **Scaffold it.** `npm run new-tissue -- mytissue "My tissue"` copies
+   `src/tissues/_template.js` to `src/tissues/mytissue.js`, renames the identifiers and registers
+   it in `src/tissues/index.js`.
+2. **Describe the tissue.** Fill in `species` (what the matrix is made of: `fiber`, `gel` or
+   `scaffold`), `fields` (what diffuses), `cellTypes`, `dials`, and at least two `scenarios` —
+   each with `checks`, the machine-checkable version of the teaching claim.
+3. **Write the rules.** `makeRules(engine, params)` returns `cell(ctx)` and `voxel(ctx)`: what a
+   cell secretes and how it changes, and what happens to the matrix in a voxel. Start from the
+   template's rules and change one thing at a time.
+4. **Watch the curves.** `npm run headless -- --tissue mytissue`, then
+   `python3 tools/plot_scenarios.py --dir scratch/mytissue`. Tune until
+   `npm test` passes — the suite runs your scenarios' checks automatically.
+5. **Ship it.** `npm run build`, then open `index.html?tissue=mytissue`.
+
+Nothing else has to change: the renderer, the plots, the panel, the export format, the Blender
+importer and the test suite are all written against the contract, not against a tissue.
 
 ## The model in one paragraph
 
-Each ECM voxel carries a structure tensor (density + fiber orientation +
-anisotropy), a mature-collagen fraction, and two diffusible fields (a TGF-β–like
-growth factor and MMP-like protease activity). Cells sense local stiffness,
-growth factor and tension, and integrate them into an activation level
-(fibroblast → myofibroblast). Activation sets how much oriented matrix a cell
-deposits, how strongly it realigns fibers by traction, how fast it moves, and
-how much protease and growth factor it releases. Deposited matrix stiffens the
-voxel, which feeds back on activation — the loop that makes fibrosis
-self-sustaining and unloading self-defeating. Mechanical load aligns fibers and
-cells along the load axis and raises sensed tension. Details and sources are in
-`docs/MODEL.md`; the scenario expectations are checked in `tests/`.
+Each voxel carries the densities of the tissue's matrix species, a shared fiber orientation
+tensor (density, direction, anisotropy) and the local values of the diffusible fields. Cells are
+agents with a position, a polarity and a few state scalars; they sense local stiffness, growth
+factor and tension, and integrate them into an activation level. Activation sets how much
+oriented matrix a cell deposits, how strongly it realigns fibers by traction, how fast it moves,
+and how much protease and growth factor it releases. Deposited matrix stiffens the voxel, which
+feeds back on activation — the loop that makes fibrosis self-sustaining and unloading
+self-defeating. Mechanical load aligns fibers and cells along the load axis and raises sensed
+tension. The engine owns the numerics; the equations and constants live in the tissue
+definitions, which is why the two tissues can behave so differently on the same machinery.
+Sources and the parameter table are in [`docs/MODEL.md`](docs/MODEL.md); the scenario
+expectations are enforced in `tests/`.
+
+## Browser support
+
+Chrome/Edge 89+, Firefox 108+, Safari 16.4+ — the binding requirement is **import maps** (used to
+load Three.js) plus WebGL 2. Any laptop GPU from the last decade runs the default settings
+(12³ voxels, 160 cells) at 60 fps; there is no mobile-specific layout, but the page stacks and
+remains usable on a tablet. If Three.js cannot be reached, the page says so and explains how to
+put the two library files next to the HTML.
+
+## Known limitations
+
+- **The matrix is a summary, not a structure.** A voxel stores densities, an orientation tensor
+  and field values; there are no individual fibrils, no basement membrane, no cell–cell junctions.
+- **Numbers are illustrative.** Rates were chosen so a lesson fits in a class hour: adult collagen
+  turns over in years, not weeks. Read the traces qualitatively; the *shapes* and the *orderings*
+  are what the scenario checks pin down, not the absolute values.
+- **Cells do not divide or die**, and one growth factor plus one protease dial stand in for whole
+  signalling families. There are no immune cells, so an injury is a burst of signal, not
+  inflammation with a cast of characters.
+- **Load is static and uniaxial** along z, and there is no compaction of the construct.
+- **Small domain, seeded randomness.** 12³ voxels ≈ 300 µm on a side; a different seed moves the
+  cells and the wound site, though the population behaviour is stable.
+- **The 3D scene needs a GPU and a CDN.** The first load fetches Three.js; a sandboxed viewer that
+  blocks downloads also blocks *Export trajectory*.
+- Per-tissue caveats are listed in each tissue's About panel and in `docs/MODEL.md` §5 (fibrous)
+  and `docs/tissues/cartilage-hydrogel.md` §6 (cartilage).
 
 ## Blender
 
-Export a trajectory from the app (About → *Export trajectory*), then:
+Run a scenario, then use **About → Export trajectory (JSON for Blender)** — or skip the browser
+entirely with `npm run headless`, which writes the same format. Then:
 
-```
-blender --background --python blender/import_tissue.py -- --input tissue-weather-maturation-day60.json --out render.png --all-frames
+```bash
+blender --background --python blender/import_tissue.py -- \
+    --input scratch/fibrous/maturation_traj.json --out render.png --all-frames
 ```
 
-See `blender/README.md` for the GUI workflow, renderer switches and limits.
+[`blender/README.md`](blender/README.md) covers the GUI workflow, the trajectory formats, the
+renderer switches, the synthetic sample trajectories (no browser or Node needed) and the limits.
 
 ## Scientific anchors
 
-- Metzcar et al. 2024, *A simple framework for agent-based modeling with
-  extracellular matrix*, Bull. Math. Biol. — ECM elements with density,
-  anisotropy and orientation remodelled by cells.
-- Zeigler, Richardson, Holmes & Saucerman 2016 — fibroblast signalling network:
-  TGF-β and mechanical input → collagen and MMP output.
-- Loerakker, Ristori & Baaijens 2016 — strain-driven collagen alignment in
-  engineered tissue.
-- Bissell, Hall & Parry 1982 — dynamic reciprocity.
+- Metzcar J, Duggan BS, Fischer B, Murphy M, Heiland R, Macklin P (2025). A simple framework for
+  agent-based modeling with extracellular matrix. *Bull Math Biol* 87:43 — ECM elements with
+  density, anisotropy and orientation, remodelled by cells.
+- Zeigler AC, Richardson WJ, Holmes JW, Saucerman JJ (2016). *J Mol Cell Cardiol* 94:72–81 —
+  fibroblast signalling network: TGF-β and mechanical input → collagen and MMP output.
+- Hinz B (2015). *Matrix Biol* 47:54–65 — latent TGF-β stored in the matrix and activated by
+  contractile cells on stiff substrate: the feedback that keeps fibrosis going.
+- Loerakker S, Obbink-Huizer C, Baaijens FPT (2014). *Biomech Model Mechanobiol* 13:985–1001 —
+  strain-driven collagen alignment in engineered tissue.
+- Bissell MJ, Hall HG, Parry G (1982). *J Theor Biol* 99:31–68 — dynamic reciprocity.
+
+Full citations with DOIs: [`docs/MODEL.md`](docs/MODEL.md) and
+[`docs/TEACHING.md`](docs/TEACHING.md); the cartilage sources are in
+[`docs/tissues/cartilage-hydrogel.md`](docs/tissues/cartilage-hydrogel.md).
+
+## Citing
+
+If you use Tissue Weather in a course or in a paper, cite it as software —
+[`CITATION.cff`](CITATION.cff) has the machine-readable version (GitHub's *Cite this repository*
+button reads it):
+
+> Peponis, J. (2026). *Tissue Weather* (version 0.2.0) [software].
+> https://github.com/jpeponis/tissuesimulations
+
+## Contributing
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md): setup, the commands above, the three build constraints that
+make the single-file page possible and why they are load-bearing, when regenerating the golden
+regression is legitimate, and the PR checklist.
 
 ## Licence
 
-MIT for the code. Course text under CC BY 4.0.
+**MIT** for the code. The **course text** — the documentation prose and the student-facing copy —
+is also available under **CC BY 4.0**, so you can adapt it for your own class with attribution.
+See [`LICENSE`](LICENSE).

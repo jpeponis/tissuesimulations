@@ -1,0 +1,38 @@
+{
+  "name": "tissue-weather",
+  "version": "0.2.0",
+  "private": true,
+  "description": "A browser 3D teaching interactive for tissue engineering: a generic simulation engine plus tissue definitions (fibrous connective tissue, cartilage in a degrading hydrogel).",
+  "type": "module",
+  "license": "MIT",
+  "author": "John Peponis",
+  "homepage": "https://github.com/jpeponis/tissuesimulations",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jpeponis/tissuesimulations.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jpeponis/tissuesimulations/issues"
+  },
+  "keywords": [
+    "tissue-engineering",
+    "teaching",
+    "simulation",
+    "extracellular-matrix",
+    "three.js",
+    "agent-based-model"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "build": "node tools/build_single.mjs",
+    "check-dist": "node tools/check_dist.mjs",
+    "headless": "node tools/run_headless.mjs",
+    "golden": "node tools/make_golden.mjs",
+    "screenshot": "node tools/screenshot_app.mjs",
+    "serve": "python3 -m http.server 8000",
+    "new-tissue": "node tools/new_tissue.mjs"
+  }
+}
