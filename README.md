@@ -256,7 +256,7 @@ If you use Tissue Weather in a course or in a paper, cite it as software —
 [`CITATION.cff`](CITATION.cff) has the machine-readable version (GitHub's *Cite this repository*
 button reads it):
 
-> Peponis, J. (2026). *Tissue Weather* (version 0.2.0) [software].
+> Peponis, J. (2026). *Tissue Weather* (version 0.3.0) [software].
 > https://github.com/jpeponis/tissuesimulations
 
 ## Contributing

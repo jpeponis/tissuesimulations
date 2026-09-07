@@ -1,4 +1,4 @@
-# Architecture (v0.2)
+# Architecture (v0.3)
 
 One page on how Tissue Weather is put together: what flows where, how the single-file build
 works, and what every file is for. The **contract** between the engine and a tissue is

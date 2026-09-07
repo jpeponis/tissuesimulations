@@ -1,6 +1,6 @@
 {
   "name": "tissue-weather",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "A browser 3D teaching interactive for tissue engineering: a generic simulation engine plus tissue definitions (fibrous connective tissue, cartilage in a degrading hydrogel).",
   "type": "module",
