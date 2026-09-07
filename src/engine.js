@@ -44,9 +44,11 @@
  *                    equal shares).
  *  init.from         pre-runs `from.scenario` for `from.days` in a fresh engine
  *                    with seed + 1 (v0.1 convention: the pre-run's RNG stream
- *                    differs from the main run's), without that scenario's
- *                    events, and copies species, T, principal axes, fields and
- *                    cells.  Cached per (scenario, days, seed) in the instance.
+ *                    differs from the main run's) and copies species, T, principal
+ *                    axes, fields and cells.  `from.events: true` replays the source
+ *                    scenario's events during the pre-run (default false: v0.1
+ *                    behaviour); `from.dials` overrides its dials.  Cached per
+ *                    (scenario, days, seed, events, dials) in the instance.
  *                    Chains (from → from) are allowed up to depth 4.
  *  scenario.events   OPTIONAL `events: [{ at, dials }, { at, injure: { center?, radius? } }]`
  *                    applied by checkScenario() and the headless tools when the
@@ -54,7 +56,10 @@
  *                    treat them as suggestions (v0.1 never auto-injured).
  *  checks            `{ at, stat, op, value }` or `{ at, stat, rel: { stat, op, at? }, value? }`:
  *                    with `rel` the check passes when stat(at) op (rel.stat at
- *                    rel.at (default: same day) + value (default 0)).
+ *                    rel.at (default: same day) + value (default 0)).  `at` may also be a
+ *                    WINDOW `[from, to]` with `agg: 'min' | 'max' | 'mean' | 'first'`, which
+ *                    checkScenario evaluates on samples every 0.5 d inside the window (a
+ *                    `rel` reference day then defaults to `from`).
  *  cell hook outputs out.a / out.b are pre-filled with the current values (so a
  *                    hook that does not write them leaves the state unchanged);
  *                    out.aSum is pre-filled with NaN and the engine substitutes
@@ -69,6 +74,49 @@
  *                    passive load alignment, the trace clamp (T AND the fiber
  *                    species are scaled), the PSD guard.  A fiber total that
  *                    appears in a voxel with a zero tensor is added isotropically.
+ *  species.D/sink    OPTIONAL per-species transport (v0.3, off unless the species declares it).
+ *                    `D` (L²/day) diffuses the species AFTER the voxel pass with the same
+ *                    explicit 6-neighbour zero-flux scheme as the fields (the per-face
+ *                    diffusion number is clamped ≤ 1/6, so the pass is unconditionally
+ *                    stable); `sink` (/day) removes sink·rho·dt from the +z face layer only
+ *                    (`boundary: 'face:+z'`, the only species boundary — "washes out into the
+ *                    medium").  A FIBER species carries its share of the orientation tensor
+ *                    with it: the tensor flux across a face is (mass flux)·T(source)/
+ *                    fiberTotal(source), which keeps trace(T) = Σ fiber species exact; after
+ *                    the pass T is rescaled onto the new fiber total and FA / the principal
+ *                    axis are refreshed (same math as the voxel pass, same fEvery cadence).
+ *                    Transport is hindered by the voxel hook's OPTIONAL out.mobility ∈ [0,1]
+ *                    (default 1, e.g. a tight hydrogel mesh); a face uses the mean of its two
+ *                    voxels.  Sink loss counts as degradation, or as scaffoldFlux for a
+ *                    species of kind 'scaffold'.
+ *  out.mobility      voxel-hook output, only read when some species has D (see above).
+ *  out.polS/alignS   OPTIONAL per-fiber-species orientation of a cell's deposition
+ *                    (Float32Array indexed by SPECIES index).  They are read only when the
+ *                    hook sets out.usePolS = true (one store per cell otherwise); an entry
+ *                    left NaN falls back to the scalar out.pol / out.align, and the engine
+ *                    refills both arrays with NaN after a cell that used them.  polS is exact
+ *                    (each fiber species is deposited with its own orientation strength);
+ *                    T is shared, so alignS is applied as ONE realignment rate, the mean of
+ *                    alignS weighted by the post-deposition local density of each fiber
+ *                    species (nothing to realign ⇒ rate 0).
+ *  out.vox[k]        general per-voxel accumulators, k < engine.vox (ENGINE_DEFAULTS.vox = 1,
+ *                    max 4), summed over the cells of a voxel and handed to voxel() as
+ *                    ctx.vox[k].  Accumulator 0 IS the legacy aSum: it defaults to NaN and the
+ *                    engine substitutes out.aSum, or the cell's new `a` when that is NaN too;
+ *                    accumulators 1..3 default to 0.  ctx.aSum stays an alias of ctx.vox[0].
+ *  out.scaffoldLoss  voxel-hook output (≥ 0): dissolution of a 'scaffold' species, which is
+ *                    neither deposition nor degradation of tissue.  stats().scaffoldFlux is
+ *                    its mean per-voxel rate (a third flux bar).
+ *  cellType.states   `[{ key: 'a'|'b'|'c', label, range }]` labels and ranges the cell scalars;
+ *                    `stateLabels` / `cRange` remain accepted aliases (TissueEngine.cellStates
+ *                    merges the two forms).  Only `c` may have a range other than [0, 1]:
+ *                    the renderer maps a and b on [0, 1].
+ *  cellType.radius   number, or `{ by: 'a'|'b', min, max }` — validated here, consumed by the
+ *                    renderer; exportMeta emits the state-0 value as `radius` (so format-2
+ *                    readers keep working) plus `radiusBy` when it varies.
+ *  engine.scratch    a plain object the engine creates once per instance and never touches.
+ *                    makeRules() may allocate per reset and cache arrays there (e.g. a
+ *                    neighbour table for this N) instead of on a module-level map.
  *  field.boundary    OPTIONAL 'bath' (default: relaxation toward the bath dial
  *                    everywhere at kBath) or 'face:+z' / 'face:-z' (Dirichlet:
  *                    the voxels of that z layer are held at the bath dial's value
@@ -86,15 +134,22 @@
  *  stats().fz        Tzz / trace of the MEAN tensor (alignment with the load
  *                    axis; 1/3 when there is no fiber).  ratio = deposition /
  *                    degradation (Infinity if only deposition, 1 if both are 0).
- *  stat(path)        also accepts 'fz', 'cells.n', 't' and 'species.fiberTotal'.
- *  exportMeta(extra) merges `extra` (e.g. { exportEveryDays }) into the meta.
+ *                    species.total includes the scaffold
+ *                    species, species.tissueTotal does not; stats().scaffold is their sum.
+ *                    cumDeposition / cumDegradation are the integrals of deposition and
+ *                    degradation since the last reset (density, not density/day).
+ *  stat(path)        also accepts 'fz', 'cells.n', 't', 'species.fiberTotal',
+ *                    'species.tissueTotal', 'scaffold', 'scaffoldFlux', 'cumDeposition' and
+ *                    'cumDegradation'.
+ *  exportMeta(extra) merges `extra` (e.g. { exportEveryDays }) into the meta; `loadDial` and
+ *                    `cellCountDial` name the dials with those roles (null when there is none).
  *  woundStats()      means inside the last wound sphere (null without a wound).
  *  checkScenario     `{ seed = 7, engine }`: pass an existing engine of the same
  *                    tissue to reuse its init.from cache.
  * ---------------------------------------------------------------------------
  */
 
-export const ENGINE_VERSION = '0.2.0';
+export const ENGINE_VERSION = '0.3.0';
 
 /** Engine-level numerics; a tissue's `engine` block and constructor `overrides` are merged over these. */
 export const ENGINE_DEFAULTS = Object.freeze({
@@ -111,6 +166,7 @@ export const ENGINE_DEFAULTS = Object.freeze({
   trace: 'fiber',   // T trace = Σ fiber species (the only supported mode)
   nCellsMax: 400,   // minimum capacity of the cell arrays
   eps: 1e-6,        // fiber total below which a voxel's tensor is zeroed
+  vox: 1,           // per-voxel cell accumulators out.vox[0..vox−1] (1..4; 0 is the legacy aSum)
 });
 
 /** mulberry32 PRNG: returns a function producing uniform floats in [0,1). */
@@ -138,6 +194,14 @@ const ENGINE_OPS = Object.freeze({
   lt: (a, b) => a < b,
   between: (a, b) => Array.isArray(b) && a >= b[0] && a <= b[1],
 });
+const ENGINE_AGGS = Object.freeze({
+  min: (a) => Math.min(...a),
+  max: (a) => Math.max(...a),
+  mean: (a) => a.reduce((x, y) => x + y, 0) / a.length,
+  first: (a) => a[0],
+});
+/** Species keys the stat paths reserve (species.total & co. would be shadowed). */
+const ENGINE_RESERVED_SPECIES = Object.freeze(['total', 'fiberTotal', 'tissueTotal']);
 const ENGINE_FORMATS = Object.freeze(['fixed2', 'percent', 'cells', 'int', 'onoff']);
 const ENGINE_HEX = /^#[0-9a-fA-F]{6}$/;
 const ENGINE_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -155,8 +219,13 @@ function engineStatFrom(s, path) {
     case 'deposition': return s.deposition;
     case 'degradation': return s.degradation;
     case 'ratio': return s.ratio;
+    case 'cumDeposition': return s.cumDeposition;
+    case 'cumDegradation': return s.cumDegradation;
+    case 'scaffold': return s.scaffold;
+    case 'scaffoldFlux': return s.scaffoldFlux;
     case 'species.total': return s.species.total;
     case 'species.fiberTotal': return s.species.fiberTotal;
+    case 'species.tissueTotal': return s.species.tissueTotal;
     case 'fiber.total': return s.species.fiberTotal;
     case 'cells.a': return s.cells.a;
     case 'cells.b': return s.cells.b;
@@ -175,6 +244,7 @@ function engineStatFrom(s, path) {
 function engineStatPathValid(tissue, path) {
   if (typeof path !== 'string') return false;
   if (['t', 'fa', 'globalFA', 'fz', 'logE', 'E', 'deposition', 'degradation', 'ratio', 'species.total', 'species.fiberTotal',
+    'species.tissueTotal', 'scaffold', 'scaffoldFlux', 'cumDeposition', 'cumDegradation',
     'fiber.total', 'cells.a', 'cells.b', 'cells.c', 'cells.n'].includes(path)) return true;
   const p = path.split('.');
   const sKeys = (tissue.species || []).map((s) => s.key), fKeys = (tissue.fields || []).map((f) => f.key);
@@ -213,6 +283,24 @@ export class TissueEngine {
     tissue.species.forEach((s, i) => { if (s.kind === 'fiber') { this._isFiber[i] = 1; fiberIdx.push(i); } });
     this._fiberIdx = Int32Array.from(fiberIdx);
     this._lastFiber = fiberIdx.length ? fiberIdx[fiberIdx.length - 1] : -1;
+    // OPT-IN species transport: D (L²/day) diffuses, sink (/day) drains the +z face layer
+    this._isScaffold = new Uint8Array(this.nSpecies);
+    this._sD = new Float64Array(this.nSpecies); this._sSink = new Float64Array(this.nSpecies);
+    const diffIdx = [], sinkIdx = [];
+    tissue.species.forEach((s, i) => {
+      if (s.kind === 'scaffold') this._isScaffold[i] = 1;
+      if (s.D > 0) { this._sD[i] = s.D; diffIdx.push(i); }
+      if (s.sink > 0) { this._sSink[i] = s.sink; sinkIdx.push(i); }
+    });
+    this._diffIdx = Int32Array.from(diffIdx); this._sinkIdx = Int32Array.from(sinkIdx);
+    this._anyTransport = diffIdx.length > 0 || sinkIdx.length > 0;
+    this._anyFiberD = diffIdx.some((i) => this._isFiber[i]);
+    this._anyFiberMoves = this._anyFiberD || sinkIdx.some((i) => this._isFiber[i]);
+    this._mob = diffIdx.length ? new Float64Array(NV).fill(1) : null;   // voxel hook out.mobility
+    this._sDelta = diffIdx.length ? new Float64Array(NV) : null;
+    this._tDelta = this._anyFiberD ? new Float64Array(6 * NV) : null;   // 6 components per voxel, interleaved
+    this._fiberArrays = this._anyFiberMoves ? new Array(fiberIdx.length) : null;
+    this._tScaf = 0;
 
     // ---- orientation tensor and derived per-voxel fields
     this.Txx = new Float32Array(NV); this.Tyy = new Float32Array(NV); this.Tzz = new Float32Array(NV);
@@ -274,8 +362,9 @@ export class TissueEngine {
     this._typeInitA = Float64Array.from(tissue.cellTypes.map((c) => (c.init && c.init.a) || 0));
     this._typeInitB = Float64Array.from(tissue.cellTypes.map((c) => (c.init && c.init.b) || 0));
     this._typeInitC = Float64Array.from(tissue.cellTypes.map((c) => (c.init && c.init.c) || 0));
-    this._typeCMin = Float64Array.from(tissue.cellTypes.map((c) => (c.cRange ? c.cRange[0] : 0)));
-    this._typeCMax = Float64Array.from(tissue.cellTypes.map((c) => (c.cRange ? c.cRange[1] : 1)));
+    const cRangeOf = (c) => { const st = (c.states || []).find((s) => s.key === 'c' && Array.isArray(s.range)); return st ? st.range : (c.cRange || [0, 1]); };
+    this._typeCMin = Float64Array.from(tissue.cellTypes.map((c) => cRangeOf(c)[0]));
+    this._typeCMax = Float64Array.from(tissue.cellTypes.map((c) => cRangeOf(c)[1]));
     this._cx = new Float32Array(3 * this.cap);
     this._cp = new Float32Array(3 * this.cap);
     this._ca = new Float32Array(this.cap);
@@ -288,9 +377,15 @@ export class TissueEngine {
     this._views = { n: -1, cx: null, cp: null, ca: null, cb: null, cc: null, ctype: null };
     this.nCells = 0;
 
-    // ---- per-step scratch
-    this._aSum = new Float64Array(NV);
+    // ---- per-step scratch: `vox` per-voxel accumulators (0 is the legacy aSum)
+    const nVox = this.nVox = Math.max(1, Math.min(4, P.vox | 0));
+    this._acc = [];
+    for (let q = 0; q < nVox; q++) this._acc.push(new Float64Array(NV));
+    this._aSum = this._acc[0];
     this._cellCount = new Int32Array(NV);
+
+    // ---- a place for makeRules() to cache per-reset allocations (never touched by the engine)
+    this.scratch = {};
 
     // ---- reusable hook contexts (monomorphic: every field initialised once)
     const self = this;
@@ -300,19 +395,22 @@ export class TissueEngine {
       field: new Float32Array(this.nFields), E: 0, dial: this._dialVals, load: 0, cellsInVoxel: 0,
       rng: () => self.rng(),
       out: { a: 0, b: 0, c: 0, secrete: new Float64Array(this.nSpecies), pol: 0, align: 0, fieldSrc: new Float64Array(this.nFields),
-        speed: 0, guide: 0, loadAlign: 0, noise: 0, aSum: 0 },
+        speed: 0, guide: 0, loadAlign: 0, noise: 0, aSum: 0, vox: new Float64Array(nVox),
+        usePolS: false, polS: new Float32Array(this.nSpecies).fill(NaN), alignS: new Float32Array(this.nSpecies).fill(NaN) },
     };
     this._vctx = {
       v: 0, dt: this.dt, rho: new Float32Array(this.nSpecies), fiberTotal: 0, fa: 0, Tzz_over_trace: 0,
-      field: new Float32Array(this.nFields), dial: this._dialVals, load: 0, aSum: 0, nCellsHere: 0, inflam: 0,
-      out: { dRho: new Float64Array(this.nSpecies), loss: 0, fieldSrc: new Float64Array(this.nFields), E: 0 },
+      field: new Float32Array(this.nFields), dial: this._dialVals, load: 0, aSum: 0, vox: new Float64Array(nVox),
+      nCellsHere: 0, inflam: 0,
+      out: { dRho: new Float64Array(this.nSpecies), loss: 0, scaffoldLoss: 0, fieldSrc: new Float64Array(this.nFields), E: 0, mobility: 1 },
     };
 
     this.rules = null;
     this.scenario = null;
     this.time = 0; this.stepCount = 0;
     this.wound = null;
-    this._lastDep = 0; this._lastDeg = 0;
+    this._lastDep = 0; this._lastDeg = 0; this._lastScafLoss = 0;
+    this._cumDep = 0; this._cumDeg = 0;
     this._fromCache = new Map();
 
     this.reset(tissue.scenarios[0].key);
@@ -337,7 +435,9 @@ export class TissueEngine {
     this.rng = mulberry32(this.seed);
     this.scenario = scenarioKey;
     this.time = 0; this.stepCount = 0; this.wound = null;
-    this._lastDep = 0; this._lastDeg = 0;
+    this._lastDep = 0; this._lastDeg = 0; this._lastScafLoss = 0;
+    this._cumDep = 0; this._cumDeg = 0;
+    if (this._mob) this._mob.fill(1);
     this.rules = this.tissue.makeRules(this, this.tissue.params || {});
     if (!this.rules || typeof this.rules.cell !== 'function' || typeof this.rules.voxel !== 'function') {
       throw new Error(`makeRules() of '${this.tissue.key}' must return { cell, voxel[, stiffness] }`);
@@ -462,12 +562,13 @@ export class TissueEngine {
 
   _loadFrom(from) {
     if (this._depth >= 4) throw new Error(`init.from chain deeper than 4 (tissue '${this.tissue.key}')`);
-    const key = `${from.scenario}|${from.days}|${this.seed}`;
+    const withEvents = from.events === true, dialsKey = from.dials ? JSON.stringify(from.dials) : '';
+    const key = `${from.scenario}|${from.days}|${this.seed}|${withEvents ? 'e' : ''}|${dialsKey}`;
     let S = this._fromCache.get(key);
     if (!S) {
       const pre = new TissueEngine(this.tissue, { seed: (this.seed + 1) >>> 0, overrides: this._overrides, _depth: this._depth + 1 });
-      pre.reset(from.scenario);
-      pre.step(Math.round(from.days / this.dt));
+      pre.reset(from.scenario, from.dials ? { dials: from.dials } : {});
+      TissueEngine._preRun(pre, from.scenario, from.days, withEvents);
       const copy = (a) => Float32Array.from(a);
       S = {
         species: pre.species.map(copy),
@@ -487,6 +588,29 @@ export class TissueEngine {
     this._cx.set(S.cx); this._cp.set(S.cp); this._ca.set(S.ca); this._cb.set(S.cb); this._cc.set(S.cc); this._ctype.set(S.ctype);
     this._typeCount.set(S.typeCount); this.nCells = S.nCells;
     this.inflam.fill(0);
+  }
+
+  /**
+   * Step a pre-run engine for `days` (init.from). With `withEvents` the source scenario's
+   * events are replayed exactly as checkScenario fires them: everything due on day d before
+   * stepping day d on. Without it (the default) the pre-run sees no events at all.
+   */
+  static _preRun(pre, scenarioKey, days, withEvents) {
+    const total = Math.round(days / pre.dt);
+    if (!withEvents) { pre.step(total); return; }
+    const events = (pre.scenarioDef(scenarioKey).events || []).map((e) => Object.assign({}, e));
+    const spd = Math.round(1 / pre.dt);
+    let done = 0;
+    for (let d = 0; done < total; d++) {
+      for (const e of events) {
+        if (e.fired || e.at > d) continue;
+        e.fired = true;
+        if (e.dials) pre.setDials(e.dials);
+        if (e.injure) pre.injure(e.injure.center || null, e.injure.radius);
+      }
+      const target = Math.min(total, (d + 1) * spd);
+      pre.step(target - done); done = target;
+    }
   }
 
   // -------------------------------------------------------------- injury
@@ -561,7 +685,8 @@ export class TissueEngine {
     const nS = this.nSpecies, nF = this.nFields, species = this.species, isFiber = this._isFiber, fiberIdx = this._fiberIdx;
     const Txx = this.Txx, Tyy = this.Tyy, Tzz = this.Tzz, Txy = this.Txy, Txz = this.Txz, Tyz = this.Tyz;
     const fiberTotal = this.fiberTotal, fa = this.fa, fx = this.fx, fy = this.fy, fz = this.fz, E = this.E;
-    const fields = this.fields, fieldSrc = this._fieldSrc, aSum = this._aSum, cellCount = this._cellCount;
+    const fields = this.fields, fieldSrc = this._fieldSrc, accs = this._acc, acc0 = accs[0], cellCount = this._cellCount;
+    const nVox = this.nVox, wantMob = this._mob !== null, mob = this._mob;
     const cx = this._cx, cp = this._cp, ca = this._ca, cb = this._cb, cc = this._cc, ctype = this._ctype, vox = this._vox, dxs = this._dx;
     const cMin = this._typeCMin, cMax = this._typeCMax;
     const n = this.nCells, rules = this.rules;
@@ -569,10 +694,11 @@ export class TissueEngine {
     const loadA = P.loadExp === 2 ? load * load : Math.pow(load, P.loadExp);
 
     for (let f = 0; f < nF; f++) fieldSrc[f].fill(0);
-    aSum.fill(0);
+    for (let q = 0; q < nVox; q++) accs[q].fill(0);
 
     // ---------------------------------------------------------- cells
     const ctx = this._cctx, out = ctx.out, cRho = ctx.rho, cField = ctx.field, secrete = out.secrete, cSrc = out.fieldSrc;
+    const oVox = out.vox, polS = out.polS, alignS = out.alignS;
     ctx.dt = dt; ctx.load = load;
     let depTotal = 0;
     for (let i = 0; i < n; i++) {
@@ -591,6 +717,8 @@ export class TissueEngine {
       ctx.E = E[v]; ctx.cellsInVoxel = cellCount[v];
       // --- outputs (a, b keep their value unless written; aSum defaults to the new a)
       out.a = a0; out.b = b0; out.c = c0; out.pol = 0; out.align = 0; out.speed = 0; out.guide = 0; out.loadAlign = 0; out.noise = 0; out.aSum = NaN;
+      out.usePolS = false; oVox[0] = NaN;
+      for (let q = 1; q < nVox; q++) oVox[q] = 0;
       for (let s = 0; s < nS; s++) secrete[s] = 0;
       for (let f = 0; f < nF; f++) cSrc[f] = 0;
 
@@ -605,18 +733,49 @@ export class TissueEngine {
       ca[i] = a; cb[i] = b; cc[i] = c;
 
       // --- deposition into the voxel; fiber species also into T with orientation `pol`
+      //     (out.polS[s] / out.alignS[s] override it per fiber species when out.usePolS is set)
       let px = cp[i3], py = cp[i3 + 1], pz = cp[i3 + 2];
-      let dep = 0;
-      for (let s = 0; s < nS; s++) {
-        const sec = secrete[s];
-        if (sec <= 0) continue;
-        species[s][v] += sec * dt; depTotal += sec;
-        if (isFiber[s]) dep += sec * dt;
+      const uPS = out.usePolS;
+      let dep = 0, isoS = 0, aniS = 0;
+      if (!uPS) {
+        for (let s = 0; s < nS; s++) {
+          const sec = secrete[s];
+          if (sec <= 0) continue;
+          species[s][v] += sec * dt; depTotal += sec;
+          if (isFiber[s]) dep += sec * dt;
+        }
+      } else {
+        for (let s = 0; s < nS; s++) {
+          const sec = secrete[s];
+          if (sec <= 0) continue;
+          species[s][v] += sec * dt; depTotal += sec;
+          if (!isFiber[s]) continue;
+          const d = sec * dt;
+          dep += d;
+          let ps = polS[s];
+          if (ps !== ps) ps = out.pol;
+          ps = ps < 0 ? 0 : (ps > 1 ? 1 : ps);
+          isoS += (1 - ps) / 3 * d; aniS += ps * d;
+        }
       }
-      const kA = out.align * dt;
+      let kA;
+      if (!uPS) kA = out.align * dt;
+      else {   // T is shared: one realignment rate, weighted by the post-deposition fiber densities
+        let wTot = 0, wSum = 0;
+        for (let q = 0; q < fiberIdx.length; q++) {
+          const s = fiberIdx[q], r = species[s][v];
+          let al = alignS[s];
+          if (al !== al) al = out.align;
+          wTot += r; wSum += r * al;
+        }
+        kA = (wTot > 0 ? wSum / wTot : 0) * dt;
+      }
       if (dep > 0 || kA > 0) {
-        const pol = out.pol < 0 ? 0 : (out.pol > 1 ? 1 : out.pol);
-        const iso = (1 - pol) / 3 * dep, ani = pol * dep;
+        let iso, ani;
+        if (!uPS) {
+          const pol = out.pol < 0 ? 0 : (out.pol > 1 ? 1 : out.pol);
+          iso = (1 - pol) / 3 * dep; ani = pol * dep;
+        } else { iso = isoS; ani = aniS; }
         let txx = Txx[v] + iso + ani * px * px, tyy = Tyy[v] + iso + ani * py * py, tzz = Tzz[v] + iso + ani * pz * pz;
         let txy = Txy[v] + ani * px * py, txz = Txz[v] + ani * px * pz, tyz = Tyz[v] + ani * py * pz;
         // traction realignment toward p pᵀ (trace-preserving)
@@ -627,11 +786,13 @@ export class TissueEngine {
         }
         Txx[v] = txx; Tyy[v] = tyy; Tzz[v] = tzz; Txy[v] = txy; Txz[v] = txz; Tyz[v] = tyz;
       }
+      if (uPS) { polS.fill(NaN); alignS.fill(NaN); }   // the next cell starts from the scalars again
 
-      // --- per-voxel accumulators
+      // --- per-voxel accumulators (0: out.vox[0], else out.aSum, else the new a)
       for (let f = 0; f < nF; f++) fieldSrc[f][v] += cSrc[f];
-      const as = out.aSum;
-      aSum[v] += as === as ? as : a;
+      const v0 = oVox[0], as = out.aSum;
+      acc0[v] += v0 === v0 ? v0 : (as === as ? as : a);
+      for (let q = 1; q < nVox; q++) accs[q][v] += oVox[q];
 
       // --- polarity: contact guidance toward ±f, load alignment toward ±z, persistence noise
       const fxv = fx[v], fyv = fy[v], fzv = fz[v];
@@ -722,10 +883,11 @@ export class TissueEngine {
 
     // ------------------------------------------------------- voxels: rules, integration, derived fields
     const vctx = this._vctx, vout = vctx.out, vRho = vctx.rho, vField = vctx.field, dRho = vout.dRho, vSrc = vout.fieldSrc;
+    const vVox = vctx.vox;
     vctx.dt = dt; vctx.load = load;
     const kLF = P.kLoadFib * loadA * dt, eps = P.eps, eps2 = eps * eps, rhoMax = P.rhoMax, inflam = this.inflam;
     const doF = (this.stepCount % P.fEvery) === 0;
-    let degTotal = 0;
+    let degTotal = 0, scafTotal = 0;
     for (let v = 0; v < NV; v++) {
       let txx = Txx[v], tyy = Tyy[v], tzz = Tzz[v], txy = Txy[v], txz = Txz[v], tyz = Tyz[v];
       let tr = txx + tyy + tzz;
@@ -733,10 +895,13 @@ export class TissueEngine {
       for (let s = 0; s < nS; s++) { const r = species[s][v]; vRho[s] = r; if (isFiber[s]) tot0 += r; }
       vctx.v = v; vctx.fiberTotal = tot0; vctx.fa = fa[v]; vctx.Tzz_over_trace = tr > eps ? tzz / tr : 0;
       for (let f = 0; f < nF; f++) vField[f] = fields[f][v];
-      vctx.aSum = aSum[v]; vctx.nCellsHere = cellCount[v]; vctx.inflam = inflam[v];
+      vctx.aSum = acc0[v]; vctx.nCellsHere = cellCount[v]; vctx.inflam = inflam[v];
+      vVox[0] = acc0[v];
+      for (let q = 1; q < nVox; q++) vVox[q] = accs[q][v];
       for (let s = 0; s < nS; s++) dRho[s] = 0;
       for (let f = 0; f < nF; f++) vSrc[f] = 0;
-      vout.loss = 0; vout.E = E[v];
+      vout.loss = 0; vout.scaffoldLoss = 0; vout.E = E[v];
+      if (wantMob) vout.mobility = 1;
 
       rules.voxel(vctx);
 
@@ -750,6 +915,9 @@ export class TissueEngine {
       }
       const loss = vout.loss;
       if (loss > 0) degTotal += loss;
+      const sLoss = vout.scaffoldLoss;
+      if (sLoss > 0) scafTotal += sLoss;
+      if (wantMob) { const mb = vout.mobility; mob[v] = mb > 1 ? 1 : (mb > 0 ? mb : 0); }
       for (let f = 0; f < nF; f++) fieldSrc[f][v] += vSrc[f];
 
       // --- tensor: follow the fiber total (orientation preserved), load alignment, clamp, PSD guard
@@ -806,11 +974,135 @@ export class TissueEngine {
       E[v] = Ev === Ev ? Ev : E[v];
     }
 
-    // ------------------------------------------- diffusible fields
+    // ------------------------------------------- species transport (opt-in), then the fields
+    if (this._anyTransport) { degTotal += this._transport(dt, doF); scafTotal += this._tScaf; }
     this._diffuse(dt);
 
-    this._lastDep = depTotal; this._lastDeg = degTotal;
+    this._lastDep = depTotal; this._lastDeg = degTotal; this._lastScafLoss = scafTotal;
+    const invNV = 1 / NV;
+    this._cumDep += depTotal * invNV * dt; this._cumDeg += degTotal * invNV * dt;
     this.time += dt; this.stepCount++;
+  }
+
+  /**
+   * Species transport (v0.3, only for species that declare `D` or `sink`): explicit
+   * 6-neighbour diffusion with zero-flux walls (per-face diffusion number clamped ≤ 1/6 and
+   * scaled by the voxel hook's `out.mobility`), then the `sink` loss at the +z face layer.
+   * A fiber species carries T with it (flux × T(source)/fiberTotal(source)), so trace(T) keeps
+   * tracking Σ fiber species; T is rescaled and FA / the axis refreshed afterwards.
+   * Returns the summed non-scaffold sink RATE; the scaffold part is left in this._tScaf.
+   */
+  _transport(dt, doF) {
+    const N = this.N, NV = this.NV, N2 = N * N, Nm1 = N - 1, eps = this.P.eps, eps2 = eps * eps;
+    const species = this.species, isFiber = this._isFiber, fiberIdx = this._fiberIdx;
+    const Txx = this.Txx, Tyy = this.Tyy, Tzz = this.Tzz, Txy = this.Txy, Txz = this.Txz, Tyz = this.Tyz;
+    const ft = this.fiberTotal, fa = this.fa, fx = this.fx, fy = this.fy, fz = this.fz;
+    const idx = this._diffIdx, mob = this._mob, delta = this._sDelta, dT = this._tDelta;
+    const withT = this._anyFiberD;
+    if (withT) dT.fill(0);
+    const dtH2 = dt / (this.h * this.h), lamMax = 1 / 6;
+
+    for (let q = 0; q < idx.length; q++) {
+      const s = idx[q], arr = species[s], kD = this._sD[s] * dtH2, fib = withT && isFiber[s] === 1;
+      delta.fill(0);
+      const face = (v, w) => {
+        let lam = kD * 0.5 * (mob[v] + mob[w]);
+        if (lam > lamMax) lam = lamMax;
+        const f = lam * (arr[w] - arr[v]);
+        if (f === 0) return;
+        delta[v] += f; delta[w] -= f;
+        if (!fib) return;
+        const src = f > 0 ? w : v, tot = ft[src];
+        if (tot <= eps) return;
+        const r = f / tot, a6 = 6 * v, b6 = 6 * w;
+        const axx = r * Txx[src], ayy = r * Tyy[src], azz = r * Tzz[src];
+        const axy = r * Txy[src], axz = r * Txz[src], ayz = r * Tyz[src];
+        dT[a6] += axx; dT[b6] -= axx; dT[a6 + 1] += ayy; dT[b6 + 1] -= ayy; dT[a6 + 2] += azz; dT[b6 + 2] -= azz;
+        dT[a6 + 3] += axy; dT[b6 + 3] -= axy; dT[a6 + 4] += axz; dT[b6 + 4] -= axz; dT[a6 + 5] += ayz; dT[b6 + 5] -= ayz;
+      };
+      for (let i = 0; i < N; i++) {
+        const ip = i < Nm1;
+        for (let j = 0; j < N; j++) {
+          const jp = j < Nm1, base = (i * N + j) * N;
+          for (let k = 0; k < N; k++) {
+            const v = base + k;
+            if (ip) face(v, v + N2);
+            if (jp) face(v, v + N);
+            if (k < Nm1) face(v, v + 1);
+          }
+        }
+      }
+      for (let v = 0; v < NV; v++) { const r = arr[v] + delta[v]; arr[v] = r > 0 ? r : 0; }
+    }
+
+    // --- sink: loss to the medium at the +z face layer only
+    let deg = 0, scaf = 0;
+    const sIdx = this._sinkIdx;
+    for (let q = 0; q < sIdx.length; q++) {
+      const s = sIdx[q], arr = species[s], kS = this._sSink[s];
+      let sum = 0;
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < N; j++) {
+          const v = (i * N + j) * N + Nm1, r = arr[v];
+          if (r <= 0) continue;
+          let l = kS * r * dt;
+          if (l > r) l = r;
+          arr[v] = r - l; sum += l;
+        }
+      }
+      const rate = sum / dt;
+      if (this._isScaffold[s]) scaf += rate; else deg += rate;
+    }
+    this._tScaf = scaf;
+    if (!this._anyFiberMoves) return deg;
+
+    // --- fiber species moved: carry T with them, rescale onto the new total, refresh FA / axis
+    //     (same math as the voxel pass and _derived)
+    const nFib = fiberIdx.length, fArr = this._fiberArrays;
+    for (let q = 0; q < nFib; q++) fArr[q] = species[fiberIdx[q]];
+    for (let v = 0; v < NV; v++) {
+      let tot = 0;
+      for (let q = 0; q < nFib; q++) tot += fArr[q][v];
+      let txx = Txx[v], tyy = Tyy[v], tzz = Tzz[v], txy = Txy[v], txz = Txz[v], tyz = Tyz[v];
+      if (withT) {
+        const a6 = 6 * v;
+        txx += dT[a6]; tyy += dT[a6 + 1]; tzz += dT[a6 + 2]; txy += dT[a6 + 3]; txz += dT[a6 + 4]; tyz += dT[a6 + 5];
+      }
+      if (tot > eps) {
+        const tr0 = txx + tyy + tzz;
+        if (tr0 > eps) { const sc = tot / tr0; txx *= sc; tyy *= sc; tzz *= sc; txy *= sc; txz *= sc; tyz *= sc; }
+        else { txx = tot / 3; tyy = txx; tzz = txx; txy = 0; txz = 0; tyz = 0; }
+        if (txx < 0) txx = 0; if (tyy < 0) tyy = 0; if (tzz < 0) tzz = 0;
+        if (txy * txy > txx * tyy) txy = (txy < 0 ? -0.999 : 0.999) * Math.sqrt(txx * tyy);
+        if (txz * txz > txx * tzz) txz = (txz < 0 ? -0.999 : 0.999) * Math.sqrt(txx * tzz);
+        if (tyz * tyz > tyy * tzz) tyz = (tyz < 0 ? -0.999 : 0.999) * Math.sqrt(tyy * tzz);
+      } else {
+        txx = 0; tyy = 0; tzz = 0; txy = 0; txz = 0; tyz = 0; tot = 0;
+        for (let q = 0; q < nFib; q++) fArr[q][v] = 0;
+      }
+      Txx[v] = txx; Tyy[v] = tyy; Tzz[v] = tzz; Txy[v] = txy; Txz[v] = txz; Tyz[v] = tyz;
+      ft[v] = tot;
+      const fro2 = txx * txx + tyy * tyy + tzz * tzz + 2 * (txy * txy + txz * txz + tyz * tyz);
+      let f = 0;
+      if (fro2 > eps2) {
+        f = 1.5 * (fro2 - tot * tot / 3) / fro2;
+        f = f <= 0 ? 0 : (f >= 1 ? 1 : Math.sqrt(f));
+        if (doF) {
+          let ax = fx[v], ay = fy[v], az = fz[v];
+          for (let it = 0; it < 2; it++) {
+            const bx = txx * ax + txy * ay + txz * az;
+            const by = txy * ax + tyy * ay + tyz * az;
+            const bz = txz * ax + tyz * ay + tzz * az;
+            const bn = Math.sqrt(bx * bx + by * by + bz * bz);
+            if (bn < 1e-12) break;
+            ax = bx / bn; ay = by / bn; az = bz / bn;
+          }
+          fx[v] = ax; fy[v] = ay; fz[v] = az;
+        }
+      }
+      fa[v] = f;
+    }
+    return deg;
   }
 
   /** Explicit 6-neighbour diffusion with zero-flux walls, sources, bath exchange, decay, inflammation. */
@@ -912,9 +1204,10 @@ export class TissueEngine {
       vctx.v = v; vctx.fiberTotal = this.fiberTotal[v]; vctx.fa = this.fa[v]; vctx.Tzz_over_trace = tr > eps ? this.Tzz[v] / tr : 0;
       for (let f = 0; f < nF; f++) vctx.field[f] = fields[f][v];
       vctx.aSum = 0; vctx.nCellsHere = this._cellCount[v]; vctx.inflam = this.inflam[v];
+      for (let q = 0; q < this.nVox; q++) vctx.vox[q] = 0;
       for (let s = 0; s < nS; s++) vout.dRho[s] = 0;
       for (let f = 0; f < nF; f++) vout.fieldSrc[f] = 0;
-      vout.loss = 0; vout.E = this.E[v];
+      vout.loss = 0; vout.scaffoldLoss = 0; vout.mobility = 1; vout.E = this.E[v];
       hook(vctx);
       const Ev = vout.E;
       this.E[v] = Ev === Ev ? Ev : this.E[v];
@@ -953,7 +1246,7 @@ export class TissueEngine {
       mxx += this.Txx[v]; myy += this.Tyy[v]; mzz += this.Tzz[v]; mxy += this.Txy[v]; mxz += this.Txz[v]; myz += this.Tyz[v];
     }
     const species = {}, fraction = {};
-    let total = 0, fiberTot = 0;
+    let total = 0, fiberTot = 0, scafTot = 0;
     for (let s = 0; s < nS; s++) {
       const arr = this.species[s];
       let sum = 0;
@@ -961,9 +1254,10 @@ export class TissueEngine {
       const mean = sum / NV;
       species[this.speciesKeys[s]] = mean; total += mean;
       if (this._isFiber[s]) fiberTot += mean;
+      if (this._isScaffold[s]) scafTot += mean;
     }
     for (let s = 0; s < nS; s++) fraction[this.speciesKeys[s]] = total > 1e-9 ? species[this.speciesKeys[s]] / total : 0;
-    species.total = total; species.fiberTotal = fiberTot;
+    species.total = total; species.fiberTotal = fiberTot; species.tissueTotal = total - scafTot;
     const fields = {};
     for (let f = 0; f < nF; f++) {
       const arr = this.fields[f];
@@ -987,6 +1281,8 @@ export class TissueEngine {
       fields,
       deposition, degradation,
       ratio: degradation > 1e-12 ? deposition / degradation : (deposition > 1e-12 ? Infinity : 1),
+      scaffold: scafTot, scaffoldFlux: this._lastScafLoss / NV,
+      cumDeposition: this._cumDep, cumDegradation: this._cumDeg,
     };
   }
 
@@ -1030,7 +1326,9 @@ export class TissueEngine {
     let total = 0;
     for (let s = 0; s < nS; s++) { species[this.speciesKeys[s]] = cnt ? sS[s] / cnt : 0; total += species[this.speciesKeys[s]]; }
     for (let s = 0; s < nS; s++) fraction[this.speciesKeys[s]] = total > 1e-9 ? species[this.speciesKeys[s]] / total : 0;
-    species.total = total; species.fiberTotal = cnt ? sTot / cnt : 0;
+    let scafTot = 0;
+    for (let s = 0; s < nS; s++) if (this._isScaffold[s]) scafTot += species[this.speciesKeys[s]];
+    species.total = total; species.fiberTotal = cnt ? sTot / cnt : 0; species.tissueTotal = total - scafTot;
     for (let f = 0; f < nF; f++) fields[this.fieldKeys[f]] = cnt ? sFld[f] / cnt : 0;
     return { species, fraction, fields, fa: cnt ? sF / cnt : 0, nVox: cnt, cells: { n: nc, a: nc ? sA / nc : 0, b: nc ? sB / nc : 0, c: nc ? sC / nc : 0 } };
   }
@@ -1065,16 +1363,44 @@ export class TissueEngine {
     };
   }
 
-  /** `meta` block of the format-2 export; `extra` (e.g. { exportEveryDays }) is merged in. */
+  /**
+   * `meta` block of the format-2 export; `extra` (e.g. { exportEveryDays }) is merged in.
+   * `loadDial` / `cellCountDial` name the dials carrying those roles (null when there is none)
+   * so a reader knows which dial to draw load arrows for without guessing at 'strain'.
+   * A cellType with a state-dependent radius exports the state-0 value as `radius` (readers of
+   * format 2 keep working) plus `radiusBy: { by, min, max }`.
+   */
   exportMeta(extra = {}) {
     const t = this.tissue;
     return Object.assign({
       format: 2, tissue: t.key, tissueVersion: t.version, engine: ENGINE_VERSION,
       N: this.N, L: this.L, K: this.P.K, dtDays: this.dt, scenario: this.scenario,
       dials: Object.assign({}, this.dials), seed: this.seed,
+      loadDial: this._loadDial >= 0 ? this.dialKeys[this._loadDial] : null,
+      cellCountDial: this._cellDial >= 0 ? this.dialKeys[this._cellDial] : null,
       species: t.species.map((s) => ({ key: s.key, label: s.label, kind: s.kind, color: s.color })),
-      cellTypes: t.cellTypes.map((c) => ({ key: c.key, label: c.label, colors: c.colors.slice(), shape: Object.assign({}, c.shape), radius: c.radius })),
+      cellTypes: t.cellTypes.map((c) => {
+        const meta = { key: c.key, label: c.label, colors: c.colors.slice(), shape: Object.assign({}, c.shape), radius: c.radius };
+        if (c.radius && typeof c.radius === 'object') { meta.radius = c.radius.min; meta.radiusBy = Object.assign({}, c.radius); }
+        return meta;
+      }),
     }, extra);
+  }
+
+  /**
+   * The cell scalars of a cell type as `[{ key, label, range }]`, merging the `states` array
+   * with the older `stateLabels` / `cRange` aliases (states wins). a and b are always [0, 1].
+   */
+  static cellStates(cellType) {
+    const out = [];
+    for (const key of ['a', 'b', 'c']) {
+      const st = (cellType.states || []).find((s) => s.key === key);
+      const label = st ? st.label : ((cellType.stateLabels || {})[key] || null);
+      let range = st && Array.isArray(st.range) ? st.range.slice() : null;
+      if (!range) range = key === 'c' && cellType.cRange ? cellType.cRange.slice() : [0, 1];
+      if (label !== null || key === 'a') out.push({ key, label, range });
+    }
+    return out;
   }
 
   // ------------------------------------------------------------- scenario checks
@@ -1083,6 +1409,11 @@ export class TissueEngine {
    * Run `scenarioKey` (with its `events`) to the latest `at` of its checks and evaluate them.
    * Returns [{ check, value, ref, pass }]. opts: { seed = 7, engine } (engine: reuse an instance
    * of the same tissue, e.g. for its init.from cache).
+   *
+   * The clock advances on a HALF-DAY grid (day boundaries land exactly where they did in v0.2,
+   * so a scenario's trajectory is unchanged): a check whose `at` is a window `[from, to]` is
+   * evaluated on the samples every 0.5 d inside it, aggregated by `agg` ('min' | 'max' | 'mean'
+   * | 'first'). Events fire as soon as the clock reaches their day.
    */
   static checkScenario(tissue, scenarioKey, opts = {}) {
     const seed = opts.seed === undefined ? 7 : opts.seed;
@@ -1092,31 +1423,48 @@ export class TissueEngine {
     M.reset(scenarioKey);
     const sc = M.scenarioDef(scenarioKey);
     const checks = sc.checks || [], events = (sc.events || []).map((e) => Object.assign({}, e));
-    const days = new Set();
+    const g = (t) => Math.round(t * 2);            // times live on the half-day grid, as integers
+    const want = new Set();
     let last = 0;
+    const add = (t) => { const q = g(t); want.add(q); if (q / 2 > last) last = q / 2; };
     for (const c of checks) {
-      days.add(c.at); if (c.at > last) last = c.at;
-      if (c.rel && c.rel.at !== undefined) { days.add(c.rel.at); if (c.rel.at > last) last = c.rel.at; }
+      if (Array.isArray(c.at)) for (let q = g(c.at[0]); q <= g(c.at[1]); q++) add(q / 2);
+      else add(c.at);
+      if (c.rel && c.rel.at !== undefined) add(c.rel.at);
     }
-    for (const e of events) if (e.at > last) last = e.at;
-    const stepsPerDay = Math.round(1 / M.dt);
+    for (const e of events) if (e.at > last) last = g(e.at) / 2;
+    const spd = Math.round(1 / M.dt), half = Math.round(spd / 2);
     const rec = new Map();
-    for (let d = 0; d <= last; d++) {
+    const nHalf = g(last);
+    for (let i = 0; i <= nHalf; i++) {
+      const t = i / 2;
       for (const e of events) {
-        if (e.at !== d || e.fired) continue;
+        if (e.fired || e.at > t + 1e-9) continue;
         e.fired = true;
         if (e.dials) M.setDials(e.dials);
         if (e.injure) M.injure(e.injure.center || null, e.injure.radius);
       }
-      if (days.has(d)) rec.set(d, M.stats());
-      if (d < last) M.step(stepsPerDay);
+      if (want.has(i)) rec.set(i, M.stats());
+      if (i < nHalf) M.step(i % 2 === 0 ? half : spd - half);
     }
+    const at0 = (c) => (Array.isArray(c.at) ? c.at[0] : c.at);
     return checks.map((check) => {
-      const value = engineStatFrom(rec.get(check.at), check.stat);
+      let value;
+      if (Array.isArray(check.at)) {
+        const vals = [];
+        for (let q = g(check.at[0]); q <= g(check.at[1]); q++) {
+          const s = rec.get(q);
+          const x = s === undefined ? undefined : engineStatFrom(s, check.stat);
+          if (x !== undefined) vals.push(x);
+        }
+        value = vals.length ? ENGINE_AGGS[check.agg](vals) : undefined;
+      } else {
+        value = engineStatFrom(rec.get(g(check.at)), check.stat);
+      }
       let pass, ref;
       if (check.rel) {
-        const at = check.rel.at === undefined ? check.at : check.rel.at;
-        ref = engineStatFrom(rec.get(at), check.rel.stat) + (check.value === undefined ? 0 : check.value);
+        const at = check.rel.at === undefined ? at0(check) : check.rel.at;
+        ref = engineStatFrom(rec.get(g(at)), check.rel.stat) + (check.value === undefined ? 0 : check.value);
         pass = ENGINE_OPS[check.rel.op](value, ref);
       } else {
         ref = check.value;
@@ -1145,9 +1493,13 @@ export class TissueEngine {
     else t.species.forEach((s, i) => {
       if (!isStr(s.key) || !ENGINE_IDENT.test(s.key)) err.push(`species[${i}].key invalid`);
       else if (sKeys.includes(s.key)) err.push(`species key '${s.key}' duplicated`); else sKeys.push(s.key);
+      if (ENGINE_RESERVED_SPECIES.includes(s.key)) err.push(`species key '${s.key}' is reserved by the stat paths`);
       if (!isStr(s.label)) err.push(`species '${s.key}' label missing`);
       if (!['fiber', 'gel', 'scaffold'].includes(s.kind)) err.push(`species '${s.key}' kind must be fiber|gel|scaffold`);
       if (!isHex(s.color)) err.push(`species '${s.key}' color must be #rrggbb`);
+      if (s.D !== undefined && (!isNum(s.D) || s.D < 0)) err.push(`species '${s.key}' D must be a number ≥ 0`);
+      if (s.sink !== undefined && (!isNum(s.sink) || s.sink < 0)) err.push(`species '${s.key}' sink must be a number ≥ 0`);
+      if (s.boundary !== undefined && s.boundary !== 'face:+z') err.push(`species '${s.key}' boundary must be 'face:+z' (the only species boundary)`);
     });
     if (!Array.isArray(t.fields)) err.push('fields must be an array');
     else t.fields.forEach((f, i) => {
@@ -1168,11 +1520,31 @@ export class TissueEngine {
       if (!isStr(c.label)) err.push(`cellType '${c.key}' label missing`);
       if (!Array.isArray(c.colors) || c.colors.length !== 2 || !c.colors.every(isHex)) err.push(`cellType '${c.key}' colors must be two #rrggbb`);
       if (!c.shape || !['a', 'b'].includes(c.shape.by) || !isNum(c.shape.aspectMin) || !isNum(c.shape.aspectMax)) err.push(`cellType '${c.key}' shape must be { by: 'a'|'b', aspectMin, aspectMax }`);
-      if (!isNum(c.radius) || c.radius <= 0) err.push(`cellType '${c.key}' radius must be > 0`);
+      if (isNum(c.radius)) { if (c.radius <= 0) err.push(`cellType '${c.key}' radius must be > 0`); }
+      else if (c.radius && typeof c.radius === 'object') {
+        if (!['a', 'b'].includes(c.radius.by) || !isNum(c.radius.min) || !isNum(c.radius.max) || c.radius.min <= 0 || c.radius.max <= 0) {
+          err.push(`cellType '${c.key}' radius object must be { by: 'a'|'b', min > 0, max > 0 }`);
+        }
+      } else err.push(`cellType '${c.key}' radius must be a number > 0 or { by, min, max }`);
       if (typeof c.motile !== 'boolean') err.push(`cellType '${c.key}' motile must be boolean`);
       if (c.fraction !== undefined && (!isNum(c.fraction) || c.fraction < 0)) err.push(`cellType '${c.key}' fraction must be ≥ 0`);
       if (c.init && ((c.init.a !== undefined && !isNum(c.init.a)) || (c.init.b !== undefined && !isNum(c.init.b)) || (c.init.c !== undefined && !isNum(c.init.c)))) err.push(`cellType '${c.key}' init.a/b/c must be numbers`);
       if (c.cRange !== undefined && (!Array.isArray(c.cRange) || c.cRange.length !== 2 || !c.cRange.every(isNum) || c.cRange[0] >= c.cRange[1])) err.push(`cellType '${c.key}' cRange must be [lo, hi] with lo < hi`);
+      if (c.states !== undefined) {
+        if (!Array.isArray(c.states)) err.push(`cellType '${c.key}' states must be an array`);
+        else {
+          const stKeys = [];
+          c.states.forEach((st, k) => {
+            if (!st || !['a', 'b', 'c'].includes(st.key)) { err.push(`cellType '${c.key}' states[${k}].key must be a|b|c`); return; }
+            if (stKeys.includes(st.key)) err.push(`cellType '${c.key}' states: '${st.key}' duplicated`); else stKeys.push(st.key);
+            if (st.label !== undefined && st.label !== null && !isStr(st.label)) err.push(`cellType '${c.key}' states.${st.key}.label must be a string`);
+            if (st.range === undefined) return;
+            if (!Array.isArray(st.range) || st.range.length !== 2 || !st.range.every(isNum) || st.range[0] >= st.range[1]) err.push(`cellType '${c.key}' states.${st.key}.range must be [lo, hi] with lo < hi`);
+            else if (st.key !== 'c') { if (st.range[0] !== 0 || st.range[1] !== 1) err.push(`cellType '${c.key}' states.${st.key}.range must be [0, 1] (only c may have another range)`); }
+            else if (c.cRange && (c.cRange[0] !== st.range[0] || c.cRange[1] !== st.range[1])) err.push(`cellType '${c.key}': states.c.range and cRange disagree`);
+          });
+        }
+      }
     });
     if (t.cellTypes && t.cellTypes.length > 255) err.push('at most 255 cell types');
     let nLoad = 0, nCount = 0;
@@ -1212,6 +1584,14 @@ export class TissueEngine {
           if (!scKeys.includes(init.from.scenario)) err.push(`scenario '${s.key}' init.from.scenario '${init.from.scenario}' unknown`);
           if (init.from.scenario === s.key) err.push(`scenario '${s.key}' init.from refers to itself`);
           if (!isNum(init.from.days) || init.from.days <= 0) err.push(`scenario '${s.key}' init.from.days must be > 0`);
+          if (init.from.events !== undefined && typeof init.from.events !== 'boolean') err.push(`scenario '${s.key}' init.from.events must be a boolean`);
+          if (init.from.dials !== undefined) {
+            if (typeof init.from.dials !== 'object' || init.from.dials === null) err.push(`scenario '${s.key}' init.from.dials must be an object`);
+            else for (const k of Object.keys(init.from.dials)) {
+              if (!dKeys.includes(k)) err.push(`scenario '${s.key}' init.from.dials: unknown dial '${k}'`);
+              if (!isNum(init.from.dials[k])) err.push(`scenario '${s.key}' init.from.dials.${k} must be a number`);
+            }
+          }
           // cycle detection
           let cur = init.from.scenario, hops = 0;
           while (cur && hops < 10) {
@@ -1223,7 +1603,13 @@ export class TissueEngine {
         if (s.checks !== undefined && !Array.isArray(s.checks)) err.push(`scenario '${s.key}' checks must be an array`);
         (Array.isArray(s.checks) ? s.checks : []).forEach((c, j) => {
           const w = `scenario '${s.key}' checks[${j}]`;
-          if (!isNum(c.at) || c.at < 0) err.push(`${w}: at must be a day ≥ 0`);
+          if (Array.isArray(c.at)) {
+            if (c.at.length !== 2 || !c.at.every(isNum) || c.at[0] < 0 || c.at[1] < c.at[0]) err.push(`${w}: at [from, to] needs 0 ≤ from ≤ to`);
+            if (!(c.agg in ENGINE_AGGS)) err.push(`${w}: at [from, to] needs agg min|max|mean|first`);
+          } else {
+            if (!isNum(c.at) || c.at < 0) err.push(`${w}: at must be a day ≥ 0 (or [from, to] with agg)`);
+            if (c.agg !== undefined) err.push(`${w}: agg only applies to at [from, to]`);
+          }
           checkPath(c.stat, w);
           if (c.rel) {
             checkPath(c.rel.stat, `${w}.rel`);
@@ -1272,6 +1658,7 @@ export class TissueEngine {
       else for (const [k, v] of Object.entries(t.engine)) {
         if (!(k in ENGINE_DEFAULTS)) err.push(`engine.${k} is not an engine numeric`);
         else if (k === 'trace') { if (v !== 'fiber') err.push("engine.trace must be 'fiber'"); }
+        else if (k === 'vox') { if (!Number.isInteger(v) || v < 1 || v > 4) err.push('engine.vox must be an integer 1..4'); }
         else if (!isNum(v)) err.push(`engine.${k} must be a number`);
       }
     }

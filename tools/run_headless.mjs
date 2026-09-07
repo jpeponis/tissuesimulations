@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 // tools/run_headless.mjs — run a tissue's scenarios without a browser.
 //
-//   node tools/run_headless.mjs [--tissue fibrous] [--out DIR] [--days 90] [--snap 5] [--csv 0.5]
-//                               [--seed 7] [--only a,b,c] [--blender PATH] [--no-variants]
+//   node tools/run_headless.mjs [--tissue fibrous] [--out DIR] [--days 90] [--snap 5]
+//                               [--csv-every 0.5] [--events true|false] [--seed 7] [--only a,b,c]
+//                               [--blender PATH] [--no-variants]
 //
-// Runs every scenario of the tissue (applying the scenario's `events`: dial changes and
-// injuries at day `at`, fired when the clock reaches that day) plus the tissue-specific
-// variants listed in HEADLESS_VARIANTS. For every run it writes
-//     <out>/<name>.csv    stats every --csv days, generic columns:
+// Runs every scenario of the tissue plus the tissue-specific variants listed in
+// HEADLESS_VARIANTS. `--events` (default on; `--events false` or `--no-events` turns it off)
+// applies each scenario's `events` — dial changes and injuries at day `at`, fired when the clock
+// reaches that day. `--csv-every` (alias: the older `--csv`) is the CSV sampling interval in days.
+// For every run it writes
+//     <out>/<name>.csv    stats every --csv-every days, generic columns:
 //                         t, species.<key>…, fa, logE, cells.a, cells.b, fields.<key>…, deposition,
-//                         degradation, then species.total, globalFA, fz, E, cells.c, cells.n, ratio, dial.<key>…
+//                         degradation, then species.total, species.tissueTotal, globalFA, fz, E,
+//                         cells.c, cells.n, ratio, cumDeposition, cumDegradation, scaffoldFlux,
+//                         dial.<key>…
 //     <out>/<name>.json   format-2 trajectory (docs/EXTENDING.md §5), snapshot every --snap days.
 // It also writes <out>/<firstScenario>_traj.json (e.g. maturation_traj.json, for Blender) and,
 // with --blender PATH, copies it there. Default --out is $TISSUE_OUT or ./scratch/<tissue>.
@@ -29,7 +34,8 @@ if (!tissue) { console.error(`unknown tissue '${TISSUE_KEY}'; registered: ${Obje
 const OUT = resolve(args.out ?? process.env.TISSUE_OUT ?? `scratch/${TISSUE_KEY}`);
 const DAYS = +(args.days ?? 90);
 const SNAP = +(args.snap ?? 5);
-const CSV_EVERY = +(args.csv ?? 0.5);
+const CSV_EVERY = +(args['csv-every'] ?? args.csv ?? 0.5);
+const EVENTS = args.events !== 'false' && args['no-events'] !== 'true';
 const SEED = +(args.seed ?? 7);
 const ONLY = args.only ? new Set(args.only.split(',')) : null;
 
@@ -46,15 +52,17 @@ const HEADLESS_VARIANTS = {
 };
 
 const RUNS = {};
-for (const sc of tissue.scenarios) RUNS[sc.key] = { scenario: sc.key, events: sc.events || [] };
+for (const sc of tissue.scenarios) RUNS[sc.key] = { scenario: sc.key, events: EVENTS ? sc.events || [] : [] };
 if (args['no-variants'] !== 'true') for (const [name, v] of Object.entries(HEADLESS_VARIANTS[TISSUE_KEY] || {})) {
   RUNS[name] = Object.assign({ events: (tissue.scenarios.find((s) => s.key === v.scenario) || {}).events || [] }, v);
+  if (!EVENTS) RUNS[name].events = [];
 }
 
 const speciesCols = tissue.species.map((s) => `species.${s.key}`), fieldCols = tissue.fields.map((f) => `fields.${f.key}`);
 const dialCols = tissue.dials.map((d) => `dial.${d.key}`);
 const CSV_COLS = ['t', ...speciesCols, 'fa', 'logE', 'cells.a', 'cells.b', ...fieldCols, 'deposition', 'degradation',
-  'species.total', 'globalFA', 'fz', 'E', 'cells.c', 'cells.n', 'ratio', ...dialCols];
+  'species.total', 'species.tissueTotal', 'globalFA', 'fz', 'E', 'cells.c', 'cells.n', 'ratio',
+  'cumDeposition', 'cumDegradation', 'scaffoldFlux', ...dialCols];
 
 function fmt(x) {
   if (x === undefined || x === null || Number.isNaN(x) || !Number.isFinite(x)) return '';

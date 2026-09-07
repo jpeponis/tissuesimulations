@@ -7,7 +7,9 @@
 // Plus the fibrous golden regression against tests/golden/fibrous.json (recorded from v0.1 model.js,
 // seed 7): species.total / species.mat / fa / cells.a within 3 % relative or 0.01 absolute (whichever
 // is larger) at every recorded day of all recorded runs. Plus engine API tests (stat paths, init.from
-// cache, injury, cell-count dial, export format 2) and the shared copy helpers.
+// cache, injury, cell-count dial, export format 2), the v0.3 contract features (species D / sink,
+// polS / alignS, out.vox accumulators, scaffold flux, aggregated checks, init.from.events) and the
+// shared copy helpers.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -92,6 +94,15 @@ for (const [regKey, t] of Object.entries(CONFORMANCE)) {
       assert.ok(t.readouts && t.readouts.length > 0, 'readouts');
       assert.ok(t.copy && t.copy.intro && t.copy.legend && t.copy.vocabulary, 'copy blocks');
       assert.ok(t.dials.some((d) => d.role === 'cellCount'), 'a cellCount dial');
+      // the export meta names the dials with roles, and every cell scalar resolves to a label + range
+      const meta = engineFor(t).exportMeta();
+      assert.equal(meta.loadDial, (t.dials.find((d) => d.role === 'load') || {}).key ?? null, 'meta.loadDial');
+      assert.equal(meta.cellCountDial, (t.dials.find((d) => d.role === 'cellCount') || {}).key ?? null, 'meta.cellCountDial');
+      assert.equal(meta.engine, ENGINE_VERSION);
+      for (const c of t.cellTypes) {
+        for (const st of TissueEngine.cellStates(c)) assert.ok(st.range[0] < st.range[1], `cellType '${c.key}' state ${st.key} range`);
+        assert.ok(typeof meta.cellTypes.find((m) => m.key === c.key).radius === 'number', `cellType '${c.key}' exports a numeric radius`);
+      }
     });
 
     test('2. determinism: two engines with the same seed agree after 200 steps; a different seed differs', () => {
@@ -368,6 +379,343 @@ describe('engine API', () => {
   });
 });
 
+// ---------------------------------------------------------------- v0.3 contract features (docs/EXTENDING.md §2, §7)
+// A throw-away fixture tissue that opts into every v0.3 feature: species transport (D, sink),
+// per-species deposition orientation (polS / alignS), extra per-voxel accumulators (out.vox),
+// the scaffold flux bar (out.scaffoldLoss), transport hindrance (out.mobility), `states` and a
+// state-dependent radius. Nothing here is registered, so the conformance suite above is untouched.
+const LAB = {
+  key: 'lab', name: 'Lab bench', short: 'exercises the v0.3 engine features', version: '0.3.0',
+  species: [
+    { key: 'scaf', label: 'Scaffold', kind: 'scaffold', color: '#9ec5d8' },
+    { key: 'gag', label: 'Gel', kind: 'gel', color: '#7fe0c9', D: 0.05, sink: 0.8, boundary: 'face:+z' },
+    { key: 'felt', label: 'Isotropic fiber', kind: 'fiber', color: '#e8f1f8', D: 0.02 },
+    { key: 'rope', label: 'Aligned fiber', kind: 'fiber', color: '#e0a24a' },
+  ],
+  fields: [{ key: 'g', label: 'Growth factor', color: '#3fd6c4', D: 0.05, bath: 'Gext', kBath: 4, decay: 0 }],
+  cellTypes: [
+    { key: 'cell', label: 'Builder', colors: ['#4ea3ff', '#ff7a3d'],
+      shape: { by: 'a', aspectMin: 2.0, aspectMax: 1.0 },              // aspectMin > aspectMax is legal
+      radius: { by: 'a', min: 0.028, max: 0.04 }, motile: true,
+      init: { a: 0.3, b: 0, c: 0 },
+      states: [{ key: 'a', label: 'activation' }, { key: 'c', label: 'pericellular pool', range: [0, 2] }] },
+  ],
+  dials: [
+    { key: 'Gext', label: 'Growth-factor bath', min: 0, max: 1, step: 0.01, default: 0.6, format: 'fixed2' },
+    { key: 'load', label: 'Load', min: 0, max: 1, step: 0.01, default: 0.4, format: 'percent', role: 'load' },
+    { key: 'nCells', label: 'Cells', min: 40, max: 400, step: 10, default: 160, format: 'cells', role: 'cellCount' },
+  ],
+  scenarios: [
+    { key: 'grow', title: 'Grow', goal: 'g', steps: ['a'], question: 'q', expect: 'e',
+      dials: { Gext: 0.6, load: 0.4, nCells: 160 },
+      init: { species: { scaf: 0.8, gag: 0.05 }, jitter: 0.1 },
+      events: [{ at: 5, dials: { Gext: 0.1 } }],
+      checks: [
+        { at: 20, stat: 'species.gag', op: 'gt', value: 0.05 },
+        { at: [10, 20], agg: 'min', stat: 'logE', op: 'gt', value: -1 },
+        { at: [10, 20], agg: 'mean', stat: 'species.tissueTotal', op: 'gt', value: 0 },
+        { at: [0, 20], agg: 'first', stat: 'species.scaf', op: 'between', value: [0.75, 0.85] },
+        { at: 20, stat: 'cumDegradation', rel: { stat: 'cumDeposition', op: 'lt' } },
+      ] },
+    { key: 'after', title: 'After', goal: 'g', steps: ['a'], question: 'q', expect: 'e',
+      dials: { Gext: 0.2, load: 0, nCells: 160 },
+      init: { from: { scenario: 'grow', days: 10, events: true, dials: { Gext: 0.9 } } },
+      checks: [{ at: 5, stat: 'species.total', op: 'gt', value: 0 }] },
+  ],
+  readouts: [{ key: 'flux', label: 'Flux', unit: 'per day', meaning: 'm', type: 'flux' }],
+  copy: { intro: { tagline: 't', paragraphs: ['p'] }, legend: { fibers: 'f', cells: 'c' },
+    vocabulary: { matrix: 'matrix', cellsActive: 'cells build', cellsQuiet: 'cells rest' } },
+  engine: { N: 8, dt: 0.02, vox: 3 },
+  params: { kHyd: 0.05, sGag: 0.6, sFelt: 0.12, sRope: 0.1, kLoss: 0.05 },
+  makeRules(engine, p) {
+    const iScaf = engine.speciesIndex.scaf, iGag = engine.speciesIndex.gag;
+    const iFelt = engine.speciesIndex.felt, iRope = engine.speciesIndex.rope, iG = engine.fieldIndex.g;
+    const sc = engine.scratch;                       // makeRules may allocate per reset and cache here
+    sc.calls = (sc.calls || 0) + 1;
+    return {
+      cell(ctx) {
+        const out = ctx.out, a = Math.min(1, ctx.a + (ctx.field[iG] - ctx.a) * ctx.dt);
+        out.a = a;
+        out.secrete[iGag] = p.sGag * a; out.secrete[iFelt] = p.sFelt * a; out.secrete[iRope] = p.sRope * a;
+        out.usePolS = true;                          // per-species orientation
+        out.polS[iFelt] = 0; out.polS[iRope] = 0.95;
+        out.alignS[iFelt] = 0; out.alignS[iRope] = 0.6;
+        out.vox[1] = a * a;                          // accumulator 1: Σ a² of the cells here
+        out.vox[2] = 1;                              // accumulator 2: our own cell count
+        out.fieldSrc[iG] = 2 * a;
+        out.speed = 0.2; out.guide = 2; out.noise = 1.5;
+      },
+      voxel(ctx) {
+        const out = ctx.out, rho = ctx.rho, scaf = rho[iScaf];
+        const hyd = p.kHyd * scaf;
+        out.dRho[iScaf] = -hyd;
+        out.scaffoldLoss = hyd;                      // a third flux bar: neither deposition nor degradation
+        for (const i of [iGag, iFelt, iRope]) out.dRho[i] = -p.kLoss * rho[i];
+        out.loss = p.kLoss * (rho[iGag] + rho[iFelt] + rho[iRope]);
+        out.mobility = 1 - (scaf > 1 ? 1 : scaf);    // a tight scaffold hinders transport
+        out.E = 0.3 + 5 * scaf + 20 * (rho[iGag] + rho[iFelt] + rho[iRope]) ** 2;
+      },
+    };
+  },
+};
+
+/** A lab engine with inert rules, so a test can drive one mechanism at a time. */
+function labBare(overrides = {}, mobility = 1) {
+  const M = new TissueEngine(LAB, { seed: 3 });
+  M.reset('grow', Object.assign({ dials: { nCells: 40 } }, overrides));
+  M.species.forEach((a) => a.fill(0));
+  M.rules.cell = () => {};
+  M.rules.voxel = (ctx) => { ctx.out.E = 1; ctx.out.mobility = mobility; };
+  return M;
+}
+
+describe('engine v0.3: species transport, per-species orientation, accumulators', () => {
+  test('validate() accepts the opt-in fixture and every new field', () => {
+    assert.deepEqual(TissueEngine.validate(LAB), []);
+    const M = new TissueEngine(LAB, { seed: 3 });
+    assert.equal(M.nVox, 3, 'engine.vox');
+    assert.equal(M._typeCMax[0], 2, 'states.c.range sets the c clamp');
+    assert.ok(M.scratch && typeof M.scratch === 'object', 'engine.scratch exists for makeRules');
+    assert.ok(M.scratch.calls >= 1, 'makeRules cached on engine.scratch');
+  });
+
+  test('species D: 6-neighbour diffusion, zero-flux walls, mass conserved away from the sink', () => {
+    const M = labBare();
+    const N = M.N, iGag = M.speciesIndex.gag, mid = ((3 * N) + 3) * N + 3;
+    M.species[iGag][mid] = 1;
+    const before = M.species[iGag].reduce((a, b) => a + b, 0);
+    M.step(8);
+    const g = M.species[iGag], after = g.reduce((a, b) => a + b, 0);
+    assert.ok(g[mid] < 1 && g[mid + 1] > 1e-3, `spike spreads: ${g[mid]} / ${g[mid + 1]}`);
+    assert.ok(Math.abs(after - before) < 1e-3, `mass conserved: ${before} → ${after}`);
+    const N2 = N * N;
+    assert.equal(g[mid + N2], g[mid + N], 'isotropic: the +x and +y neighbours are identical');
+    assert.equal(g[mid - N2], g[mid - N], 'and so are the −x and −y ones');
+    // an explicit scheme with the diffusion number clamped at 1/6 can never go negative or oscillate
+    for (let v = 0; v < M.NV; v++) assert.ok(g[v] >= 0 && g[v] <= 1, `bounded at ${v}: ${g[v]}`);
+  });
+
+  test('species sink: the +z layer loses sink·rho·dt and it counts as degradation', () => {
+    const M = labBare({}, 0);                         // mobility 0 → sink only, no diffusion
+    const N = M.N, iGag = M.speciesIndex.gag;
+    M.species[iGag].fill(0.5);
+    M.step(5);
+    const g = M.species[iGag];
+    assert.ok(Math.abs(g[(N - 1)] - 0.5 * (1 - 0.8 * M.dt) ** 5) < 1e-6, `top layer ${g[N - 1]}`);
+    assert.equal(g[0], 0.5, 'every other layer is untouched');
+    const s = M.stats();
+    assert.ok(s.degradation > 0 && s.cumDegradation > 0, 'sink loss reaches the flux gauge');
+    assert.ok(Math.abs(s.cumDegradation - s.degradation * 5 * M.dt) / s.cumDegradation < 0.05, 'cumDegradation is its integral');
+  });
+
+  test('a fiber species carries the orientation tensor with it (trace stays exact)', () => {
+    const M = labBare();
+    const N = M.N, iFelt = M.speciesIndex.felt, v = ((3 * N) + 3) * N + 3, w = v + 1;
+    for (const k of ['Txx', 'Tyy', 'Tzz', 'Txy', 'Txz', 'Tyz']) M[k].fill(0);
+    M.species[iFelt][v] = 1; M.Tzz[v] = 1;            // one voxel of perfectly z-aligned fiber
+    M._derived();
+    M.step(10);
+    const trV = M.Txx[v] + M.Tyy[v] + M.Tzz[v], trW = M.Txx[w] + M.Tyy[w] + M.Tzz[w];
+    assert.ok(Math.abs(trV - M.species[iFelt][v]) < 1e-5, 'trace(T) = fiber total at the source');
+    assert.ok(Math.abs(trW - M.species[iFelt][w]) < 1e-5, 'trace(T) = fiber total at the neighbour');
+    assert.ok(M.species[iFelt][w] > 1e-3, 'the neighbour received fiber');
+    assert.ok(M.fa[w] > 0.9 && M.Tzz[w] / trW > 0.9, `it arrived aligned, not isotropic (FA ${M.fa[w]})`);
+    assert.ok(Math.abs(M.fz[w]) > 0.99, 'the principal axis followed');
+  });
+
+  test('out.mobility hinders transport (a tight mesh holds matrix where it was made)', () => {
+    const spread = (mob) => {
+      const M = labBare({}, mob);
+      const N = M.N, mid = ((3 * N) + 3) * N + 3;
+      M.species[M.speciesIndex.gag][mid] = 1;
+      M.step(20);
+      return M.species[M.speciesIndex.gag][mid];
+    };
+    assert.ok(spread(0.05) > spread(1) + 0.1, 'mobility 0.05 keeps the spike, mobility 1 spreads it');
+  });
+
+  test('out.polS / out.alignS: each fiber species is deposited with its own orientation', () => {
+    // one pinned cell polarised along z, secreting 3 parts isotropic felt to 1 part axial rope
+    const build = (mode) => {
+      const M = new TissueEngine(LAB, { seed: 3 });
+      M.reset('grow', { dials: { nCells: 40, load: 0 }, init: { species: {} } });   // load 0: no passive alignment
+      M.species.forEach((a) => a.fill(0));
+      for (const k of ['Txx', 'Tyy', 'Tzz', 'Txy', 'Txz', 'Tyz']) M[k].fill(0);
+      const iFelt = M.speciesIndex.felt, iRope = M.speciesIndex.rope;
+      M.nCells = 1; M._cx[0] = 0.5; M._cx[1] = 0.5; M._cx[2] = 0.5;
+      M._cp[0] = 0; M._cp[1] = 0; M._cp[2] = 1;
+      M.rules.cell = (ctx) => {
+        ctx.out.secrete[iFelt] = 3; ctx.out.secrete[iRope] = 1;
+        if (mode === 'polS') { ctx.out.usePolS = true; ctx.out.polS[iFelt] = 0; ctx.out.polS[iRope] = 1; }
+        else ctx.out.pol = mode;
+        ctx.out.speed = 0; ctx.out.guide = 0; ctx.out.noise = 0;
+      };
+      M.rules.voxel = (ctx) => { ctx.out.E = 1; ctx.out.mobility = 0; };
+      M.step(10);
+      const v = (4 * M.N + 4) * M.N + 4;
+      return M.Tzz[v] / (M.Txx[v] + M.Tyy[v] + M.Tzz[v]);
+    };
+    const exact = 1 / 4 + (3 / 4) / 3;                // rope fully axial + felt isotropic
+    assert.ok(Math.abs(build('polS') - exact) < 1e-6, `polS is exact: ${build('polS')} vs ${exact}`);
+    assert.ok(Math.abs(build(1) - 1) < 1e-6, 'one scalar pol has to mix the two rates');
+    assert.ok(Math.abs(build(0.25) - exact) < 1e-6, 'the deposition-weighted scalar reproduces it only by hand');
+  });
+
+  test('out.alignS is applied as one density-weighted realignment rate; NaN falls back to the scalars', () => {
+    const run = (write) => {
+      const M = new TissueEngine(LAB, { seed: 3 });
+      M.reset('grow', { dials: { nCells: 40, load: 0 }, init: { species: {} } });
+      M.species.forEach((a) => a.fill(0));
+      for (const k of ['Txx', 'Tyy', 'Tzz', 'Txy', 'Txz', 'Tyz']) M[k].fill(0);
+      const iFelt = M.speciesIndex.felt;
+      M.nCells = 1; M._cx[0] = 0.5; M._cx[1] = 0.5; M._cx[2] = 0.5;
+      M._cp[0] = 0; M._cp[1] = 0; M._cp[2] = 1;
+      M.rules.cell = (ctx) => { ctx.out.secrete[iFelt] = 1; ctx.out.pol = 0; ctx.out.align = 2; write(ctx.out, iFelt); ctx.out.speed = 0; ctx.out.guide = 0; ctx.out.noise = 0; };
+      M.rules.voxel = (ctx) => { ctx.out.E = 1; ctx.out.mobility = 0; };
+      M.step(10);
+      const v = (4 * M.N + 4) * M.N + 4;
+      return M.fa[v];
+    };
+    const scalar = run(() => {});                                            // align 2 through out.align
+    const perSpecies = run((o, i) => { o.usePolS = true; o.alignS[i] = 2; }); // the same through alignS
+    const off = run((o, i) => { o.usePolS = true; o.alignS[i] = 0; });        // explicitly no realignment
+    const fallback = run((o) => { o.usePolS = true; });                       // all NaN → out.align
+    assert.ok(Math.abs(scalar - perSpecies) < 1e-9, `alignS[s] = out.align gives the same tensor (${scalar} vs ${perSpecies})`);
+    assert.ok(off < scalar - 0.2, `alignS 0 realigns nothing (FA ${off} vs ${scalar})`);
+    assert.ok(Math.abs(fallback - scalar) < 1e-9, 'a NaN entry falls back to the scalar out.align');
+  });
+
+  test('out.vox[k]: extra per-voxel accumulators reach voxel(); vox[0] stays the aSum alias', () => {
+    const M = new TissueEngine(LAB, { seed: 3 });
+    M.reset('grow');
+    let seen = null, cells = 0;
+    const base = M.rules.voxel;
+    M.rules.voxel = (ctx) => {
+      base(ctx);
+      cells += ctx.vox[2];
+      if (seen === null && ctx.nCellsHere === 1) seen = { v0: ctx.vox[0], v1: ctx.vox[1], v2: ctx.vox[2], aSum: ctx.aSum };
+    };
+    M.step(1);
+    assert.ok(Math.abs(cells - M.nCells) < 1e-9, `Σ vox[2] = cell count (${cells} vs ${M.nCells})`);
+    assert.equal(seen.v0, seen.aSum, 'ctx.vox[0] IS ctx.aSum');
+    assert.equal(seen.v2, 1, 'one cell in this voxel');
+    assert.ok(Math.abs(seen.v1 - seen.v0 * seen.v0) < 1e-9, 'vox[1] carries Σ a² (one cell here)');
+    // the default of accumulator 0 is unchanged: out.aSum, else the cell's new a
+    const F = new TissueEngine(TISSUES.fibrous, { seed: SEED });
+    F.reset('maturation');
+    let sum = 0, n = 0;
+    const vb = F.rules.voxel;
+    F.rules.voxel = (ctx) => { vb(ctx); if (ctx.nCellsHere > 0) { sum += ctx.aSum / ctx.nCellsHere; n++; } };
+    F.step(1);
+    assert.ok(n > 0 && Math.abs(sum / n - F.stats().cells.a) < 0.02, 'fibrous still gets mean a through aSum');
+  });
+
+  test('stats(): scaffold, species.tissueTotal, scaffoldFlux and the cumulative integrals', () => {
+    const M = new TissueEngine(LAB, { seed: 3 });
+    M.reset('grow');
+    const s0 = M.stats();
+    assert.equal(s0.cumDeposition, 0); assert.equal(s0.cumDegradation, 0);
+    M.step(50);
+    const s = M.stats();
+    assert.ok(Math.abs(s.scaffold - s.species.scaf) < 1e-12, 'scaffold = Σ scaffold species');
+    assert.ok(Math.abs(s.species.tissueTotal - (s.species.total - s.species.scaf)) < 1e-12, 'tissueTotal excludes it');
+    assert.ok(s.species.total > s.species.tissueTotal, 'species.total still includes the scaffold');
+    assert.ok(Math.abs(s.scaffoldFlux - 0.05 * s.species.scaf) < 2e-3, `scaffoldFlux ≈ kHyd·scaf (${s.scaffoldFlux})`);
+    assert.ok(s.degradation < s.scaffoldFlux, 'scaffold dissolution is not degradation');
+    assert.ok(s.cumDeposition > 0 && s.cumDegradation > 0 && s.cumDeposition > s.cumDegradation);
+    for (const p of ['scaffold', 'scaffoldFlux', 'species.tissueTotal', 'cumDeposition', 'cumDegradation']) {
+      assert.ok(Number.isFinite(M.stat(p)), p);
+      assert.equal(M.stat(p), TissueEngine.statFrom(s, p));
+    }
+    M.reset('grow');
+    assert.equal(M.stats().cumDeposition, 0, 'the integrals restart on reset');
+  });
+
+  test('checkScenario: aggregated checks sample every 0.5 d inside the window', () => {
+    const res = TissueEngine.checkScenario(LAB, 'grow', { seed: 5 });
+    assert.ok(res.every((r) => r.pass), res.filter((r) => !r.pass).map((r) => `${JSON.stringify(r.check.at)} ${r.check.stat} ${r.value}`).join('; '));
+    const mn = res.find((r) => r.check.agg === 'min'), mean = res.find((r) => r.check.agg === 'mean'), first = res.find((r) => r.check.agg === 'first');
+    // re-sample the run by hand, every 0.5 d, and aggregate the same way
+    const M = new TissueEngine(LAB, { seed: 5 });
+    M.reset('grow');
+    const half = Math.round(1 / M.dt) / 2, logE = [], tissue = [];
+    for (let i = 0; i <= 40; i++) {
+      if (i === 10) M.setDials({ Gext: 0.1 });                    // the scenario's day-5 event
+      logE.push(M.stat('logE')); tissue.push(M.stat('species.tissueTotal'));
+      M.step(half);
+    }
+    const win = (a) => a.slice(20, 41);                           // days 10 … 20 inclusive
+    assert.ok(Math.abs(mn.value - Math.min(...win(logE))) < 1e-9, `'min' is the min of the 21 samples (${mn.value})`);
+    assert.ok(mn.value < win(logE)[0], 'and it is not simply the first sample');
+    const wt = win(tissue), avg = wt.reduce((x, y) => x + y, 0) / wt.length;
+    assert.ok(Math.abs(mean.value - avg) < 1e-9, `'mean' averages the same samples (${mean.value} vs ${avg})`);
+    assert.ok(Math.abs(first.value - 0.8) < 0.02, `'first' is the value at the start of the range (${first.value})`);
+  });
+
+  test('init.from: `events` replays the source scenario, `dials` overrides its dials, both are cached', () => {
+    const M = new TissueEngine(LAB, { seed: 5 });
+    M.reset('after');
+    const withEvents = M.stats().species.total;
+    assert.equal(M._fromCache.size, 1);
+    M.reset('after');
+    assert.equal(M._fromCache.size, 1, 'the pre-run is cached');
+    const variant = (from) => {
+      const alt = Object.assign({}, LAB, { scenarios: LAB.scenarios.map((s) => (s.key === 'after' ? Object.assign({}, s, { init: { from } }) : s)) });
+      const E = new TissueEngine(alt, { seed: 5 });
+      E.reset('after');
+      return E.stats().species.total;
+    };
+    const noEvents = variant({ scenario: 'grow', days: 10, dials: { Gext: 0.9 } });
+    const starved = variant({ scenario: 'grow', days: 10, events: true, dials: { Gext: 0 } });
+    assert.ok(Math.abs(withEvents - noEvents) > 1e-3, `events: the day-5 Gext drop is replayed (${withEvents} vs ${noEvents})`);
+    assert.ok(starved < withEvents, `dials: a starved pre-run hands over less (${starved} vs ${withEvents})`);
+    assert.deepEqual(TissueEngine.validate(Object.assign({}, LAB, {
+      scenarios: LAB.scenarios.map((s) => (s.key === 'after' ? Object.assign({}, s, { init: { from: { scenario: 'grow', days: 10, events: 'yes', dials: { nope: 1 } } } }) : s)),
+    })).sort(), ["scenario 'after' init.from.dials: unknown dial 'nope'", "scenario 'after' init.from.events must be a boolean"]);
+  });
+
+  test('exportMeta(): loadDial / cellCountDial, and a state-dependent radius keeps a format-2 number', () => {
+    const M = new TissueEngine(LAB, { seed: 3 });
+    const meta = M.exportMeta();
+    assert.equal(meta.loadDial, 'load'); assert.equal(meta.cellCountDial, 'nCells');
+    assert.equal(meta.engine, ENGINE_VERSION);
+    assert.equal(meta.cellTypes[0].radius, 0.028, 'the state-0 radius, for readers that expect a number');
+    assert.deepEqual(meta.cellTypes[0].radiusBy, { by: 'a', min: 0.028, max: 0.04 });
+    const F = new TissueEngine(TISSUES.fibrous, { seed: SEED }).exportMeta();
+    assert.equal(F.loadDial, 'strain'); assert.equal(F.cellCountDial, 'nCells');
+    assert.equal(F.cellTypes[0].radius, 0.03); assert.ok(!('radiusBy' in F.cellTypes[0]), 'a plain radius stays plain');
+    const T = new TissueEngine(TISSUE_TEMPLATE, { seed: 1 }).exportMeta();
+    assert.equal(T.loadDial, 'strain');
+  });
+
+  test('cellStates() merges `states` with the stateLabels / cRange aliases', () => {
+    const merged = TissueEngine.cellStates(LAB.cellTypes[0]);
+    assert.deepEqual(merged, [{ key: 'a', label: 'activation', range: [0, 1] }, { key: 'c', label: 'pericellular pool', range: [0, 2] }]);
+    const legacy = TissueEngine.cellStates({ stateLabels: { a: 'activation', b: null, c: 'pool' }, cRange: [0, 3] });
+    assert.deepEqual(legacy, [{ key: 'a', label: 'activation', range: [0, 1] }, { key: 'c', label: 'pool', range: [0, 3] }]);
+    assert.deepEqual(TissueEngine.cellStates({}), [{ key: 'a', label: null, range: [0, 1] }]);
+  });
+
+  test('validate() rejects the new fields when they are malformed', () => {
+    const bend = (patch) => TissueEngine.validate(Object.assign({}, LAB, patch));
+    const has = (errors, re) => errors.some((e) => re.test(e));
+    assert.ok(has(bend({ species: [{ key: 'total', label: 'x', kind: 'gel', color: '#ffffff' }] }), /reserved/), 'species key total');
+    assert.ok(has(bend({ species: [{ key: 'a', label: 'x', kind: 'gel', color: '#ffffff', D: -1 }] }), /D must be/), 'negative D');
+    assert.ok(has(bend({ species: [{ key: 'a', label: 'x', kind: 'gel', color: '#ffffff', sink: 'lots' }] }), /sink must be/), 'sink');
+    assert.ok(has(bend({ species: [{ key: 'a', label: 'x', kind: 'gel', color: '#ffffff', boundary: 'face:-z' }] }), /boundary must be/), 'species boundary');
+    assert.ok(has(bend({ engine: { vox: 9 } }), /engine\.vox/), 'engine.vox range');
+    assert.ok(has(bend({ cellTypes: [Object.assign({}, LAB.cellTypes[0], { radius: { by: 'c', min: 1, max: 2 } })] }), /radius object/), 'radius.by');
+    assert.ok(has(bend({ cellTypes: [Object.assign({}, LAB.cellTypes[0], { radius: 'big' })] }), /radius must be/), 'radius type');
+    assert.ok(has(bend({ cellTypes: [Object.assign({}, LAB.cellTypes[0], { states: [{ key: 'b', label: 'x', range: [0, 4] }] })] }), /must be \[0, 1\]/), 'only c may be re-ranged');
+    assert.ok(has(bend({ cellTypes: [Object.assign({}, LAB.cellTypes[0], { cRange: [0, 3] })] }), /disagree/), 'states.c vs cRange');
+    const win = (at, agg) => bend({ scenarios: LAB.scenarios.map((s) => (s.key === 'grow' ? Object.assign({}, s, { checks: [{ at, agg, stat: 'fa', op: 'gt', value: 0 }] }) : s)) });
+    assert.ok(has(win([10, 5], 'min'), /from ≤ to/), 'reversed at');
+    assert.ok(has(win([10, 20], 'median'), /agg min\|max\|mean\|first/), 'unknown agg');
+    assert.ok(has(win(10, 'min'), /agg only applies/), 'agg without a range');
+    assert.deepEqual(TissueEngine.validate(LAB), [], 'the fixture itself stays valid');
+  });
+});
+
 // ---------------------------------------------------------------- shared copy helpers
 describe('copy helpers', () => {
   test('copyFormatDial implements every format', () => {
@@ -388,11 +736,11 @@ describe('copy helpers', () => {
     assert.ok(sentence.includes('condensing') && sentence.includes(V.cellsActive), sentence);
     assert.equal(copyEquilibriumSentence(s, V), sentence, 'pure');
     const still = copyEquilibriumSentence({ deposition: 0, degradation: 0, species: { total: 0.01 }, cells: { a: 0 }, logE: 0 }, V);
-    assert.ok(still.includes('the cloud is still') && still.includes('hardly any matrix'), still);
+    assert.ok(still.includes('the cloud is still') && still.includes(`hardly any ${V.matrix}`), still);
     const evap = copyEquilibriumSentence({ deposition: 0.001, degradation: 0.01, species: { total: 0.5 }, cells: { a: 0.1 }, logE: 1 }, { matrix: 'aggrecan', cellsActive: 'x', cellsQuiet: 'the chondrocytes are quiet' });
     assert.ok(evap.includes('evaporating') && evap.includes('the chondrocytes are quiet') && evap.includes('aggrecan'), evap);
     // v0.1 stats shape still accepted
     const legacy = copyEquilibriumSentence({ deposition: 0.02, degradation: 0.01, meanRho: 0.8, meanAlpha: 0.9, meanLogE: 1.7 });
-    assert.ok(legacy.includes('condensing') && legacy.includes('stiff enough'), legacy);
+    assert.ok(legacy.includes('condensing') && /stiff/.test(legacy), legacy);
   });
 });

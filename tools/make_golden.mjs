@@ -9,6 +9,10 @@
 // per-tissue overrides in GOLDEN_VARIANTS merged in (the fibrous sandbox run starts from new = 0.15
 // with all dials at 0 so that "evaporation" is on record).
 //
+// Columns are stat paths (docs/EXTENDING.md §1), including the v0.3 additions
+// species.tissueTotal / cumDeposition / cumDegradation / scaffoldFlux; the test compares every
+// recorded path of a format-2 golden, so re-recording widens what is guarded.
+//
 // Note: tests/golden/fibrous.json was recorded by the v0.1 make_golden (model.js), whose loop fired
 // the day-d event BEFORE stepping day d (i.e. at t = d − 1) and described it as { injureAt, at: {d: dials} }.
 // The test translates that legacy shape; this tool writes explicit `events: [{ at, ... }]`.
@@ -39,8 +43,8 @@ for (const sc of tissue.scenarios) {
 }
 
 const M = new TissueEngine(tissue, { seed: SEED });
-const cols = ['species.total', ...tissue.species.map((s) => `species.${s.key}`), 'fa', 'logE', 'cells.a', 'cells.b',
-  ...tissue.fields.map((f) => `fields.${f.key}`), 'deposition', 'degradation'];
+const cols = ['species.total', 'species.tissueTotal', ...tissue.species.map((s) => `species.${s.key}`), 'fa', 'logE', 'cells.a', 'cells.b',
+  ...tissue.fields.map((f) => `fields.${f.key}`), 'deposition', 'degradation', 'cumDeposition', 'cumDegradation', 'scaffoldFlux'];
 const golden = { seed: SEED, tissue: TISSUE_KEY, tissueVersion: tissue.version, engine: ENGINE_VERSION, format: 2,
   params: tissue.params, engineParams: M.P, every: EVERY, runs: {} };
 for (const [key, r] of Object.entries(runs)) {

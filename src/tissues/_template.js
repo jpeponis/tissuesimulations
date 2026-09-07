@@ -27,6 +27,13 @@ export const TISSUE_TEMPLATE = {
   // ---- matrix species: per-voxel scalar densities (0 .. ~1.5; 1 ≈ native-like content).
   //      kind 'fiber' species are oriented and share the tensor T; 'gel' is an isotropic
   //      haze; 'scaffold' is drawn as a fading lattice. Colours are #rrggbb.
+  //      OPTIONAL transport (v0.3, off by default — see EXTENDING.md §2.4):
+  //        D: 0.04                          L²/day, 6-neighbour diffusion with zero-flux walls;
+  //                                         a fiber species carries its share of T with it
+  //        sink: 0.5, boundary: 'face:+z'   /day loss to the medium at the top layer only
+  //                                         ("washes out"; counts as degradation, or as
+  //                                          scaffoldFlux for a 'scaffold' species)
+  //      Keys 'total', 'fiberTotal' and 'tissueTotal' are reserved by the stat paths.
   species: [
     { key: 'gel', label: 'Hydrogel scaffold', kind: 'scaffold', color: '#9fb7c9',
       describe: 'carrier gel that hydrolyses at a fixed rate' },
@@ -43,15 +50,21 @@ export const TISSUE_TEMPLATE = {
   ],
 
   // ---- cell types. Each cell carries a type index and three state scalars a, b, c
-  //      (a, b ∈ [0,1]; c ∈ cRange, default [0,1]). `init` sets the starting values.
-  //      With several types, `fraction` sets their shares (default equal).
+  //      (a, b ∈ [0,1]; c ∈ the range of its `states` entry, default [0,1]). `init` sets the
+  //      starting values. With several types, `fraction` sets their shares (default equal).
+  //      `shape.aspect` is aspectMin at state 0 and aspectMax at state 1, so aspectMin >
+  //      aspectMax is legal (a cell that gets ROUNDER as the state rises).
+  //      `radius` may also be { by: 'a'|'b', min, max } to grow with a state.
   cellTypes: [
     { key: 'cell', label: 'Matrix-building cell',
       colors: ['#4ea3ff', '#ff7a3d'],                      // colour lerped by a
       shape: { by: 'a', aspectMin: 1.0, aspectMax: 2.0 },  // ellipsoid aspect along the polarity
       radius: 0.03, motile: true,
       init: { a: 0.05, b: 0, c: 0 },
-      stateLabels: { a: 'activation', b: null, c: null } },
+      // `states` is the v0.3 way to label and range the scalars; `stateLabels` / `cRange`
+      // are still accepted aliases (TissueEngine.cellStates merges the two forms).
+      // Only c may have a range other than [0, 1] — the renderer maps a and b on [0, 1].
+      states: [{ key: 'a', label: 'activation' }] },
   ],
 
   // ---- dials. role 'cellCount' is handled by the engine (adds/removes cells); role 'load'
@@ -75,13 +88,17 @@ export const TISSUE_TEMPLATE = {
 
   // ---- scenarios (ordered as in the panel). `init.species` are uniform densities with one
   //      jitter draw per voxel (± jitter·50 %); `init.from` pre-runs another scenario instead.
+  //      `init.from` may also carry `events: true` (replay the source scenario's events during
+  //      the pre-run; default false) and `dials: {...}` (override its dials).
   //      Optional `events` (dial changes / injuries at day `at`) are applied by the tests and
   //      the headless tools. `checks` are evaluated by TissueEngine.checkScenario():
   //        { at, stat, op: 'gt'|'lt'|'between', value }            absolute
   //        { at, stat, rel: { stat, op: 'gt'|'lt', at? }, value? }  relative to another stat / day
-  //      stat paths: species.<key> | species.<key>.fraction | species.total | fiber.total | fa |
-  //                  globalFA | fz | logE | E | cells.a | cells.b | cells.c | fields.<key> |
-  //                  deposition | degradation | ratio
+  //        { at: [from, to], agg: 'min'|'max'|'mean'|'first', … }   aggregated over 0.5 d samples
+  //      stat paths: species.<key> | species.<key>.fraction | species.total (with scaffold) |
+  //                  species.tissueTotal (without) | fiber.total | scaffold | fa | globalFA | fz |
+  //                  logE | E | cells.a | cells.b | cells.c | fields.<key> | deposition |
+  //                  degradation | ratio | scaffoldFlux | cumDeposition | cumDegradation
   scenarios: [
     { key: 'replace', title: 'Scaffold replacement',
       goal: 'Watch cells replace a dissolving hydrogel with a matrix of their own.',
@@ -161,7 +178,8 @@ export const TISSUE_TEMPLATE = {
 
   // ---- injury: omitted → no Injure button. (See fibrous.js for the shape.)
 
-  // ---- engine numerics this tissue wants (all optional; see ENGINE_DEFAULTS in src/engine.js)
+  // ---- engine numerics this tissue wants (all optional; see ENGINE_DEFAULTS in src/engine.js).
+  //      `vox: 1..4` asks for extra per-voxel accumulators (out.vox[k] → ctx.vox[k]); 0 is aSum.
   engine: { N: 12, dt: 0.02 },
 
   // ---- tissue parameters, passed to makeRules as `p`
@@ -177,7 +195,13 @@ export const TISSUE_TEMPLATE = {
     kGcell: 4,                        // autocrine growth factor from activated cells
   },
 
-  // ---- the rules: called once per reset; pre-resolve every index here, allocate nothing in the hooks
+  // ---- the rules: called once per reset; pre-resolve every index here, allocate nothing in the
+  //      HOOKS. makeRules itself MAY allocate (it runs once per reset) and may cache arrays on
+  //      `engine.scratch`, a plain object the engine creates per instance and never touches:
+  //        const sc = engine.scratch;  sc.nbr = sc.nbr || buildNeighbourTable(engine.N);
+  //      A hook may only read and write ITS OWN voxel or cell: ctx.rho / ctx.field are copies of
+  //      one voxel, and nothing in the contract lets a hook reach a neighbour. Anything that has
+  //      to move between voxels is species transport (`D` / `sink` above), not hook code.
   makeRules(engine, p) {
     const iGel = engine.speciesIndex.gel, iFib = engine.speciesIndex.fib;
     const iG = engine.fieldIndex.g;
@@ -202,6 +226,11 @@ export const TISSUE_TEMPLATE = {
         out.secrete[iFib] = (p.sBasal + p.sAct * a * a) * (q <= 0 ? 0 : q * q);
         out.pol = p.polBase + p.polAct * a;
         out.align = p.kAlign * a;
+        // With several fiber species, set out.usePolS = true and write out.polS[s] / out.alignS[s]
+        // per species instead (an entry left NaN falls back to out.pol / out.align):
+        //   out.usePolS = true; out.polS[iFelt] = 0; out.polS[iRope] = 0.9;
+        // Extra per-voxel accumulators (engine.vox > 1) are out.vox[1..3]; out.vox[0] / out.aSum
+        // is the classic "cell activity" sum that arrives as ctx.aSum in voxel().
         // autocrine growth factor
         out.fieldSrc[iG] = p.kGcell * a * H;
         // polarity dynamics and migration (the engine applies dt, FA and the noise draws)
@@ -218,6 +247,11 @@ export const TISSUE_TEMPLATE = {
         out.dRho[iGel] = -lossGel;
         out.dRho[iFib] = -lossFib;
         out.loss = lossGel + lossFib;
+        // A dissolving SCAFFOLD is usually neither deposition nor degradation of tissue: report it
+        // as out.scaffoldLoss instead (stats().scaffoldFlux, the third flux bar) and leave it out
+        // of out.loss. Here the gel is counted as loss so the two-bar gauge still reads sensibly.
+        // out.mobility ∈ [0,1] (default 1) hinders species transport in this voxel, e.g.
+        //   out.mobility = 1 - gel;        // a tight mesh holds matrix where it was made
         // stiffness "now" (no `stiffness` hook here: after reset the engine calls voxel() with dt = 0)
         out.E = p.E0 + p.EGel * gel + p.Escale * fib * fib * (1 + p.kStrain * strain);
       },
