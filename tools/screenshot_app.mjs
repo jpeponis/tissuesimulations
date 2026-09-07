@@ -3,7 +3,6 @@
 //   node tools/screenshot_app.mjs [outDir] [scenario] [days]
 // Headless Chromium in some sandboxes cannot complete TLS to the CDNs even when
 // curl can, so CDN and font requests are served from a curl-fetched cache.
-import { chromium } from 'playwright';
 import { spawn, execFile } from 'node:child_process';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname, extname } from 'node:path';
@@ -11,6 +10,13 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
+// playwright: bare import, else the global install (npm root -g)
+async function loadPlaywright() {
+  try { return await import('playwright'); } catch (e) { /* fall through */ }
+  const { stdout } = await execFileP('npm', ['root', '-g']);
+  return import(join(stdout.trim(), 'playwright', 'index.mjs'));
+}
+const { chromium } = await loadPlaywright();
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = process.argv[2] || join(root, 'dist', 'shots');
 const scenario = process.argv[3] || 'maturation';
@@ -51,13 +57,15 @@ const page = await context.newPage();
 const errors = [];
 page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') errors.push(`${m.type()}: ${m.text()}`); });
 page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
-await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: 'networkidle' });
+const pagePath = process.env.PAGE || 'index.html'; // e.g. PAGE=dist/tissue-weather.html
+await page.goto(`http://127.0.0.1:${port}/${pagePath}`, { waitUntil: 'networkidle' });
 await page.waitForFunction(() => window.tissueApp && window.tissueApp.model, null, { timeout: 30000 });
 await page.evaluate((s) => window.tissueApp.loadScenario(s), scenario);
 await page.waitForTimeout(1500);
 await page.evaluate(() => window.tissueApp.setPlaying(false));
 await page.waitForTimeout(300);
 await page.screenshot({ path: join(outDir, `${scenario}-day0.png`) });
+if (process.env.INJURE) await page.evaluate(() => window.tissueApp.model.injure());
 const t0 = Date.now();
 await page.evaluate((d) => { window.tissueApp.advance(d); window.tissueApp.syncReadouts(true); }, days);
 const ms = Date.now() - t0;

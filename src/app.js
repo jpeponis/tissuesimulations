@@ -234,6 +234,9 @@ class TissueApp {
 
   syncReadouts(force, now = 0) {
     const s = this.model.stats();
+    // deposition/degradation come back summed over voxels; show them as mean density change per day
+    const nVox = this.model.state.N ** 3;
+    s.deposition /= nVox; s.degradation /= nVox;
     appEl('day').textContent = s.t.toFixed(1);
     for (const p of Object.values(this.plots)) p.plot.push(s.t, s);
     this.plots.rho.val.textContent = `${s.meanRho.toFixed(2)} (${Math.round(100 * (s.meanRhoMat / Math.max(s.meanRho, 1e-6)))} % mature)`;

@@ -43,7 +43,7 @@ Keyboard: space toggles play/pause. Drag to orbit, wheel to zoom.
 | `blender/` | `import_tissue.py` turns an exported trajectory into an animated Blender scene for cinematic renders; see `blender/README.md` |
 | `tools/run_headless.mjs` | runs the scenarios in Node, writes CSV stats and JSON trajectories |
 | `tools/plot_scenarios.py` | matplotlib panel of the headless runs |
-| `tests/` | `node --test tests/` — invariants and qualitative scenario checks |
+| `tests/` | `node --test tests/*.test.mjs` — invariants and qualitative scenario checks |
 
 ## The model in one paragraph
 

@@ -290,6 +290,8 @@ cells in 3D are spindles 50–100 µm long) and 1 L/d = 12.5 µm/h.
 
 ## 4. Recommended changes
 
+> **Status in v0.1 (as built).** The implementation adopted items 1, 3, 4 (form; load-dependence retained), 5 (asymmetric τ only, no slow memory variable), 7, 8, 9 and 10; adopted 2 and 6 in part (`kGuide 6`, `σ 2.5 rad/√d`, a grip factor instead of the full tent); and did not adopt a pure stiffness gate (it kills the unloading scenario), the memory variable, or `rMat ≤ 0.03` (the >40 % unloading target then becomes unreachable; `rMat = 0.05`). The full table of built values is in `docs/SPEC.md` §3 and the header of `src/model.js`.
+
 1. **Fix the migration-speed conversion.** 30 µm/h is 720 µm/d = 2.4 L/d at L = 300 µm, not 0.7 L/d.
    Keep `v0 = 0.7 L/d` (≈ 9 µm/h, the low end of 3D fibroblast speeds; Hakkinen 2011, Sun 2004) and
    correct the comment, or raise to 1–2 L/d; do not leave the two inconsistent.

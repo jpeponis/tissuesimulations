@@ -33,7 +33,7 @@ src/app.js            wires model ↔ render ↔ UI; scenario presets; export JS
 tools/build_single.mjs  inlines src/*.js into dist/tissue-weather.html (single-file artifact)
 tools/run_headless.mjs  node: run scenarios, dump CSV + JSON trajectory
 tools/plot_scenarios.py matplotlib check plots of the CSVs
-tests/model.test.mjs  node --test: invariants (mass ≥ 0, FA ∈ [0,1], scenarios diverge as expected)
+tests/model.test.mjs  node --test tests/*.test.mjs: invariants (mass ≥ 0, FA ∈ [0,1], scenarios diverge as expected)
 blender/import_tissue.py  bpy script: JSON trajectory → animated fibers + cells (Blender 4.2 LTS)
 docs/MODEL.md         equations, biology, parameter table with sources
 docs/TEACHING.md      lesson plan, guided experiments, misconception checks, where the metaphor breaks
@@ -209,3 +209,37 @@ total degradation rate this step, rendered as a two-sided bar
   seconds); crosslinked collagen is nearly irreversible (hysteresis); cells are
   not passive droplets, they change their own rules (alpha) — that is the
   "reciprocity".
+
+## 3. Implementation notes — v0.1 as built
+
+The code departs from sections 1.2–1.5 where the spec's first-guess constants
+could not produce the scenario behaviours of 1.7. `src/model.js` carries the
+full tuning log in its header comment; `docs/MODEL.md` §4 lists the biology
+reviewer's recommendations and which were adopted. Summary of the deviations:
+
+| item | spec | as built | why |
+|---|---|---|---|
+| secretion per cell | `sBasal + sAct·α` (0.004, 0.05) | `(0.005 + 2.5·α²)·(0.5 + 0.5·H)·(1 − ρ/1.6)²` | spec gain ~50× too low to reach ρ≈1 in 60 d; α² keeps quiescent cells from filling a low-GF tissue; crowding term gives a steady state |
+| activation target | additive Hill sum, `aE + aG = 1.6` | `tanh(gsat·(1.15 + 0.6·H) − 0.1·0.5/(E+0.5))`, `gsat = g²/(g²+0.25)`, `H = τ²/(1+τ²)`, `τ = (E/10)(strain + 0.12·α)` | additive form has no low state at Gext 0.2, so no hysteresis; multiplicative TGF-β × tension gating (Hinz) gives bistability. `kappa` (undefined in spec) = 0.12 |
+| τα | 1 d | 2 d up / 4 d down | asymmetric activation kinetics (MODEL.md §4) |
+| MMP source per cell | `mBasal·P + mAct·(1 − τSat)` | `20·P³ + 3.5·(1 − H)/(1 + (α/0.25)²)`, `kMdec = 1/d` | P³ folds TIMP in; activated cells suppress MMP |
+| growth factor | constants unspecified | `kBath 4/d`, `kGdec 0`, autocrine `12·α·H`, `kGrel 2`, `D = 0.05 L²/d` (diffusion number clamped ≤ 1/6) | H-gated release = latent TGF-β activation by contractile cells on stiff matrix; the local autocrine cloud is the fibrosis memory |
+| degradation | `kDeg·m·(ρnew + 0.15·ρmat)` | `0.5·(0.02 + m)·(ρnew + 0.05·ρmat)·(1 − 0.5·strain·Tzz/ρ)` | mature matrix far less degradable; loaded aligned fibres protected |
+| maturation | `(1/14)·ρnew·(1 + 2·α)` | `(1/14)·ρnew·(0.1 + 12·Σα_cells in voxel)` | crosslinking needs LOX from activated cells; otherwise a cell-free gel matures and can never evaporate |
+| load → fibres | `0.5·strain` | `0.06·strain²` | spec value aligns fibres to FA≈1 in days without cells |
+| load → cell polarity | `1.5·strain` | `10·strain²·H` | cells align with load only when they feel tension, so wounds fill with isotropic scar |
+| contact guidance / noise | `kGuide 2`, `σ 0.6` | `6`, `2.5 rad/√d` | polarity memory of hours, not days |
+| speed | as spec | × grip `0.5 + 0.5·min(1, ρ/0.5)`; comment fixed: 0.7 L/d ≈ 9 µm/h | Metzcar-style tent rejected: cells left sparse regions and wounds never refilled |
+| kStrain | 1 | 0.5 | |
+| injury | instantaneous g/m bursts | bursts + inflammation field (g source 4/d, m source 1/d, τ 5 d) | bath exchange erases a burst in hours |
+| wound dials | unspecified | Gext 0.5, strain 0.45, protease 0.4 | |
+| sandbox init | ρ 0.02 | ρ 0.15 | so "evaporates" is a visible event |
+
+Spec inconsistencies found by the implementers, kept here for the record:
+`kappa` undefined; 30 µm/h at L = 300 µm is 2.4 L/d, not 0.7; `kBath, kGcell,
+kGrel, kGdec, mBasal, mAct, kMdec, D` undefined; explicit diffusion needs
+`D ≤ h²/(6 dt)`; `node --test tests/` does not work on Node ≥ 21 (use
+`node --test tests/*.test.mjs`). The renderer uses `fiberRadiusScale 0.6` and
+`fiberLengthScale 1.35` relative to 1.9 (radius 1.0 read as matchsticks), a
+radius floor of 0.025 h, and normal rather than additive blending for the
+field point clouds.

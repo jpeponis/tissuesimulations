@@ -243,11 +243,11 @@ export class TissueRenderer {
   _buildLoad() {
     const group = new THREE.Group();
     const arrowMat = new THREE.MeshStandardMaterial({
-      color: 0xd6f26b, emissive: 0xd6f26b, emissiveIntensity: 0.35, roughness: 0.5,
+      color: 0xd9c9a3, emissive: 0xd9c9a3, emissiveIntensity: 0.25, roughness: 0.5,
       transparent: true, opacity: 0.6, depthWrite: false,
     });
     const plateMat = new THREE.MeshBasicMaterial({
-      color: 0xd6f26b, transparent: true, opacity: 0.08, depthWrite: false, side: THREE.DoubleSide,
+      color: 0xd9c9a3, transparent: true, opacity: 0.08, depthWrite: false, side: THREE.DoubleSide,
     });
     const shaftGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.68, 12, 1, false);
     shaftGeo.translate(0, 0.34, 0);
@@ -541,7 +541,7 @@ export class TissueRenderer {
     const L = this.load;
     L.group.visible = s >= 0.02;
     if (!L.group.visible) return;
-    const len = 0.14 + 0.36 * s, th = 0.55 + 0.9 * s;
+    const len = 0.10 + 0.22 * s, th = 0.5 + 0.7 * s; // keep the arrows clear of the HUD text
     L.top.scale.set(th, len, th);
     L.bottom.scale.set(th, len, th);
     L.arrowMat.opacity = 0.35 + 0.45 * s;
