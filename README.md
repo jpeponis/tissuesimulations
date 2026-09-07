@@ -15,6 +15,13 @@ interactive also shows where that metaphor breaks (slow turnover, crosslink
 irreversibility and hysteresis, cells as active agents that rewrite their own
 rules).
 
+![Scaffold at day 0: a pale cloud of provisional fibers and round quiescent cells](docs/img/maturation-day0.png)
+![The same tissue at day 40: dense amber fibers aligned with the load, spindle-shaped activated cells](docs/img/maturation-day40.png)
+
+Headless scenario curves (`node tools/run_headless.mjs` then `python3 tools/plot_scenarios.py`):
+
+![Scenario curves: density, maturity, alignment, stiffness, activation, deposition vs degradation](docs/img/scenarios.png)
+
 ## Run it
 
 - **No install:** open `dist/tissue-weather.html` in a modern browser (Chrome,

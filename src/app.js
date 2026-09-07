@@ -151,7 +151,7 @@ class TissueApp {
       appH('button', { type: 'button', text: 'Export trajectory (JSON for Blender)', onclick: () => this.exportJSON() }),
       appH('a', { href: 'https://github.com/jpeponis/tissuesimulations', target: '_blank', rel: 'noopener', text: 'Model notes & source' }),
     ]));
-    ab.append(appH('p', { class: 'note', text: 'The export holds one frame every 2 simulated days since the last reset. In some hosted viewers the browser blocks downloads; run the page from the repository if the button does nothing.' }));
+    ab.append(appH('p', { class: 'note', text: 'The export holds one frame every 2 simulated days since the last reset. In the hosted viewer you will be asked to confirm the save.' }));
     window.addEventListener('resize', () => this.redrawPlots());
   }
 
@@ -266,18 +266,33 @@ class TissueApp {
       if (this.exportFrames.length > 120) this.exportFrames.shift();
     }
   }
-  exportJSON() {
+  async exportJSON() {
     const st = this.model.state;
     const payload = {
       meta: { N: st.N, L: 1, K: this.params.K || 3, dtDays: this.model.params.dt, scenario: this.scenarioKey, dials: Object.assign({}, st.dials), exportEveryDays: this.exportEvery },
       frames: this.exportFrames,
     };
-    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    const filename = `tissue-weather-${this.scenarioKey}-day${st.time.toFixed(0)}.json`;
+    const json = JSON.stringify(payload);
+    // Hosted artifact viewer: saves go through the downloads capability (viewer confirms).
+    const dl = (window.claude && typeof window.claude.use === 'function') ? await window.claude.use('downloads') : null;
+    if (dl) {
+      try {
+        await dl.save({ filename, data: json });
+        this.flash(`Saved ${filename} (${this.exportFrames.length} frames).`);
+      } catch (e) {
+        if (e && e.code === 'declined') this.flash('Export cancelled.');
+        else this.flash('Export is not available in this viewer. Run the page from the repository to download.');
+      }
+      return;
+    }
+    const blob = new Blob([json], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `tissue-weather-${this.scenarioKey}-day${st.time.toFixed(0)}.json`;
+    a.download = filename;
     document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    this.flash(`Exported ${filename} (${this.exportFrames.length} frames).`);
   }
 }
 
