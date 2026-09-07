@@ -10,6 +10,7 @@
 // Ghost traces: setReference() snapshots the current series as dashed reference
 // lines that stay drawn until clearReference(). The app calls it on Reset so
 // the previous run stays visible for comparison.
+import { copyFormatRate } from './copy.js';
 
 const PLOT_FONT = '11px "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
 
@@ -143,19 +144,27 @@ export class TimeSeriesPlot {
       if (y1 - y0 < 1e-6) { y0 -= 0.5; y1 += 0.5; }
       const pad = (y1 - y0) * 0.1; y0 -= pad; y1 += pad;
     } else { [y0, y1] = this.spec.yDomain; }
-    // stacked series may exceed the domain top: widen if needed (live and ghost)
+    // Data may leave the declared domain — a stack that sums past its top (cartilage matrix
+    // reaches ≈ 1.5), or a line above/below it (stiffness on a log axis). Widen instead of
+    // clipping, in quarter steps, over both the live run and the ghost.
     if (this.spec.yDomain !== 'auto') {
-      let maxStack = 0;
+      let hi = -Infinity, lo = Infinity;
       const scan = (T, D) => {
         for (let i = 0; i < T.length; i++) {
           let acc = 0;
-          for (const s of this.spec.series) if (s.stack) acc += D[s.key][i];
-          if (acc > maxStack) maxStack = acc;
+          for (const s of this.spec.series) {
+            const v = D[s.key][i];
+            if (!Number.isFinite(v)) continue;
+            if (s.stack) { acc += v; if (acc > hi) hi = acc; if (acc < lo) lo = acc; }
+            else { if (v > hi) hi = v; if (v < lo) lo = v; }
+          }
         }
       };
       scan(this.t, this.data);
       if (ref) scan(ref.t, ref.data);
-      if (maxStack > y1) y1 = Math.ceil(maxStack * 4) / 4;
+      const slack = 0.02 * (y1 - y0);          // ignore a hair over the top (a pool that saturates at 1)
+      if (hi > y1 + slack) y1 = Math.ceil(hi * 4) / 4;
+      if (lo < y0 - slack) y0 = Math.floor(lo * 4) / 4;
     }
 
     const X = (t) => padL + ((t - t0) / (t1 - t0)) * pw;
@@ -257,12 +266,19 @@ export class TimeSeriesPlot {
  * Two-sided flux gauge: degradation (evaporating, cool) to the left of centre,
  * deposition (condensing, warm) to the right. The bar shows log2(dep/deg),
  * clamped to ±3, so "balanced" is the centre mark.
+ *
+ * A tissue whose scaffold dissolves on its own clock (a hydrogel) has a third rate
+ * that is neither deposition nor degradation of tissue. update(dep, deg, scaffold)
+ * with a positive third value adds a thin one-sided bar under the gauge, scaled
+ * against the largest of the three rates, labelled `labels.scaffold`. Without it
+ * (or with 0) the gauge is exactly the two-bar gauge it was.
  */
 export class FluxGauge {
   constructor(canvas, theme, labels = {}) {
-    this.canvas = canvas; this.theme = theme; this.dep = 0; this.deg = 0;
-    this.labels = Object.assign({ left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation' }, labels);
+    this.canvas = canvas; this.theme = theme; this.dep = 0; this.deg = 0; this.scaf = 0;
+    this.labels = Object.assign({ left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation', scaffold: 'scaffold dissolving' }, labels);
     this.size = { w: canvas.clientWidth || 0, h: canvas.clientHeight || 0 };
+    this._tall = false;
     this._unwatch = plotWatchSize(canvas, (w, h) => {
       const changed = w !== this.size.w || h !== this.size.h;
       this.size = { w, h };
@@ -270,15 +286,22 @@ export class FluxGauge {
     });
   }
   dispose() { this._unwatch(); }
-  update(dep, deg) { this.dep = dep; this.deg = deg; this.draw(); }
+  update(dep, deg, scaffold) {
+    this.dep = dep; this.deg = deg;
+    this.scaf = Number.isFinite(scaffold) && scaffold > 0 ? scaffold : 0;
+    // the third bar needs a row of its own: grow the element once (the size watcher confirms it)
+    if (this.scaf > 0 && !this._tall) { this._tall = true; this.canvas.style.height = '88px'; this.size = { w: this.size.w, h: 88 }; }
+    this.draw();
+  }
   draw() {
     const set = plotSetupCanvas(this.canvas, this.size);
     if (!set) return;
     const { ctx, w, h } = set;
     const th = this.theme;
+    const scaf = this.scaf > 0 && h >= 80 ? this.scaf : 0;   // only once the taller box has arrived
     ctx.clearRect(0, 0, w, h);
     ctx.font = PLOT_FONT; ctx.textBaseline = 'middle';
-    const cx = w / 2, barY = 18, barH = 10, half = w / 2 - 12;
+    const cx = w / 2, barY = scaf ? 14 : 18, barH = 10, half = w / 2 - 12;
     // track
     ctx.fillStyle = th.grid; ctx.fillRect(cx - half, barY, half * 2, barH);
     // value
@@ -292,6 +315,15 @@ export class FluxGauge {
     // captions
     ctx.fillStyle = th.muted; ctx.textAlign = 'left'; ctx.fillText(this.labels.left, cx - half, barY + barH + 12);
     ctx.textAlign = 'right'; ctx.fillText(this.labels.right, cx + half, barY + barH + 12);
+    if (scaf) {
+      // one-sided magnitude bar: full width when the scaffold is the fastest of the three rates
+      const maxRate = Math.max(scaf, Math.max(0, this.dep) || 0, Math.max(0, this.deg) || 0) || 1;
+      const y = h - 36;
+      ctx.fillStyle = th.grid; ctx.fillRect(cx - half, y, half * 2, 5);
+      ctx.fillStyle = th.muted; ctx.fillRect(cx - half, y, 2 * half * Math.min(1, scaf / maxRate), 5);
+      ctx.fillStyle = th.muted; ctx.textAlign = 'left'; ctx.fillText(this.labels.scaffold, cx - half, h - 22);
+      ctx.textAlign = 'right'; ctx.fillStyle = th.text; ctx.fillText(copyFormatRate(scaf), cx + half, h - 22);
+    }
     ctx.textAlign = 'center'; ctx.fillStyle = th.text;
     const r = ratio > 99 ? '>99' : ratio.toFixed(2);
     ctx.fillText(`${this.labels.ratio} = ${r}`, cx, h - 8);

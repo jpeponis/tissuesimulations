@@ -28,6 +28,8 @@ const APP_TABLE_MS = 500;
 const APP_URL_MS = 500;     // history.replaceState debounce
 const APP_FLASH_MS = 3200;
 const APP_GHOST_MIN_DAYS = 0.5; // a run shorter than this is not worth keeping as a ghost
+const APP_SPEEDS = [['Watch', 2], ['Weeks', 8], ['Months', 20]];  // labelled presets next to the speed slider
+const APP_EVENTS_KEY = 'tw.autoEvents';
 const APP_KEYS = [
   ['Space', 'play / pause'], ['R', 'reset the scenario (previous run stays dashed)'], ['I', 'injure (when the tissue supports it)'],
   ['1 – 9', 'pick a scenario'], ['← →', 'nudge the focused dial (Home / End for the extremes)'], ['Tab', 'move between controls; the 3D view is focusable and describes itself'],
@@ -52,6 +54,13 @@ function appNum(v) { return String(Math.round(v * 1000) / 1000); }
 function appRound(x) { return x >= 10 ? x.toFixed(0) : String(Math.round(x * 10) / 10); }
 function appFirstSentence(t) { return (String(t).match(/^[^.]*\./) || [t])[0]; }
 function appShortLabel(t) { return String(t).replace(/\s*\(.*\)\s*$/, ''); }
+/** A label mid-sentence: lower-case the first letter, unless the first word is an acronym
+ *  ('Dynamic compression' → 'dynamic compression', 'TGF-β3 bath' and 'Collagen I' kept). */
+function appLowerFirst(t) {
+  const s = String(t);
+  const first = s.split(' ')[0];
+  return /[A-Z]/.test(first.slice(1)) ? s : s.charAt(0).toLowerCase() + s.slice(1);
+}
 /** 10^v as a readable number (no exponent notation): 0.89, 5.6, 32, 320. */
 function appPow10(v) { const x = Math.pow(10, v); return x >= 10 ? x.toFixed(0) : x >= 1 ? x.toFixed(1) : x.toPrecision(2); }
 function appFormatDial(dial, v) { return typeof dial.format === 'function' ? dial.format(v) : copyFormatDial(dial.format, v); }
@@ -74,6 +83,36 @@ function appStat(stats, path) {
   let v = stats;
   for (const p of parts) { if (v == null) return NaN; v = v[p]; }
   return typeof v === 'number' ? v : NaN;
+}
+/**
+ * The cell type's state descriptors, in the order the definition gives them:
+ * `cellTypes[0].states` ([{ key, label, range }], the richer form) if present, else the
+ * `stateLabels` map, else a single 'activation'. Nothing here assumes what a state means.
+ */
+function appCellStates(tissue) {
+  const ct = (tissue && tissue.cellTypes && tissue.cellTypes[0]) || null;
+  if (ct && Array.isArray(ct.states) && ct.states.length) {
+    return ct.states.filter((s) => s && s.key).map((s) => ({ key: String(s.key), label: s.label || String(s.key), range: Array.isArray(s.range) ? s.range : null }));
+  }
+  const out = [];
+  const sl = ct && ct.stateLabels;
+  if (sl) for (const k of ['a', 'b', 'c']) if (typeof sl[k] === 'string' && sl[k].trim()) out.push({ key: k, label: sl[k], range: null });
+  return out.length ? out : [{ key: 'a', label: 'activation', range: null }];
+}
+/** The primary state as a noun plus its parenthetical, e.g. 'phenotype (1 = chondrogenic)'. */
+function appStateNoun(states) {
+  const st = states.find((s) => s.key === 'a') || states[0];
+  const label = (st && st.label) || 'activation';
+  const m = /^(.*?)\s*\(([^)]*)\)\s*$/.exec(label);
+  return m && m[1] ? { noun: m[1], qualifier: m[2] } : { noun: label, qualifier: '' };
+}
+/** sessionStorage, with the read/write wrapped: sandboxed hosts throw on access. */
+function appSession(key, value) {
+  try {
+    if (value === undefined) return window.sessionStorage.getItem(key);
+    window.sessionStorage.setItem(key, value);
+    return value;
+  } catch (e) { return null; }
 }
 function appHasWebGL() {
   try { const c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); } catch (e) { return false; }
@@ -100,7 +139,12 @@ export class TissueApp {
     this.lastStatsAt = -1e9; this.lastPlotAt = -1e9; this.lastSentenceAt = -1e9; this.lastLabelAt = -1e9; this.lastTableAt = -1e9;
     this.flashUntil = 0; this.urlTimer = null; this.frameTimes = []; this.lastFpsAt = 0;
     this.plots = []; this.gauge = null; this.tableOn = false; this.tableCells = [];
-    this.dialInputs = {}; this.dialOutputs = {}; this.scenarioButtons = {}; this.layerButtons = {};
+    this.dialInputs = {}; this.dialOutputs = {}; this.scenarioButtons = {}; this.layerButtons = {}; this.speedButtons = [];
+    this.cellStates = []; this.stateNoun = { noun: 'activation', qualifier: '' }; this.voc = {};
+    // scripted scenario events: off by default (the student does the protocol by hand),
+    // remembered for the session so an instructor can leave hands-free mode on
+    this.autoEvents = appSession(APP_EVENTS_KEY) === '1';
+    this.pendingEvents = []; this.eventIdx = 0;
     const mq = (q) => (window.matchMedia ? window.matchMedia(q) : null);
     this.motionQuery = mq('(prefers-reduced-motion: reduce)');
     this.narrowQuery = mq('(max-width: 900px)');
@@ -133,6 +177,16 @@ export class TissueApp {
     appEl('hint-dismiss').addEventListener('click', () => { appEl('hint').hidden = true; });
     const speed = appEl('speed');
     speed.addEventListener('input', () => this.setSpeed(parseFloat(speed.value), true));
+    // three named speeds beside the slider: the slider still takes any value in between
+    const presets = appEl('speed-presets');
+    presets.replaceChildren();
+    this.speedButtons = APP_SPEEDS.map(([label, v]) => {
+      const t = appSpeedText(v);
+      const b = appH('button', { class: 'chip', type: 'button', 'aria-pressed': 'false', text: label, title: `${t.value} — ${t.hint}` });
+      b.addEventListener('click', () => this.setSpeed(v, false));
+      presets.append(b);
+      return { b, v };
+    });
     // legend: open on wide screens, collapsed (but reachable) on narrow ones
     const legendBox = appEl('legend-box');
     const applyLegend = () => { legendBox.open = !(this.narrowQuery && this.narrowQuery.matches); };
@@ -191,6 +245,10 @@ export class TissueApp {
     for (const f of tissue.fields || []) this.layers.fields[f.key] = false;
     this.dialValues = {};
     for (const d of tissue.dials) this.dialValues[d.key] = d.default;
+    // the words this tissue's cells are described with (canvas description, table, sentence)
+    this.cellStates = appCellStates(tissue);
+    this.stateNoun = appStateNoun(this.cellStates);
+    this.voc = Object.assign({ cellStateNoun: this.stateNoun.noun }, (tissue.copy && tissue.copy.vocabulary) || {});
     if (this.renderer && typeof this.renderer.setTissue === 'function') this.renderer.setTissue(tissue);
     this.buildDials(); this.buildScenarios(); this.buildReadouts(); this.buildLayers(); this.buildLegend(); this.buildAbout();
     appEl('btn-injure').hidden = !tissue.injury;
@@ -224,6 +282,12 @@ export class TissueApp {
     const card = appEl('scenario-card');
     const from = sc.init && sc.init.from;
     const events = this.describeEvents(sc);
+    const toggle = appH('button', {
+      class: 'chip', type: 'button', id: 'btn-auto-events', 'aria-pressed': String(this.autoEvents),
+      text: 'Auto-apply scripted events',
+      title: 'Off: you move the dials yourself at the days listed above. On: the app applies them as the clock passes each day.',
+      onclick: () => this.toggleAutoEvents(),
+    });
     card.replaceChildren(
       appH('h3', { text: sc.title }),
       sc.goal ? appH('p', { class: 'goal', text: sc.goal }) : '',
@@ -231,20 +295,82 @@ export class TissueApp {
       sc.question ? appH('p', { class: 'question', text: sc.question }) : '',
       sc.expect ? appH('details', {}, [appH('summary', { text: 'What should happen' }), appH('p', { text: sc.expect })]) : '',
       from ? appH('p', { class: 'note', text: `Starts from a matured tissue: “${this.scenarioTitle(from.scenario)}” pre-run for ${from.days} days.` }) : '',
-      events ? appH('p', { class: 'note', text: `Reference run (headless checks): ${events}. Here you do it by hand.` }) : '',
+      events ? appH('p', { class: 'note', id: 'events-note', text: this.eventsNote(events) }) : '',
+      events ? appH('div', { class: 'tools-row' }, [toggle]) : '',
     );
   }
 
-  /** Human-readable list of a scenario's scripted `events` (the app does not apply them; the student does). */
+  eventsNote(events) {
+    return this.autoEvents
+      ? `Scripted protocol, applied for you as the clock passes each day: ${events}.`
+      : `Reference run (headless checks): ${events}. Here you do it by hand.`;
+  }
+
+  /** Human-readable list of a scenario's scripted `events`. */
   describeEvents(sc) {
-    if (!Array.isArray(sc.events) || !sc.events.length) return '';
-    const dialLabel = (k) => { const d = this.tissue.dials.find((x) => x.key === k); return d ? d.label.toLowerCase() : k; };
-    return sc.events.map((ev) => {
-      const parts = [];
-      if (ev.dials) for (const [k, v] of Object.entries(ev.dials)) { const d = this.tissue.dials.find((x) => x.key === k); parts.push(`set ${dialLabel(k)} to ${d ? appFormatDial(d, v) : v}`); }
-      if (ev.injure) parts.push('injure');
-      return `day ${ev.at}: ${parts.join(', ') || 'event'}`;
-    }).join('; ');
+    if (!sc || !Array.isArray(sc.events) || !sc.events.length) return '';
+    return sc.events.map((ev) => `day ${ev.at}: ${this.describeEvent(ev, 'set ') || 'event'}`).join('; ');
+  }
+
+  /** One scripted event as words: "set growth-factor bath to 0.20, injure". */
+  describeEvent(ev, verb = '') {
+    const parts = [];
+    if (ev.dials) {
+      for (const [k, v] of Object.entries(ev.dials)) {
+        const d = this.tissue.dials.find((x) => x.key === k);
+        parts.push(`${verb}${d ? appLowerFirst(d.label) : k} to ${d ? appFormatDial(d, v) : v}`);
+      }
+    }
+    if (ev.injure) parts.push('injure');
+    return parts.join(', ');
+  }
+
+  // ---------- scripted events (opt-in) ----------
+  toggleAutoEvents(on) {
+    this.autoEvents = on === undefined ? !this.autoEvents : !!on;
+    appSession(APP_EVENTS_KEY, this.autoEvents ? '1' : '0');
+    const b = appEl('btn-auto-events');
+    if (b) b.setAttribute('aria-pressed', String(this.autoEvents));
+    const events = this.describeEvents(this.scenario());
+    const note = appEl('events-note');
+    if (note && events) note.textContent = this.eventsNote(events);
+    if (!this.autoEvents) { this.flash('Auto-apply off: move the dials yourself, as the steps ask.'); return; }
+    const skipped = this.skipPastEvents();
+    const left = this.pendingEvents.length - this.eventIdx;
+    if (left > 0) {
+      this.flash(`Auto-apply on: ${left} scripted event${left > 1 ? 's' : ''} left, the next on day ${this.pendingEvents[this.eventIdx].at}.${skipped ? ` ${skipped} already passed — Reset to run the protocol from day 0.` : ''}`);
+    } else if (this.pendingEvents.length) {
+      this.flash('Auto-apply on, but every scripted event of this run has already passed. Reset to run the protocol from day 0.');
+    } else {
+      this.flash('Auto-apply on. This scenario has no scripted events.');
+    }
+  }
+
+  nextEvent() { return this.eventIdx < this.pendingEvents.length ? this.pendingEvents[this.eventIdx] : null; }
+
+  /** Skip the events whose day is already behind the clock (turning the toggle on mid-run). */
+  skipPastEvents() {
+    const t = this.engine ? this.engine.time : 0;
+    let skipped = 0;
+    while (this.eventIdx < this.pendingEvents.length && this.pendingEvents[this.eventIdx].at < t - 1e-9) { this.eventIdx++; skipped++; }
+    return skipped;
+  }
+
+  /** Apply one scripted event: dials through the engine (and the dial UI), injure through the engine. */
+  applyEvent(ev) {
+    this.eventIdx++;
+    const parts = [];
+    if (ev.dials) {
+      const d = this.validDials(ev.dials);
+      if (Object.keys(d).length) { this.engine.setDials(d); this.syncDialsFromEngine(); }
+      parts.push(this.describeEvent({ dials: ev.dials }, 'set '));
+    }
+    if (ev.injure) {
+      if (this.tissue.injury) { this.engine.injure((ev.injure && ev.injure.center) || null, ev.injure && ev.injure.radius); parts.push('wound inflicted'); }
+      else parts.push('injury skipped (this tissue has none)');
+    }
+    this.flash(`Day ${ev.at}, scripted: ${parts.filter(Boolean).join('; ') || 'event applied'}.`);
+    this.scheduleUrl();
   }
 
   loadScenario(key, o = {}) {
@@ -267,6 +393,8 @@ export class TissueApp {
     this.ready = false;
     setTimeout(() => {
       this.engine.reset(sc.key);
+      this.pendingEvents = (Array.isArray(sc.events) ? sc.events.slice() : []).sort((a, b) => (a.at || 0) - (b.at || 0));
+      this.eventIdx = 0;
       if (o.dials) { const d = this.validDials(o.dials); if (Object.keys(d).length) this.engine.setDials(d); }
       this.syncDialsFromEngine();
       const st = this.engine.state;
@@ -370,9 +498,9 @@ export class TissueApp {
       const head = appH('div', { class: 'head' }, [appH('h3', { text: r.label }), val]);
       const meaning = (r.unit || r.meaning) ? appH('p', { class: 'meaning' }, [r.unit ? appH('span', { class: 'unit', text: r.unit }) : '', r.unit && r.meaning ? document.createTextNode(' — ') : '', r.meaning ? document.createTextNode(r.meaning) : '']) : '';
       if (r.type === 'flux') {
-        const canvas = appH('canvas', { role: 'img', 'aria-label': `${r.label} gauge; the deposition and degradation rates are in the values table` });
+        const canvas = appH('canvas', { role: 'img', 'aria-label': `${r.label} gauge; every rate it compares is listed in the values table` });
         box.append(appH('div', { class: 'readout gauge' }, [head, meaning, canvas]));
-        this.gauge = new FluxGauge(canvas, APP_THEME);
+        this.gauge = new FluxGauge(canvas, APP_THEME, { scaffold: this.scaffoldNoun() });
         continue;
       }
       const stack = r.type === 'stack';
@@ -392,6 +520,9 @@ export class TissueApp {
     this.syncReferenceUI();
   }
 
+  /** What the third flux bar and its table row are called: the tissue's word, else a neutral one. */
+  scaffoldNoun() { return this.voc.scaffoldNoun || 'scaffold dissolving'; }
+
   readoutValueText(p) {
     const r = p.readout, ser = p.plot.spec.series, v = this.values;
     if (!ser.length) return '';
@@ -405,17 +536,23 @@ export class TissueApp {
     return ser.map((s) => `${s.label} ${(v[s.key] || 0).toFixed(2)}`).join(' · ');
   }
 
-  // Values table: one row per series plus the flux rates. Built once per tissue, values updated in place.
+  // Values table: one row per series, the flux rates, the totals and the cell states the
+  // charts do not already show. Built once per tissue, values updated in place; a row whose
+  // getter returns null (a stat this engine does not provide) hides itself.
   buildTable() {
     const box = appEl('stats-table'); box.replaceChildren(); this.tableCells = [];
     const tbody = appH('tbody');
     const row = (group, label, unit, getter) => {
       const td = appH('td', { class: 'num', text: '–' });
-      tbody.append(appH('tr', {}, [appH('td', { text: group }), appH('th', { scope: 'row', text: label }), td, appH('td', { text: unit })]));
-      this.tableCells.push({ td, getter });
+      const tr = appH('tr', {}, [appH('td', { text: group }), appH('th', { scope: 'row', text: label }), td, appH('td', { text: unit })]);
+      tbody.append(tr);
+      this.tableCells.push({ tr, td, getter });
     };
+    const num = (v, digits = 3) => (Number.isFinite(v) ? v.toFixed(digits) : null);
+    const plotted = new Set();
     for (const p of this.plots) {
       for (const s of p.plot.spec.series) {
+        plotted.add(s.key);
         const def = (p.readout.series || []).find((x) => x.stat === s.key) || {};
         row(p.readout.label, s.label, p.isLog ? p.unitWord : (def.unit || p.readout.unit || ''), () => {
           const v = this.values[s.key];
@@ -429,6 +566,22 @@ export class TissueApp {
     row(fluxLabel, 'deposition', 'density per day', () => (this.stats ? copyFormatRate(this.stats.deposition) : '–'));
     row(fluxLabel, 'degradation', 'density per day', () => (this.stats ? copyFormatRate(this.stats.degradation) : '–'));
     row(fluxLabel, 'deposition / degradation', 'ratio', () => { const s = this.stats; if (!s) return '–'; const r = (s.deposition + 1e-9) / (s.degradation + 1e-9); return r > 99 ? '>99' : r.toFixed(2); });
+    // engine extras: shown only once (and while) the engine reports them
+    row(fluxLabel, this.scaffoldNoun(), 'density per day', () => { const v = this.stats && this.stats.scaffoldFlux; return Number.isFinite(v) && v > 0 ? copyFormatRate(v) : null; });
+    row(fluxLabel, 'deposited since reset', 'density', () => num(this.stats && this.stats.cumDeposition));
+    row(fluxLabel, 'degraded since reset', 'density', () => num(this.stats && this.stats.cumDegradation));
+    // totals and the cells themselves, in this tissue's own words
+    const sp = () => (this.stats && this.stats.species) || null;
+    row('Tissue', 'all species', 'relative density', () => num(sp() ? sp().total : NaN));
+    row('Tissue', 'matrix without the scaffold', 'relative density', () => num(sp() ? sp().tissueTotal : NaN));
+    const cellGroup = 'Cells';
+    row(cellGroup, 'number', 'cells', () => { const c = this.stats && this.stats.cells; return c && Number.isFinite(c.n) ? String(c.n) : null; });
+    for (const st of this.cellStates) {
+      const key = `cells.${st.key}`;
+      if (plotted.has(key)) continue;                       // already a charted series
+      const range = st.range ? `${st.range[0]}–${st.range[1]}` : '0–1';
+      row(cellGroup, st.label, `${range} (mean over cells)`, () => num(this.stats && this.stats.cells ? this.stats.cells[st.key] : NaN));
+    }
     this.tableCaption = appH('caption', { text: 'Latest values' });
     box.append(appH('table', {}, [
       this.tableCaption,
@@ -439,7 +592,11 @@ export class TissueApp {
   renderTable(now) {
     this.lastTableAt = now;
     if (this.stats) this.tableCaption.textContent = `Latest values, day ${this.stats.t.toFixed(1)}`;
-    for (const c of this.tableCells) c.td.textContent = c.getter();
+    for (const c of this.tableCells) {
+      const v = c.getter();
+      c.tr.hidden = v == null;                 // a stat this engine does not report
+      c.td.textContent = v == null ? '–' : v;
+    }
   }
   toggleTable() {
     this.tableOn = !this.tableOn;
@@ -499,12 +656,18 @@ export class TissueApp {
     if (this.renderer && typeof this.renderer.legendSwatches === 'function') { try { sw = this.renderer.legendSwatches(); } catch (e) { sw = null; } }
     if (!Array.isArray(sw) || !sw.length) sw = this.defaultSwatches();
     box.append(appH('ul', { class: 'legend-swatches', 'aria-label': 'Colour key' }, sw.map((s) => appH('li', { class: 'legend-row' }, [appH('span', { class: 'swatch', style: `background:${s.css}` }), appH('span', { text: s.label })]))));
+    // "How to read the view": every string the definition put in copy.legend, in its own
+    // order — fibers, cells, scaffold, gel, load and each key under `fields` — not a fixed
+    // set (the cartilage scaffold and gel lines were dropped by the old fixed list).
     const lg = (t.copy && t.copy.legend) || {};
+    const hasLoad = (t.dials || []).some((d) => d.role === 'load');
     const guide = [];
-    if (lg.fibers) guide.push(lg.fibers);
-    if (lg.cells) guide.push(lg.cells);
-    for (const f of t.fields || []) if (lg.fields && lg.fields[f.key]) guide.push(lg.fields[f.key]);
-    if (lg.load && (t.dials || []).some((d) => d.role === 'load')) guide.push(lg.load);
+    const addGuide = (v) => { if (typeof v === 'string' && v.trim()) guide.push(v); };
+    for (const [key, value] of Object.entries(lg)) {
+      if (key === 'load' && !hasLoad) continue;             // no load dial: no arrows to explain
+      if (typeof value === 'string') addGuide(value);
+      else if (value && typeof value === 'object') for (const inner of Object.values(value)) addGuide(inner);
+    }
     if (guide.length) {
       box.append(appH('details', { class: 'legend-guide' }, [appH('summary', { text: 'How to read the view' }), appH('ul', {}, guide.map((g) => appH('li', { text: g })))]));
     }
@@ -591,17 +754,38 @@ export class TissueApp {
     if (!fromUi) input.value = v;
     const t = appSpeedText(v);
     appEl('speed-out').textContent = t.value;
-    appEl('speed-hint').textContent = t.hint;
     input.setAttribute('aria-valuetext', t.valuetext);
+    for (const s of this.speedButtons) s.b.setAttribute('aria-pressed', String(Math.abs(s.v - v) < 1e-9));
     this.scheduleUrl();
   }
 
   advance(days) {
     if (!this.engine || !this.ready) return;
-    const n = Math.max(1, Math.round(days / this.dt));
-    this.engine.step(n);
-    this.captureExport();
+    this.runSteps(Math.max(1, Math.round(days / this.dt)));
     this.sample(true, performance.now());
+  }
+
+  /**
+   * Step the engine n steps. With auto-apply on, the block is split at the day of each
+   * scripted event so a jump of forty days still fires them in the right order and on
+   * the right day; with it off this is one engine.step(n), as before.
+   */
+  runSteps(n) {
+    const eng = this.engine;
+    let guard = 0;
+    while (n > 0 && guard++ < 256) {
+      let take = n;
+      const ev = this.autoEvents ? this.nextEvent() : null;
+      if (ev) {
+        const need = Math.ceil((ev.at - eng.time) / this.dt - 1e-9);
+        if (need <= 0) { this.applyEvent(ev); continue; }
+        if (need < take) take = need;
+      }
+      eng.step(take);
+      n -= take;
+    }
+    if (n > 0) eng.step(n);
+    this.captureExport();
   }
 
   frame(now) {
@@ -615,7 +799,7 @@ export class TissueApp {
         const maxSteps = 60; // keep the frame responsive; the sim slows rather than stutters
         let n = Math.floor(this.accum / this.dt);
         if (n > maxSteps) { n = maxSteps; this.accum = n * this.dt; }
-        if (n > 0) { eng.step(n); this.accum -= n * this.dt; this.captureExport(); }
+        if (n > 0) { this.runSteps(n); this.accum -= n * this.dt; }
       }
       if (this.renderer) this.renderer.update(eng.state, this.layers);
       if (now - this.lastStatsAt >= APP_STATS_MS) this.sample(false, now);
@@ -653,13 +837,12 @@ export class TissueApp {
     }
     if (force || now - this.lastPlotAt >= APP_PLOT_MS) {
       for (const p of this.plots) { p.plot.draw(); p.val.textContent = this.readoutValueText(p); }
-      if (this.gauge) this.gauge.update(s.deposition, s.degradation);
+      if (this.gauge) this.gauge.update(s.deposition, s.degradation, s.scaffoldFlux);
       this.lastPlotAt = now;
     }
     if (now >= this.flashUntil && (force || now - this.lastSentenceAt > APP_SENTENCE_MS)) {
       const eq = appEl('equilibrium');
-      const voc = (this.tissue.copy && this.tissue.copy.vocabulary) || {};
-      eq.textContent = copyEquilibriumSentence(s, voc);
+      eq.textContent = copyEquilibriumSentence(s, this.voc);
       const ratio = (s.deposition + 1e-9) / (s.degradation + 1e-9);
       eq.dataset.state = ratio > 1.15 ? 'condensing' : ratio < 0.87 ? 'evaporating' : 'steady';
       this.lastSentenceAt = now;
@@ -674,19 +857,25 @@ export class TissueApp {
   /** One sentence for the 3D canvas's aria-label, built from generic stats and the tissue's words. */
   describe(s) {
     const t = this.tissue, sc = this.scenario();
-    const voc = (t.copy && t.copy.vocabulary) || {};
+    const voc = this.voc;
     const parts = [];
-    const total = s.species ? s.species.total : NaN;
+    // matrix without the scaffold when the engine separates them, otherwise every species
+    const sp = s.species || null;
+    const total = sp ? (Number.isFinite(sp.tissueTotal) ? sp.tissueTotal : sp.total) : NaN;
     if (Number.isFinite(total)) {
       let str = `${voc.matrix || 'matrix'} density ${total.toFixed(2)}`;
       const fibers = (t.species || []).filter((x) => x.kind === 'fiber');
       const last = fibers[fibers.length - 1];
       const fr = last ? appStat(s, `species.${last.key}.fraction`) : NaN;
-      if (fibers.length > 1 && Number.isFinite(fr)) str += ` with ${Math.round(fr * 100)} % ${last.label.toLowerCase()}`;
+      if (fibers.length > 1 && Number.isFinite(fr)) str += ` with ${Math.round(fr * 100)} % ${appLowerFirst(last.label)}`;
       parts.push(str);
     }
     if (Number.isFinite(s.fa)) parts.push(`alignment ${s.fa.toFixed(2)}`);
-    if (s.cells && Number.isFinite(s.cells.a)) parts.push(`cells ${Math.round(s.cells.a * 100)} % activated`);
+    // the cells in their own vocabulary: "activation 0.85", "phenotype 0.99 (1 = chondrogenic)"
+    if (s.cells && Number.isFinite(s.cells.a)) {
+      const n = this.stateNoun;
+      parts.push(`cell ${n.noun} ${s.cells.a.toFixed(2)}${n.qualifier ? ` (${n.qualifier})` : ''}`);
+    }
     if (Number.isFinite(s.logE)) parts.push(`stiffness ${appPow10(s.logE)} kPa`);
     const ratio = (s.deposition + 1e-9) / (s.degradation + 1e-9);
     parts.push(ratio > 1.15 ? 'deposition outpaces degradation' : ratio < 0.87 ? 'degradation outpaces deposition' : 'deposition and degradation balance');

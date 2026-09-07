@@ -273,6 +273,11 @@ if (!flag('hud', true)) document.getElementById('hud').hidden = true;
 
 // Any `opt.<name>=<value>` URL parameter is passed straight into TissueRenderer opts (tuning).
 // autoRotate is only passed when `auto` is in the URL, so the prefers-reduced-motion default is testable.
+// ?radiusByState=1 swaps the chondrocyte's constant radius for the { by, min, max } form of
+// EXTENDING.md §1, so the renderer's radius-by-state path is exercised (a cell grows as b rises).
+if (flag('radiusByState', false)) {
+  TISSUES.cartilage.cellTypes[0].radius = { by: 'b', min: 0.018, max: 0.052 };
+}
 const rendererOpts = { K, toneMapping: q.get('tm') || 'aces', exposure: num('exposure', 1.08) };
 if (q.has('auto')) rendererOpts.autoRotate = flag('auto', true);
 for (const [k, v] of q) if (k.startsWith('opt.')) rendererOpts[k.slice(4)] = v === 'true' ? true : v === 'false' ? false : (v !== '' && !Number.isNaN(+v)) ? +v : v;

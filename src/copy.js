@@ -47,11 +47,28 @@ function copyNum(v) {
   return Number.isFinite(v) ? v : 0;
 }
 
-/** Nouns used when a tissue supplies no `copy.vocabulary`. */
+/**
+ * Words used when a tissue supplies no `copy.vocabulary` (docs/EXTENDING.md §1 `copy`).
+ * Every tissue-specific fragment of the equilibrium sentence comes from here, so nothing
+ * in this file assumes fibroblasts, collagen or an activation switch. A tissue overrides
+ * only what it wants; the app may also fill in `cellStateNoun` from the cell type's state
+ * labels, so a definition never has to repeat them.
+ *
+ *   matrix        noun phrase for what the cells build ('collagen', 'proteoglycan and collagen')
+ *   cellsActive   clause: the cells are working ('the chondrocytes are pumping out aggrecan')
+ *   cellsQuiet    clause: the cells are not working
+ *   cellsMid      clause: the cells are halfway
+ *   cellStateNoun the cell's primary state, as a noun ('activation', 'phenotype')
+ *   stiffHigh     optional continuation of "…the matrix around them is already stiff", used when
+ *                 the matrix is stiff (E ≥ 30 kPa) — e.g. 'enough to hold them switched on'
+ */
 export const COPY_VOCABULARY_DEFAULT = Object.freeze({
   matrix: 'matrix',
-  cellsActive: 'activated cells are building matrix',
+  cellsActive: 'the cells are working hard',
   cellsQuiet: 'the cells are quiet',
+  cellsMid: 'the cells are partly switched on',
+  cellStateNoun: 'activation',
+  stiffHigh: '',
 });
 
 /**
@@ -62,11 +79,13 @@ export const COPY_VOCABULARY_DEFAULT = Object.freeze({
  *   change per day over the tissue, cells.a the mean primary cell state (0..1),
  *   species.total the mean matrix density, logE the mean log10 stiffness (kPa).
  *   (The v0.1 shape meanAlpha / meanRho / meanLogE is still accepted.)
- * vocabulary: tissue.copy.vocabulary = { matrix, cellsActive, cellsQuiet }.
+ * vocabulary: tissue.copy.vocabulary, merged over COPY_VOCABULARY_DEFAULT — every
+ *   tissue-specific word (matrix, cellsActive, cellsQuiet, cellsMid, cellStateNoun,
+ *   stiffHigh) is read from there, so a new tissue needs no change here.
  *
  * Balance: ratio deposition/degradation > 1.15 condensing, < 0.87 evaporating,
  * otherwise holding shape ("still" below 1e-6 on both mean rates).
- * Cells: a < 0.3 quiet, > 0.6 activated. Empty: density < 0.05. Stiff: E >= 30 kPa.
+ * Cells: a < 0.3 quiet, > 0.6 working. Empty: density < 0.05. Stiff: E >= 30 kPa.
  */
 export function copyEquilibriumSentence(stats, vocabulary) {
   const s = stats || {};
@@ -89,37 +108,38 @@ export function copyEquilibriumSentence(stats, vocabulary) {
   const verb = trend === 'condensing' ? 'outpaces' : trend === 'evaporating' ? 'trails' : 'matches';
   const head = 'Deposition ' + copyFormatRate(dep) + ' ' + verb + ' degradation ' + copyFormatRate(deg);
 
+  const nothingYet = 'there is hardly any ' + V.matrix + ' yet, so add cells, growth factor or load to start condensation.';
   let tail;
   if (trend === 'still') {
     tail = empty
-      ? 'the cloud is still; there is hardly any matrix yet, so add cells, growth factor or load to start condensation.'
+      ? 'the cloud is still; ' + nothingYet
       : 'the cloud is still; almost nothing is being built or removed, so nothing here is changing.';
   } else if (trend === 'condensing') {
     if (cells === 'activated') {
       tail = stiff
-        ? 'the cloud is condensing; ' + V.cellsActive + ' into a matrix already stiff enough to hold them switched on.'
-        : 'the cloud is condensing; ' + V.cellsActive + ' and stiffening the matrix that keeps them switched on.';
+        ? 'the cloud is condensing; ' + V.cellsActive + ', and the matrix around them is already stiff' + (V.stiffHigh ? ' ' + V.stiffHigh : '') + '.'
+        : 'the cloud is condensing; ' + V.cellsActive + ', and the matrix is thickening and stiffening as they go.';
     } else if (cells === 'quiet') {
       tail = 'the cloud is condensing; ' + V.cellsQuiet + ', so this is slow basal deposition with little breakdown to oppose it.';
     } else {
-      tail = 'the cloud is condensing; the cells are partly activated and laying down more ' + V.matrix + ' than is removed.';
+      tail = 'the cloud is condensing; ' + V.cellsMid + ' and laying down more ' + V.matrix + ' than is removed.';
     }
   } else if (trend === 'evaporating') {
     if (cells === 'activated') {
-      tail = 'the cloud is evaporating; the cells are activated, but breakdown is winning, and a softening matrix pulls activation down.';
+      tail = 'the cloud is evaporating; ' + V.cellsActive + ', but breakdown is winning, and a thinning matrix pulls their ' + V.cellStateNoun + ' down.';
     } else if (cells === 'quiet') {
-      tail = 'the cloud is evaporating; ' + V.cellsQuiet + ', making little ' + V.matrix + ', so breakdown wins and the matrix thins.';
+      tail = 'the cloud is evaporating; ' + V.cellsQuiet + ', making little ' + V.matrix + ', so breakdown wins and the tissue thins.';
     } else {
-      tail = 'the cloud is evaporating; the cells are only partly activated and cannot keep pace with breakdown.';
+      tail = 'the cloud is evaporating; ' + V.cellsMid + ' and cannot keep pace with breakdown.';
     }
   } else if (cells === 'activated') {
-    tail = 'the cloud holds its shape; activated cells rebuild almost exactly the ' + V.matrix + ' that is removed, so this is a busy balance.';
+    tail = 'the cloud holds its shape; ' + V.cellsActive + ', replacing almost exactly the ' + V.matrix + ' that is removed — a busy balance.';
   } else if (cells === 'quiet') {
     tail = empty
-      ? 'the cloud holds its shape; there is hardly any matrix yet, so add cells, growth factor or load to start condensation.'
+      ? 'the cloud holds its shape; ' + nothingYet
       : 'the cloud holds its shape; ' + V.cellsQuiet + ' and turnover is slow, so the tissue is resting, not remodelling.';
   } else {
-    tail = 'the cloud holds its shape; partly activated cells replace ' + V.matrix + ' about as fast as it is removed.';
+    tail = 'the cloud holds its shape; ' + V.cellsMid + ', replacing ' + V.matrix + ' about as fast as it is removed.';
   }
 
   return head + ' — ' + tail;

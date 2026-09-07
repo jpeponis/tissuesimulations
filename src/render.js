@@ -9,6 +9,9 @@
 //   .setTissue(tissue)                   (re)build layers from tissue.species / cellTypes / fields / dials
 //   .update(state, layers)               state → instances; layers { fibers, cells, scaffold, gel, fields: { <key>: bool } }
 //                                        (fibers/cells/scaffold/gel default on, fields default off)
+//   Load arrows read the role:'load' dial through its own [min, max] (cartilage compresses
+//   0 … 0.2), so the arrow length/opacity is the NORMALISED value, not the raw one.
+//   A cell type's `radius` may be a number or { by: 'a'|'b', min, max } (radius by state).
 //   .render()                            one frame (controls damping/autorotate + draw)
 //   .resize()                            fit canvas to its parent, keep the cube framed (aspect 0.6 … 2.4)
 //   .setAutoRotate(bool)
@@ -157,6 +160,8 @@ export class TissueRenderer {
       fiberAlbedo: 1.0, fiberSaturation: 1.25,
       // --- cells ---
       cellRoughness: 0.55, cellEmissive: 0.35, cellRim: 0.45,
+      cellRimGel: 1.05,       // rim strength used instead of cellRim when the tissue has a gel species
+      cellRimTint: 0.7,       // 0 = the rim takes the cell's own colour, 1 = a white rim (contrast against a same-hue haze)
       cellAlbedo: 0.55, cellSaturation: 1.15,
       cellRamp: 'oklab',      // 'oklab' | 'oklch' | 'rgb' — interpolation space for colors[0] → colors[1]
       cellMidLift: 0.06,      // OKLab lightness lift at the ramp midpoint (bell-shaped), 0 = none
@@ -168,6 +173,7 @@ export class TissueRenderer {
       gelSize: 0.62,          // sphere radius = gelSize · h · density^(1/3) (≈ overlapping neighbours at density 1)
       gelOpacity: 0.28,       // × min(1, density)
       gelEdgeFade: 1.6,       // alpha ∝ |n·v|^fade — softens silhouettes into a haze
+      gelCellFade: 0.55,      // gel alpha × (1 − this) in a voxel that holds a cell (≈ one cell radius: cells keep contrast in dense gel)
       gelAmbient: 0.62, gelDiffuse: 0.22, gelRim: 0.0,
       gelSaturation: 1.2,
       gelPointSize: 2.6, gelPointOpacity: 0.5, gelPointSoft: 6.0,
@@ -260,18 +266,20 @@ export class TissueRenderer {
     // --- materials ------------------------------------------------------------
     this._uRimFiber = { value: this.opts.fiberRim };
     this._uRimPowFiber = { value: 2.5 };
+    this._uTintFiber = { value: 0 };
     this._uRimCell = { value: this.opts.cellRim };
     this._uRimPowCell = { value: 3.0 };
+    this._uTintCell = { value: 0 };   // raised by setTissue when the tissue has a gel species
     this.fiberMat = new THREE.MeshStandardMaterial({
       color: new THREE.Color().setScalar(this.opts.fiberAlbedo), roughness: this.opts.fiberRoughness, metalness: 0.04,
       emissive: 0xffffff, emissiveIntensity: this.opts.fiberEmissive,
     });
-    this._patchInstanceGlow(this.fiberMat, this._uRimFiber, this._uRimPowFiber);
+    this._patchInstanceGlow(this.fiberMat, this._uRimFiber, this._uRimPowFiber, this._uTintFiber);
     this.cellMat = new THREE.MeshStandardMaterial({
       color: new THREE.Color().setScalar(this.opts.cellAlbedo), roughness: this.opts.cellRoughness, metalness: 0.0,
       emissive: 0xffffff, emissiveIntensity: this.opts.cellEmissive,
     });
-    this._patchInstanceGlow(this.cellMat, this._uRimCell, this._uRimPowCell);
+    this._patchInstanceGlow(this.cellMat, this._uRimCell, this._uRimPowCell, this._uTintCell);
     this.gelMat = this._makeHazeMaterial({
       opacity: this.opts.gelOpacity, edgeFade: this.opts.gelEdgeFade,
       ambient: this.opts.gelAmbient, diffuse: this.opts.gelDiffuse, rim: this.opts.gelRim,
@@ -296,7 +304,6 @@ export class TissueRenderer {
     this.scaffold = null;   // { mesh, geo, alpha, mid, axis, len, va, vb, count }
     this.fields = null;     // [{ key, points, geo, mat, attr }]
     this._gridN = 0;
-    this._centersAttr = null;
     this.cells = null;
     this._buildCells(this.opts.maxCells);
 
@@ -305,7 +312,8 @@ export class TissueRenderer {
     this._fiberArr = []; this._gelArr = []; this._scafArr = [];
     this._cellTypes = [];
     this._fieldDefs = [];
-    this._loadKey = null;
+    this._loadKey = null; this._loadMin = 0; this._loadSpan = 1;
+    this._gelFade = 0;
     this._spKeysRef = null; this._fdKeysRef = null; this._indicesDirty = true;
 
     // --- sizing ---------------------------------------------------------------
@@ -440,11 +448,14 @@ export class TissueRenderer {
 
   // Tint the constant emissive by the per-instance colour, add a rim term (so fibers/cells
   // never go black on their shadow side) and apply the depth cue to albedo + emissive.
-  _patchInstanceGlow(material, uRim, uRimPow) {
+  // uRimTint mixes the rim colour toward white: a white rim is what separates a teal cell
+  // from a teal gel haze (same hue, no edge otherwise).
+  _patchInstanceGlow(material, uRim, uRimPow, uRimTint) {
     const uCamDir = this._uCamDir, uDepthCue = this._uDepthCue;
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uRim = uRim;
       shader.uniforms.uRimPow = uRimPow;
+      shader.uniforms.uRimTint = uRimTint || { value: 0 };
       shader.uniforms.uCamDir = uCamDir;
       shader.uniforms.uDepthCue = uDepthCue;
       shader.vertexShader = shader.vertexShader
@@ -455,18 +466,18 @@ export class TissueRenderer {
           '  vCue = tissueDepthCue( ( modelMatrix * instanceMatrix * vec4( 0.0, 0.0, 0.0, 1.0 ) ).xyz, uCamDir, uDepthCue );\n' +
           '#else\n  vCue = 1.0;\n#endif');
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\nuniform float uRim;\nuniform float uRimPow;\nvarying float vCue;')
+        .replace('#include <common>', '#include <common>\nuniform float uRim;\nuniform float uRimPow;\nuniform float uRimTint;\nvarying float vCue;')
         .replace('#include <color_fragment>', '#include <color_fragment>\n  diffuseColor.rgb *= vCue;')
         .replace('#include <emissivemap_fragment>',
           '#include <emissivemap_fragment>\n' +
           '#ifdef USE_COLOR\n' +
           '  totalEmissiveRadiance *= vColor;\n' +
           '  float rrRim = pow( 1.0 - saturate( abs( dot( normalize( vViewPosition ), normal ) ) ), uRimPow );\n' +
-          '  totalEmissiveRadiance += vColor * uRim * rrRim;\n' +
+          '  totalEmissiveRadiance += mix( vColor, vec3( 1.0 ), uRimTint ) * uRim * rrRim;\n' +
           '  totalEmissiveRadiance *= vCue;\n' +
           '#endif');
     };
-    material.customProgramCacheKey = () => 'tissue-instance-glow-2';
+    material.customProgramCacheKey = () => 'tissue-instance-glow-3';
   }
 
   _makeHazeMaterial(p) {
@@ -540,15 +551,32 @@ export class TissueRenderer {
       const c1 = TissueRenderer._lin(cols[cols.length > 1 ? 1 : 0], this.opts.cellSaturation);
       const mid = cols.length > 2 ? TissueRenderer._lin(cols[1], this.opts.cellSaturation) : explicitMid;
       const sh = ct.shape || {};
+      // radius: a number, or { by: 'a'|'b', min, max } — the radius then follows that cell state
+      const rd = ct.radius;
+      const byState = rd && typeof rd === 'object';
+      const rMin = byState ? (+rd.min > 0 ? +rd.min : 0.02) : (+rd > 0 ? +rd : 0.03);
+      const rMax = byState ? (+rd.max > 0 ? +rd.max : rMin) : rMin;
       return {
-        key: ct.key, label: ct.label || ct.key, radius: +(ct.radius) > 0 ? +ct.radius : 0.03,
+        key: ct.key, label: ct.label || ct.key, radius: rMin,
+        rBy: byState ? (rd.by === 'b' ? 1 : 0) : -1, rMin, rMax,
         by: sh.by === 'b' ? 1 : 0, aMin: +(sh.aspectMin) > 0 ? +sh.aspectMin : 1, aMax: +(sh.aspectMax) > 0 ? +sh.aspectMax : 1,
         lut: TissueRenderer._rampLUT(c0, c1, this.opts.cellRamp, this.opts.cellMidLift, mid),
       };
     });
+    // a gel species means cells can sit inside a haze of their own hue: give them a whiter rim
+    // and thin the haze in the voxels that hold them
+    const hasGel = this._gelSp.length > 0;
+    this._uRimCell.value = hasGel ? this.opts.cellRimGel : this.opts.cellRim;
+    this._uTintCell.value = hasGel ? this.opts.cellRimTint : 0;
+    this._gelFade = hasGel && +this.opts.gelCellFade > 0 ? Math.min(0.95, +this.opts.gelCellFade) : 0;
     this._fieldDefs = (T.fields || []).map((f) => ({ key: f.key, label: f.label || f.key, color: f.color || '#3fd6c4', idx: -1 }));
+    // load dial: any range (fibrous strain 0–1, cartilage compression 0–0.2) → normalise for the arrows
     const loadDial = (T.dials || []).find((d) => d.role === 'load');
     this._loadKey = loadDial ? loadDial.key : null;
+    const lMin = loadDial && Number.isFinite(+loadDial.min) ? +loadDial.min : 0;
+    const lMax = loadDial && Number.isFinite(+loadDial.max) ? +loadDial.max : 1;
+    this._loadMin = lMin;
+    this._loadSpan = lMax > lMin ? lMax - lMin : 1;
     this._spKeysRef = null; this._fdKeysRef = null; this._indicesDirty = true;
     this.load.group.visible = false;
     this._disposeGrid();   // rebuilt for state.N on the next update()
@@ -595,7 +623,6 @@ export class TissueRenderer {
       for (const L of this.fields) { this.scene.remove(L.points); L.geo.dispose(); L.mat.dispose(); }
       this.fields = null;
     }
-    this._centersAttr = null;
     this._gridN = 0;
   }
 
@@ -607,13 +634,30 @@ export class TissueRenderer {
       const i = (v / (N * N)) | 0, j = ((v / N) | 0) % N, k = v % N;
       centers[3 * v] = (i + 0.5) * h; centers[3 * v + 1] = (j + 0.5) * h; centers[3 * v + 2] = (k + 0.5) * h;
     }
-    this._centersAttr = new THREE.BufferAttribute(centers, 3);
     this._gridN = N;
     this._buildFibers(N, centers);
     if (this._gelSp.length) this._buildGel(N, centers);
     if (this._scafSp.length) this._buildScaffold(N, centers);
-    this._buildFields(N);
+    this._buildFields(N, centers);
     this._updatePointScale();
+  }
+
+  /**
+   * One jittered point per voxel, clamped so the whole sprite stays inside the block
+   * (the same treatment the gel spheres get; sprites on the boundary layer would otherwise
+   * bleed past the faces of the cube). `margin` is the sprite's world half-size.
+   */
+  static _jitterPoints(N, centers, seed, margin) {
+    const V = N * N * N, h = 1 / N, rand = TissueRenderer._rng(seed);
+    const out = new Float32Array(V * 3);
+    const lo = margin > 0.5 ? 0.5 : (margin > 0 ? margin : 0), hi = 1 - lo;
+    for (let v = 0; v < V; v++) {
+      for (let d = 0; d < 3; d++) {
+        let p = centers[3 * v + d] + (rand() - 0.5) * 0.55 * h;
+        out[3 * v + d] = p < lo ? lo : p > hi ? hi : p;
+      }
+    }
+    return out;
   }
 
   // Fixed per-instance jitter: offset inside the voxel, random unit vector r_j,
@@ -654,7 +698,8 @@ export class TissueRenderer {
     const V = N * N * N, h = 1 / N;
     if (this.opts.gelStyle === 'points') {
       const g = new THREE.BufferGeometry();
-      g.setAttribute('position', this._centersAttr);
+      const pos = TissueRenderer._jitterPoints(N, centers, this.opts.seed ^ 0x27d4eb2d, 0.5 * this.opts.gelPointSize * h);
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
       const valAttr = new THREE.BufferAttribute(new Float32Array(V), 1); valAttr.setUsage(THREE.DynamicDrawUsage);
       const colAttr = new THREE.BufferAttribute(new Float32Array(V * 3), 3); colAttr.setUsage(THREE.DynamicDrawUsage);
       g.setAttribute('aVal', valAttr); g.setAttribute('aCol', colAttr);
@@ -663,7 +708,7 @@ export class TissueRenderer {
       const points = new THREE.Points(g, mat);
       points.frustumCulled = false; points.renderOrder = 2; points.visible = false;
       this.scene.add(points);
-      this.gel = { points, geo: g, mat, valAttr, colAttr, V, h };
+      this.gel = { points, geo: g, mat, valAttr, colAttr, occ: new Uint8Array(V), V, h };
       return;
     }
     const rand = TissueRenderer._rng(this.opts.seed ^ 0x5bd1e995);
@@ -685,7 +730,7 @@ export class TissueRenderer {
     mesh.visible = false;
     TissueRenderer._hideRange(mesh.instanceMatrix.array, 0, V);
     this.scene.add(mesh);
-    this.gel = { mesh, geo, alpha, jit, centers, V, h };
+    this.gel = { mesh, geo, alpha, jit, centers, occ: new Uint8Array(V), V, h };
   }
 
   // Lattice of struts between voxel centres: for every voxel a strut along +x, +y, +z to its
@@ -742,11 +787,14 @@ export class TissueRenderer {
     });
   }
 
-  _buildFields(N) {
+  _buildFields(N, centers) {
     const V = N * N * N, h = 1 / N;
-    this.fields = this._fieldDefs.map((f) => {
+    const margin = 0.5 * this.opts.pointSize * h;
+    this.fields = this._fieldDefs.map((f, i) => {
       const g = new THREE.BufferGeometry();
-      g.setAttribute('position', this._centersAttr);
+      // own jittered, clamped cloud per field: two hazes interleave instead of coinciding,
+      // and no sprite hangs outside the cube
+      g.setAttribute('position', new THREE.BufferAttribute(TissueRenderer._jitterPoints(N, centers, (this.opts.seed ^ 0x1b873593) + 7919 * i, margin), 3));
       const attr = new THREE.BufferAttribute(new Float32Array(V), 1);
       attr.setUsage(THREE.DynamicDrawUsage);
       g.setAttribute('aVal', attr);
@@ -945,16 +993,37 @@ export class TissueRenderer {
     return d;
   }
 
+  /**
+   * Mark the voxels that hold a cell (≈ one cell radius at N = 12), so the haze can be thinned
+   * there and a cell of the same hue as the gel still reads. Returns the mask or null.
+   */
+  _cellOccupancy(state, G, N) {
+    const occ = G.occ;
+    if (!this._gelFade || !occ || !state.cx) return null;
+    occ.fill(0);
+    let n = state.nCells | 0;
+    n = Math.min(n, (state.cx.length / 3) | 0);
+    const X = state.cx, invL = state.L > 0 ? 1 / state.L : 1;
+    for (let i = 0; i < n; i++) {
+      let a = (X[3 * i] * invL * N) | 0, b = (X[3 * i + 1] * invL * N) | 0, c = (X[3 * i + 2] * invL * N) | 0;
+      a = a < 0 ? 0 : a >= N ? N - 1 : a; b = b < 0 ? 0 : b >= N ? N - 1 : b; c = c < 0 ? 0 : c >= N ? N - 1 : c;
+      occ[(a * N + b) * N + c] = 1;
+    }
+    return occ;
+  }
+
   _updateGel(state) {
     const G = this.gel, V = G.V, h = G.h, defs = this._gelSp, arrs = this._gelArr;
     const minD = this.opts.gelMin;
+    const occ = this._cellOccupancy(state, G, this._gridN);
+    const keep = 1 - this._gelFade;
     let visible = 0;
     if (G.points) {
       const A = G.valAttr.array, C = G.colAttr.array;
       for (let v = 0; v < V; v++) {
         const d = this._mixSpecies(defs, arrs, v);
         if (!(d >= minD)) { A[v] = 0; continue; }
-        A[v] = d > 1 ? 1 : d;
+        A[v] = (d > 1 ? 1 : d) * (occ && occ[v] ? keep : 1);
         const mx = this._mix; C[3 * v] = mx[0]; C[3 * v + 1] = mx[1]; C[3 * v + 2] = mx[2];
         visible++;
       }
@@ -978,7 +1047,7 @@ export class TissueRenderer {
       px = px < lo ? lo : px > hi ? hi : px; py = py < lo ? lo : py > hi ? hi : py; pz = pz < lo ? lo : pz > hi ? hi : pz;
       M[o + 12] = px; M[o + 13] = py; M[o + 14] = pz; M[o + 15] = 1;
       const mx = this._mix; C[3 * v] = mx[0]; C[3 * v + 1] = mx[1]; C[3 * v + 2] = mx[2];
-      AL[v] = d > 1 ? 1 : d;
+      AL[v] = (d > 1 ? 1 : d) * (occ && occ[v] ? keep : 1);
       visible++;
     }
     G.mesh.instanceMatrix.needsUpdate = true; G.mesh.instanceColor.needsUpdate = true; G.alpha.needsUpdate = true;
@@ -1057,14 +1126,16 @@ export class TissueRenderer {
       const T = types[ty];
       let al = A ? A[i] : 0;
       if (!(al > 0)) al = 0; else if (al > 1) al = 1;
-      let sh = T.by === 1 ? (B ? B[i] : 0) : al;
-      if (!(sh > 0)) sh = 0; else if (sh > 1) sh = 1;
+      let bl = B ? B[i] : 0;
+      if (!(bl > 0)) bl = 0; else if (bl > 1) bl = 1;
+      const sh = T.by === 1 ? bl : al;
+      const rad = T.rBy < 0 ? T.rMin : T.rMin + (T.rMax - T.rMin) * (T.rBy === 1 ? bl : al);
       let px = P ? P[o3] : 1, py = P ? P[o3 + 1] : 0, pz = P ? P[o3 + 2] : 0;
       const pl = px * px + py * py + pz * pz;
       if (!(pl > 1e-12)) { px = 1; py = 0; pz = 0; }
       else if (Math.abs(pl - 1) > 1e-4) { const inv = 1 / Math.sqrt(pl); px *= inv; py *= inv; pz *= inv; }
       const asp = T.aMin + (T.aMax - T.aMin) * sh;
-      const a = T.radius * Math.pow(asp, ex), b = T.radius * Math.pow(asp, ex - 1);
+      const a = rad * Math.pow(asp, ex), b = rad * Math.pow(asp, ex - 1);
       let ax, ay, az;
       if (px < 0.9 && px > -0.9) { const inv = 1 / Math.sqrt(py * py + pz * pz); ax = 0; ay = pz * inv; az = -py * inv; }
       else { const inv = 1 / Math.sqrt(px * px + pz * pz); ax = -pz * inv; ay = 0; az = px * inv; }
@@ -1093,10 +1164,12 @@ export class TissueRenderer {
     layer.attr.needsUpdate = true;
   }
 
+  // `load` is the raw dial value; the arrows show it normalised over the dial's own
+  // [min, max] (0–1 strain, 0–0.2 compression — both read as "none … full").
   _updateLoad(load) {
     const L = this.load;
     if (!this._loadKey) { L.group.visible = false; return; }
-    let s = +load;
+    let s = (+load - this._loadMin) / this._loadSpan;
     if (!(s > 0)) s = 0; else if (s > 1) s = 1;
     L.group.visible = s >= 0.02;
     if (!L.group.visible) return;

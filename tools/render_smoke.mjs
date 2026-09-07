@@ -172,6 +172,7 @@ async function main() {
     { name: 'cartilage_04_t30_fields', params: 'tissue=cartilage&t=30&fields=tgf,o2,cat&gel=0&scaffold=0' },
     { name: 'cartilage_05_t20_gel_points', params: 'tissue=cartilage&t=20&opt.gelStyle=points' },
     { name: 'cartilage_06_t20_scaffold_only', params: 'tissue=cartilage&t=20&gel=0&fibers=0&cells=0' },
+    { name: 'cartilage_07_t45_radius_by_state', params: 'tissue=cartilage&t=45&gel=0&scaffold=0&fibers=0&radiusByState=1' },
   ];
   if (extraScenes) for (const kv of extraScenes.split(',')) { const i = kv.indexOf('='); if (i > 0) scenes.push({ name: kv.slice(0, i), params: kv.slice(i + 1).replace(/;/g, '&') }); }
   scenes = scenes.filter((s) => !sceneFilter || sceneFilter.split(',').includes(s.name));

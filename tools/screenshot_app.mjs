@@ -8,7 +8,13 @@
 // Usage:
 //   node tools/screenshot_app.mjs [--tissue fibrous] [--scenario maturation] [--days 40]
 //        [--out dist/shots] [--page index.html] [--root <dir>] [--no-interact] [--width 1440] [--height 900]
+//        [--panel-top] [--events]
 //   legacy positional form: node tools/screenshot_app.mjs [outDir] [scenario] [days]
+// --panel-top  also saves the same frame with the console scrolled to the top (tissue picker,
+//              scenario card and the scripted-events toggle visible).
+// --events     exercises the "Auto-apply scripted events" toggle: checks it is off by default and
+//              changes nothing, then turns it on, replays past the first scripted day and checks
+//              the engine, the dial UI and the live region, and saves a screenshot.
 // Environment: PAGE=dist/tissue-weather.html (same as --page), INJURE=1 (force injure before the long run).
 // Headless Chromium in some sandboxes cannot complete TLS to the CDNs even when
 // curl can, so CDN and font requests are served from a curl-fetched cache.
@@ -39,6 +45,8 @@ const tissue = flags.tissue || null;
 const scenario = flags.scenario || positional[1] || null;
 const days = parseFloat(flags.days || positional[2] || '40');
 const interact = !flags['no-interact'];
+const panelTop = !!flags['panel-top'];
+const testEvents = !!flags.events;
 const width = parseInt(flags.width || '1440', 10), height = parseInt(flags.height || '900', 10);
 const pagePath = flags.page || process.env.PAGE || 'index.html';
 const cacheDir = join(root, 'dist', 'cdn-cache');
@@ -232,12 +240,77 @@ if (interact) {
   await waitReady();
 }
 
+// ---- scripted events: the opt-in "Auto-apply" toggle ---------------------------
+if (testEvents) {
+  const ev = report.events = {};
+  ev.scenarioEvents = await page.evaluate(() => (window.tissueApp.scenario().events || []).map((e) => ({ at: e.at, dials: e.dials || null, injure: !!e.injure })));
+  if (!ev.scenarioEvents.length) {
+    ev.skipped = `scenario "${loaded.scenario}" has no scripted events`;
+  } else {
+    const first = ev.scenarioEvents[0];
+    const dialKeys = Object.keys(first.dials || {});
+    // 1. default OFF: a run past the scripted day must change nothing by itself
+    await page.evaluate((s) => window.tissueApp.loadScenario(s, { ghost: false }), loaded.scenario);
+    await waitReady();
+    ev.toggleVisible = await page.evaluate(() => !!document.getElementById('btn-auto-events'));
+    check(ev.toggleVisible, 'no auto-apply toggle on a scenario that has scripted events');
+    ev.pressedInitially = await page.evaluate(() => document.getElementById('btn-auto-events').getAttribute('aria-pressed'));
+    await page.evaluate(() => window.tissueApp.toggleAutoEvents(false));
+    await page.evaluate((d) => window.tissueApp.advance(d), first.at + 2);
+    ev.dialsOff = await page.evaluate((keys) => { const st = window.tissueApp.engine.state; const o = {}; for (const k of keys) o[k] = st.dials[k]; return o; }, dialKeys);
+    for (const k of dialKeys) check(Math.abs(ev.dialsOff[k] - first.dials[k]) > 1e-9, `auto-apply off, but dial ${k} was set to the scripted ${first.dials[k]} anyway`);
+    if (first.injure) {
+      ev.woundOff = await page.evaluate(() => !!window.tissueApp.engine.state.wound);
+      check(!ev.woundOff, 'auto-apply off, but the scripted injury happened anyway');
+    }
+    // 2. toggle ON (button, so the click path is what is tested), remembered for the session
+    await page.click('#btn-auto-events');
+    ev.pressedOn = await page.evaluate(() => document.getElementById('btn-auto-events').getAttribute('aria-pressed'));
+    ev.session = await page.evaluate(() => { try { return window.sessionStorage.getItem('tw.autoEvents'); } catch (e) { return null; } });
+    ev.toggleFlash = await page.evaluate(() => document.getElementById('equilibrium').textContent);
+    check(ev.pressedOn === 'true', 'the auto-apply toggle did not switch on');
+    check(ev.session === '1', `auto-apply was not remembered in sessionStorage (got ${ev.session})`);
+    // 3. replay from day 0: the event must fire on its day, in the engine and in the dial UI
+    await page.evaluate((s) => window.tissueApp.loadScenario(s, { ghost: false }), loaded.scenario);
+    await waitReady();
+    await page.evaluate((d) => window.tissueApp.advance(d), first.at + 2);
+    ev.day = await page.evaluate(() => window.tissueApp.engine.state.time);
+    ev.dialsOn = await page.evaluate((keys) => { const st = window.tissueApp.engine.state; const o = {}; for (const k of keys) o[k] = st.dials[k]; return o; }, dialKeys);
+    ev.dialUi = await page.evaluate((keys) => { const o = {}; for (const k of keys) o[k] = parseFloat(document.getElementById(`dial-${k}`).value); return o; }, dialKeys);
+    ev.flash = await page.evaluate(() => document.getElementById('equilibrium').textContent);
+    for (const k of dialKeys) {
+      check(Math.abs(ev.dialsOn[k] - first.dials[k]) < 1e-9, `scripted event: engine dial ${k} is ${ev.dialsOn[k]}, expected ${first.dials[k]}`);
+      check(Math.abs(ev.dialUi[k] - first.dials[k]) < 1e-9, `scripted event: dial UI ${k} shows ${ev.dialUi[k]}, engine has ${ev.dialsOn[k]}`);
+    }
+    if (first.injure) {
+      ev.wound = await page.evaluate(() => !!window.tissueApp.engine.state.wound);
+      check(ev.wound, 'the scripted injury did not happen with auto-apply on');
+    }
+    check(/scripted/i.test(ev.flash), `no scripted-event message in the live region: "${ev.flash}"`);
+    await page.screenshot({ path: join(outDir, `${tag}-events.png`) });
+    ev.shot = `${tag}-events.png`;
+    // leave the toggle on: the long run below then plays the reference protocol hands-free
+    ev.autoAppliedInFinalRun = true;
+    await page.evaluate((s) => window.tissueApp.loadScenario(s, { ghost: false }), loaded.scenario);
+    await waitReady();
+  }
+}
+
 if (process.env.INJURE && loaded.injury) await page.evaluate(() => window.tissueApp.injure());
 const t0 = Date.now();
 await page.evaluate((d) => window.tissueApp.advance(d), days);
 report.advanceMs = Date.now() - t0;
 await page.waitForTimeout(500);
 await page.screenshot({ path: join(outDir, `${tag}-day${days}.png`) });
+// the same frame with the console scrolled home: tissue picker, scenario card, dials
+if (panelTop) {
+  await page.evaluate(() => { const p = document.getElementById('panel'); if (p) p.scrollTop = 0; });
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: join(outDir, `${tag}-day${days}-panel-top.png`) });
+  report.panelTopShot = `${tag}-day${days}-panel-top.png`;
+  report.panelScrollTop = await page.evaluate(() => document.getElementById('panel').scrollTop);
+  check(report.panelScrollTop === 0, `panel did not scroll to the top (${report.panelScrollTop})`);
+}
 report.stats = await page.evaluate(() => window.tissueApp.stats);
 report.canvasLabel = await page.evaluate(() => document.getElementById('view').getAttribute('aria-label'));
 report.equilibrium = await page.evaluate(() => document.getElementById('equilibrium').textContent);
