@@ -80,10 +80,18 @@ class TissueApp {
         out.textContent = r.fmt(v);
         this.model.setDials({ [key]: v });
       });
+      // "Humidity: how much vapor..." -> tag "humidity", rest of the sentence in the hint
+      const mIdx = c.metaphor.indexOf(':');
+      const mTag = (mIdx > 0 ? c.metaphor.slice(0, mIdx) : c.metaphor).toLowerCase();
+      const mRest = mIdx > 0 ? c.metaphor.slice(mIdx + 1).trim() : '';
       const wrap = appH('div', { class: 'dial' }, [
-        appH('label', { for: `dial-${key}` }, [document.createTextNode(c.label), appH('span', { class: 'metaphor', text: c.metaphor })]),
+        appH('label', { for: `dial-${key}` }, [document.createTextNode(c.label), appH('span', { class: 'metaphor', text: mTag })]),
         out, input,
-        appH('div', { class: 'hint', html: `${c.biology} <b>Watch:</b> ${c.watch}` }),
+        appH('div', { class: 'hint' }, [
+          appH('span', { text: `${c.biology} ` }),
+          mRest ? appH('span', { class: 'metaphor-note', text: `Like ${mTag}: ${mRest} ` }) : '',
+          appH('b', { text: 'Watch: ' }), appH('span', { text: c.watch }),
+        ]),
       ]);
       dials.append(wrap);
       this.dialInputs[key] = input; this.dialOutputs[key] = out;
@@ -105,8 +113,9 @@ class TissueApp {
     }
     // legend
     const legend = appEl('legend');
-    const legendRows = [['fiber', COPY_LEGEND.fiber], ['cell', COPY_LEGEND.cell], ['gf', COPY_LEGEND.gf], ['mmp', COPY_LEGEND.mmp], ['load', COPY_LEGEND.load]];
-    for (const [cls, text] of legendRows) legend.append(appH('div', { class: 'legend-row' }, [appH('span', { class: `swatch ${cls}` }), appH('span', { text })]));
+    const firstSentence = (t) => (t.match(/^[^.]*\./) || [t])[0];
+    const legendRows = [['fiber', COPY_LEGEND.fibers], ['cell', COPY_LEGEND.cells], ['gf', COPY_LEGEND.growthFactor], ['mmp', COPY_LEGEND.protease], ['load', COPY_LEGEND.load]];
+    for (const [cls, text] of legendRows) legend.append(appH('div', { class: 'legend-row' }, [appH('span', { class: `swatch ${cls}` }), appH('span', { text: firstSentence(text), title: text })]));
     // readouts
     const ro = appEl('readouts');
     const mk = (key, series, yDomain, yFormat) => {
