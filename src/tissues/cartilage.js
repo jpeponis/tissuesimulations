@@ -167,6 +167,25 @@
  *    the mean can reach the 0.3 of scenario 4.
  *
  * ---------------------------------------------------------------------------
+ * OPEN MODEL REQUEST (round 4; not taken — that round and this one were copy only)
+ * ---------------------------------------------------------------------------
+ *  EARLY LOADING IS NOT PUNISHED HERE, AND IN A REAL CONSTRUCT IT IS. Mauck 2000 and
+ *    Bian 2011 report that dynamic compression started before the matrix is elaborated does
+ *    less good than the same protocol started after it; in this model loading from day 0 is
+ *    strictly the better move. The penalty term is real but short-lived — at amp 0.1, race
+ *    dials, evaluated at the cube's mean state, fL = 1 + kStim·s(a)·(1 − d(a))·matPresent
+ *    − kInj·d(a) − kEarly·s(a)·conf·(0.5 + 0.5·hT) is 0.50 on day 0 and back above 1 inside a
+ *    day (1.25 on day 1), because the pericellular halo fills and matPresent runs 0 → 0.80 in
+ *    that time — while kLoadDeg opens the mesh sooner and keeps it open: with the squeeze from
+ *    day 0 the connected fraction is below 0.05 on day 17.7 against day 25.7 without it. The
+ *    second effect wins by a wide margin (race, day 56, scripted events off: 504 kPa loading
+ *    from day 0 against 350 kPa never loading). A biphasic response needs a genuinely delayed
+ *    term — a larger or longer-lived kEarly, or a mesh-strain injury that scales with conf —
+ *    plus re-recorded scenario checks and tests/golden/cartilage.engine.json, so it is a model
+ *    change and not a copy fix. Until someone takes it, the compression dial says plainly what
+ *    this model does and that a real construct behaves differently.
+ *
+ * ---------------------------------------------------------------------------
  * PARAMETER / EQUATION CHANGES (the spec's constants are placeholders, and two of
  * its scenario targets contradict its own parameter table; verified with
  * tools/run_headless.mjs + tools/plot_scenarios.py + the scenario checks)
@@ -328,19 +347,24 @@ export const TISSUE_CARTILAGE = {
     { key: 'amp', label: 'Dynamic compression', min: 0, max: 0.2, step: 0.01, default: 0, format: 'percent', role: 'load',
       metaphor: 'Pressure: a steady squeeze, on and off, three hours a day.',
       biology: 'Peak-to-peak strain of a 1 Hz squeeze. Around 10 % it stimulates synthesis most; past 15 % the injury term grows fast, and at 20 % it wrecks the construct. Squeezing a still-dense gel does blunt the stimulus for the first days — but the squeeze also opens the mesh sooner, and here that is the bigger of the two, so this model does not punish early loading the way a real construct does (Mauck 2000).',
-      watch: 'Stiffness and GAG climb faster whenever it is on, and the earlier the better here: hold the first scenario\'s dials, turn it on at day 0, and the cube ends about 40 % stiffer than with no squeeze at all. The two effects cancel at about 16 %, and past that both fall away.' },
+      watch: 'Stiffness and GAG climb faster whenever it is on, and the earlier the better here: hold the first scenario\'s dials with Auto-apply off, turn it on at day 0, and the cube ends about 40 % stiffer than with no squeeze at all (500 against 350 kPa at eight weeks). Leave Auto-apply on and the gap is only 8 %, because the day-14 event squeezes the comparison run too. The two effects cancel at about 16 %, and past that both fall away.' },
     { key: 'o2Ext', label: 'Oxygen tension', min: 0.05, max: 1, step: 0.01, default: 0.24,
       format: (v) => `${Math.round(v * 21)} %`,
       metaphor: 'Altitude: thin air — except that up here the cloud forms better.',
-      biology: 'Oxygen in the medium, 1–21 %. Cartilage is avascular; 5 % keeps cells chondrogenic, 21 % pushes them toward collagen I and hypertrophy, and under 1 % they starve.',
+      biology: 'Oxygen in the medium, 1–21 %. Cartilage is avascular; 5 % keeps cells chondrogenic and 21 % pushes them toward collagen I and hypertrophy. The bottom of the dial is 1 %, and there the cells stay chondrogenic but the anoxia term bites: the oxygen trace settles at 0.02 instead of the 0.11 it holds at 5 %, and the construct ends at half the stiffness (175 against 350 kPa at eight weeks; switch Auto-apply on as well and the day-14 squeeze on top of the thin air leaves it at 12).',
       watch: 'Switch on the oxygen layer: the medium face stays bright and the deep half goes dark. Phenotype follows the deep value, not the dial. Give it a fortnight — a real 300 µm construct settles its gradient in minutes, this one integrates it in time and needs about two weeks.' },
     { key: 'infl', label: 'Inflammation (IL-1)', min: 0, max: 1, step: 0.01, default: 0, format: 'fixed2',
       metaphor: 'Temperature: heat turns droplets back into vapor.',
       biology: 'IL-1β in the medium (1 ≈ 10 ng/mL). It switches on aggrecanase and MMP-13 and shuts synthesis down, and the cells stay suppressed after it is gone.',
       watch: 'The teal GAG band melts within days; the ivory collagen II band only starts to go in the second week. Recovery takes weeks.' },
+    // The fall-apart range is measured, not read off tRG: the day the connected fraction drops
+    // below 0.05, race dials, no scripted events (seed 7) — xl 0 → day 6.8, 0.1 → 9.4, 0.5 → 25.7,
+    // 0.9 → 82.9, 1 → 104.8 (15 weeks). tRG itself carries a quartic term (7 + 28·xl + 130·xl⁴,
+    // 7–165 d), so the top of the dial is nowhere near linear. With the first scenario's day-14
+    // squeeze on as well, xl 1 comes down to day 81.4 (11.6 weeks).
     { key: 'xl', label: 'Crosslink density', min: 0, max: 1, step: 0.05, default: 0.5, format: 'fixed2',
       metaphor: 'The trellis: a frame the gardener builds and expects to rot.',
-      biology: 'How tightly the hydrogel is crosslinked. It sets the starting stiffness (5–65 kPa), the mesh size, and how long the gel takes to fall apart (1–11 weeks).',
+      biology: 'How tightly the hydrogel is crosslinked. It sets the starting stiffness (5–65 kPa), the mesh size, and how long the gel takes to fall apart: about a week at the bottom of the dial, fifteen at the top — eleven if you are squeezing it as well.',
       watch: 'High: matrix stays trapped as pericellular islands and the cube stays grey. Low: the lattice is gone before there is anything to replace it.' },
     { key: 'nCells', label: 'Cell number', min: 40, max: 400, step: 10, default: 160, format: 'cells', role: 'cellCount',
       metaphor: 'Condensation nuclei: droplets need something to form on.',
@@ -568,8 +592,13 @@ export const TISSUE_CARTILAGE = {
         reality: 'The hydrogel has no counterpart in the metaphor at all. It is a trellis a gardener builds and expects to rot, and the whole story is whether the plant grows before the trellis falls.' },
       { claim: 'Thin air at altitude makes it harder for a cloud to form.',
         reality: 'Cartilage has no blood supply. At 5 % oxygen the cells make more aggrecan and more collagen II than at room air; 21 % is the abnormal condition, and it pushes them toward collagen I.' },
+      // "Four times" is exact, not rounded: the net factor on the aggrecan term is
+      // 0.25 + 0.75·col2/(col2 + 0.3), i.e. 0.25 with no collagen and 1 with plenty. The two kPa
+      // figures are the first scenario at day 56 (gag 0.88, col2 0.23) put through stiffnessOf()
+      // with its collagen and with col2 = 0. The 6× of the literature is Mauck 2000's dynamic-
+      // loading benefit, not the collagen net, and it had been borrowed across.
       { claim: 'More cloud means a stiffer, heavier cloud.',
-        reality: 'Aggrecan alone is nearly worthless mechanically. It is an osmotic sponge, and it only becomes stiffness once a collagen net exists to resist the swelling. Same amount of matrix, six times the modulus, depending on the net.' },
+        reality: 'Aggrecan alone is nearly worthless mechanically. It is an osmotic sponge, and it only becomes stiffness once a collagen net exists to resist the swelling. A full net is worth four times the modulus for the same aggrecan; the first scenario\'s construct has only part of one by day 56, and even so it is 307 kPa where the same aggrecan with no collagen at all would be 125.' },
       { claim: 'Droplets are droplets: they do not decide what to be.',
         reality: 'A chondrocyte can become a fibroblast-like cell, and then it makes a different, aligned matrix. Put the medium right again and the cell comes back — but the collagen I it laid down stays.' },
     ],
@@ -593,6 +622,9 @@ export const TISSUE_CARTILAGE = {
     vocabulary: {
       matrix: 'proteoglycan and collagen',
       cellsActive: 'the chondrocytes are pumping out aggrecan',
+      // Out of reach by design: `quiet` is 0 below, because this axis has no idle end (see the
+      // thresholds note). Kept as the words the tissue would use if a future threshold gave the
+      // branch a state that is really quiet.
       cellsQuiet: 'the chondrocytes have stopped making cartilage matrix',
       cellsMid: 'the chondrocytes are turning into fibroblasts',  // `a` is a phenotype axis, not a switch
       // The generic continuations are written for a tissue whose only stiffness is the matrix its
@@ -606,14 +638,21 @@ export const TISSUE_CARTILAGE = {
       activeSoftening: 'and what they make is not holding the cube up yet',
       stillHint: 'the cube is all hydrogel so far — give the chondrocytes a day and the first aggrecan appears.',
       // stiffKPa 90: the stiffest fresh gel this tissue can be cast as is 65 kPa (xl 1), so past 90
-      //   the two clauses above are literally true; in the race the switch lands on day 22 (94 kPa),
-      //   the day the equilibrium() override below hands back, so the two never leave a gap.
-      // quiet 0.12: a low phenotype here does not mean an idle cell, it means a fibroblast-like one
-      //   that is making collagen I hard. The generic "quiet" tail ("slow basal deposition") is only
-      //   true at the very bottom of the axis, which is where the drift scenario finally lands.
+      //   the two clauses above are literally true; in the race the switch lands on day 21.6
+      //   (90 kPa) and the equilibrium() override below hands back on day 22.1 (96 kPa), so the two
+      //   never leave a gap. A bar of 150 would open one: days 22.1–28.6 of the race would read
+      //   "what they make is not holding the cube up yet" while the modulus climbed 96 → 150 kPa,
+      //   already past any gel this tissue can be cast as.
+      // quiet 0: this axis has NO idle end, so the generic quiet branch is switched off rather than
+      //   placed. A phenotype near 0 here is a fibroblast-like cell working flat out on collagen I:
+      //   measured in Fibrocartilage drift with the day-56 correction left off, phenotype crosses
+      //   0.12 on day 59.8 with deposition 0.022/d and rising to 0.028/d by day 93 while the
+      //   modulus climbs 22 → 83 kPa — and the branch's own tail calls that "slow basal deposition
+      //   with little breakdown to oppose it". Below `active` the sentence says the cells are
+      //   turning into fibroblasts, which is what they are doing all the way down.
       // still 5e-4: the rate at which copyFormatRate() itself starts printing "0/d", so neither the
       //   sentence nor the trend dot says a cube is condensing while both of its numbers read zero.
-      thresholds: { stiffKPa: 90, quiet: 0.12, still: 5e-4 },
+      thresholds: { stiffKPa: 90, quiet: 0, still: 5e-4 },
       scaffoldNoun: 'hydrogel dissolving',            // the third flux bar (stats().scaffoldFlux)
       /**
        * The one thing the shared sentence cannot say about this cube: the trellis. deposition and
@@ -639,7 +678,18 @@ export const TISSUE_CARTILAGE = {
           : ratio > T.condensing ? m.condensing : ratio < T.evaporating ? m.evaporating : m.steady;
         const a = Number.isFinite(s.cells ? s.cells.a : s.meanAlpha) ? (s.cells ? s.cells.a : s.meanAlpha) : 0;
         const who = a > T.active ? V.cellsActive : a < T.quiet ? V.cellsQuiet : V.cellsMid;
-        const race = drain > dep
+        // NET matrix (deposition − degradation) against the drain, not gross deposition: while the
+        // mesh is still tight most of what the cells make washes straight back out, so the gross
+        // comparison told the student the cells were winning at the exact moments the cube was
+        // losing ground. Measured (seed 7, events on, tools/run_headless.mjs, CSV every 0.26 d):
+        // the race flipped to "filling in faster" on day 9.4, when net matrix was 0.023/d against a
+        // drain of 0.038/d and the stiffness trace was still below the fresh gel, and it stayed
+        // there through the whole handover dip; Scaffold-too-dense flipped on day 36.7 and held the
+        // claim through its stiffness minimum (14.1 kPa, day 51.7) — answering the opposite of that
+        // card's own question. On the net measure the race says "the trellis is going faster" for
+        // the whole life of the override (days 0.3–21.8) and too-dense turns over on day 57.4, five
+        // days after the minimum, exactly as the released islands start lifting the modulus.
+        const race = drain > dep - deg
           ? 'and the trellis is going faster than they can fill in'
           : 'and they are filling in faster than the trellis goes';
         return `Deposition ${copyFormatRate(dep)}, degradation ${copyFormatRate(deg)}, hydrogel draining `

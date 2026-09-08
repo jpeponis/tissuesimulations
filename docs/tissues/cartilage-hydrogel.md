@@ -189,7 +189,7 @@ reuses the engine's structure tensor `T`; all other species are scalar voxel fie
 
 | key | label | kind | oriented | colour | stiffness contribution | degradability | source |
 |---|---|---|---|---|---|---|---|
-| `scaf` | hydrogel scaffold (intact-network fraction) | `scaffold` | no (regular lattice) | pale grey-blue `#aebfd6`, fading | `E_scaf0(xl) · scaf`, `E_scaf0 = 5 + 60·xl` kPa | hydrolysis (rate set by `xl`) + cell enzyme (Michaelis–Menten in `m`) | cast at t = 0 (`scaf = 1`) |
+| `scaf` | hydrogel scaffold (intact-network fraction) | `scaffold` | no (regular lattice) | pale grey-blue `#aebfd6`, fading | `E_scaf0(xl) · scaf²` as built (`· scaf` in the spec), `E_scaf0 = 5 + 60·xl` kPa | hydrolysis (rate set by `xl`) + cell enzyme (Michaelis–Menten in `m`) | cast at t = 0 (`scaf = 1`) |
 | `gag` | GAG / aggrecan gel | `gel` | no | translucent teal haze `#3fb8b0` | swelling pressure, effective only with collagen: `E_gag · gag^1.5 · (0.25 + 0.75·col2/(col2 + 0.3))` | aggrecanase/MMP field `m`; **loss to medium** at rate falling with `col2` and with intact mesh | chondrogenic cells (`phi²`) |
 | `col2` | collagen II fibril network | `fiber` | isotropic (FA ≈ 0.1, fixed) | ivory `#efe6d2` | `E_col2 · col2²` | `m`, only once GAG is depleted (aggrecan protects) | chondrogenic cells, slow |
 | `col1` | collagen I fibres (fibrocartilage) | `fiber` | yes — lives in `T` | amber `#e0a24a` | `E_col1 · col1² · (1 + kStrain·strain)` | as existing engine (`kDeg·(mMin+m)`) | dedifferentiated cells, `(1 − phi)²`, oriented along `p` |
@@ -200,11 +200,25 @@ tracked. Update per voxel:
 
 ```
 d scaf/dt = −[ kHyd(xl)·(1 + kLoadDeg·s(a)) + kEnz·m/(m + mK) ] · (scaf + sOff),   clamp ≥ 0
-kHyd(xl)  = 0.357 / tRG(xl),  tRG = 7 + 28·xl  days   (time to reverse gelation, 7–35 d)
+kHyd(xl)  = 0.357 / tRG(xl),  tRG = 7 + 28·xl + 130·xl⁴ days  (time to reverse gelation, 7–165 d)
 ```
 `sOff = 2.3` encodes reverse gelation at 70 % of initial crosslink density for first-order cleavage
 (Dhote & Vernerey 2014); `kLoadDeg = 0.5` reproduces load-accelerated degradation (Roberts 2011).
 Mesh confinement `conf = xl · scaf` (0 = open, 1 = tight).
+
+**The quartic term is as-built, not spec.** This document carried the linear `tRG = 7 + 28·xl`
+(7–35 d) until it was checked against the code. The linear law cannot hold scenario 3 up: even the
+densest gel reverse-gels by day 35, so that scenario's own target (`scaf > 0.4` at day 42) is
+unreachable. `130·xl⁴` reads as the slower hydrolysis per bond of a dense, low-water network; it
+leaves `tRG(0.5) = 29 d`, inside the 2–4 week bulk band of Schneider 2020, and makes `xl = 1` the
+non-degradable PEG control of Bryant & Anseth 2002 / Skaalure 2014. Measured in the shipped model
+(`tools/run_headless.mjs`, seed 7, scenario-1 dials, no scripted events): the connected fraction
+falls below 0.05 on day 6.8 at `xl 0`, day 25.7 at the default `xl 0.5` and day 104.8 at `xl 1` —
+fifteen weeks, not the five the linear law implies. Also as built: the scaffold's contribution to
+the modulus (§2.4) is `E_scaf0(xl)·scaf²`, not `E_scaf0(xl)·scaf` — percolation, a network losing
+its modulus faster than its connected fraction near the gel point. Both worked values in §2.4 are
+unaffected (`scaf = 1` at casting, `scaf = 0` at the endpoints), but the dip in scenario 1 and the
+long slide in scenario 3 are the square's doing.
 
 ```
 d gag/dt  = Σ_cells bulk deposition − kGagLoss·gag·(1 − R)·(1 + 0.5·s(a)) − kGagDeg·m·gag + halo release
@@ -217,13 +231,28 @@ mesh is gone (Nikolaev 2010; Buschmann 1992; Kisiday 2004). `kGagDeg·m` at IL-1
 (≈ 0.5) removes ~20 %/d, matching week-1 aggrecan depletion; collagen II is protected until
 `gag ≲ gProt` (Pratta 2003).
 
+**As built, retention is two terms, not one.** The single escape factor `R` cannot tell scenario 1
+from scenario 2 — by week four both have `conf = 0` and similar `col2`, so they end in the same
+place whatever the rate constant. The code splits it, writing `H4(x, k) = x⁴/(x⁴ + k⁴)` for the
+sharper of the two switches and `H2` (§2.3) for the softer one. FRESH matrix has to be caught where
+it is made: `hold = scaf + (1 − scaf)·[1 − (1 − H4(col2, cRet))·(1 − H2(gag, gSelf))·(1 − haloBridge·halo/Pcap)]`,
+and a fraction `wf = kWashNew·(1 − hold)·(1 + kWash·s(a))`, capped at 0.9, is lost at once — `wC2·wf`
+(capped at 0.95) of the procollagen II, which has to be assembled into fibrils at the cell surface.
+The STANDING pool leaks `kGagLoss·free·(1 + kWash·s(a))·gag` with
+`free = (1 − scaf)·(1 − H4(col2, cRet))·(1 − H2(gag, gSelf))`, plus a `sink` of 0.1 /d at the +z
+medium face that no net can hold back. Two more forms differ from the spec: matrix degradation uses
+the protease in excess of a TIMP pool, `max(0, m − mTimp)` with `mTimp = 0.05` (basal MMP does not
+eat a healthy construct), and `gag` and `col2` are transported between voxels (`D` 0.04 and
+0.015 L²/d, gated by the mesh) rather than staying in the voxel that made them. The reasoning and
+the sources are in the header of `src/tissues/cartilage.js`.
+
 ### 2.2 Fields
 
 | field | diffusion | bath | sources | decay |
 |---|---|---|---|---|
 | `tgf` TGF-β3 (1 ≡ 10 ng/mL) | `D = 0.05 L²/d` (well mixed at this scale) | `kBath·(tgfExt − tgf)`, `kBath = 4 /d` everywhere (as engine) | small autocrine `kTauto·phi·s(a)` (stiffness/load-primed TGF-β, Allen 2012) | receptor uptake `kTup·n_cells` (0.05/d/agent) |
-| `o2` oxygen (normalised to 21 %) | quasi-steady: `0 = ∇²o2 − Da·(n_local/n_ref)·o2/(o2 + Km)` solved by Gauss–Seidel sweeps each step (D ≈ 3.8 × 10⁻¹⁰ m²/s equilibrates in minutes; explicit Euler would need dt < 10⁻⁴ d) | Dirichlet `o2 = o2Ext/21` on the +z face ("medium side"), zero flux elsewhere ("deep side") | consumption only | — |
-| `m` catabolic protease (MMP-13 + aggrecanase) | `0.05 L²/d`, hindered by mesh: `D·(1 − 0.8·conf)` | none (bath removes: `kMdec`) | per cell `mBasal·(1 + kMxl·conf) + mInfl·infl² + mFib·(1 − phi)`; `kMxl = 3` (MMP-13 ~25× in tight gels, Nicodemus 2011) | `kMdec = 1 /d`, `mMin = 0.02` |
+| `o2` oxygen (normalised to 21 %) | quasi-steady: `0 = ∇²o2 − Da·(n_local/n_ref)·o2/(o2 + Km)` solved by Gauss–Seidel sweeps each step (D ≈ 3.8 × 10⁻¹⁰ m²/s equilibrates in minutes; explicit Euler would need dt < 10⁻⁴ d). **As built:** an ordinary engine field integrated in time, `D = 0.06 L²/d`, consumption `−kO2·o2/(o2 + o2Km)` per agent with `kO2 = 0.7`. The ratio `kO2 : D` is the Damköhler number, so the STEADY profile is the spec's; what is wrong is the time to reach it (about a fortnight instead of minutes). The two-numbers fix and why it is not in are recorded under DECLINED in `src/tissues/cartilage.js` | Dirichlet `o2 = o2Ext/21` on the +z face ("medium side"), zero flux elsewhere ("deep side") | consumption only | — |
+| `m` catabolic protease (MMP-13 + aggrecanase) | `0.05 L²/d`, hindered by mesh: `D·(1 − 0.8·conf)` | none (bath removes: `kMdec`) | per cell `mBasal·(1 + kMxl·conf) + mInfl·infl² + mFib·(1 − phi)`; `kMxl = 3` (MMP-13 ~25× in tight gels, Nicodemus 2011). **As built:** the same form with `mBasal 0.35`, `kMxl 20`, `mInfl 8`, `mFib 1.5`, and `D` a plain constant — a field's `D` cannot depend on the mesh in this engine, so the `(1 − 0.8·conf)` hindrance is folded into `kMxl` | `kMdec = 1 /d`, `mMin = 0.02` |
 | `infl` IL-1 (dial, 1 ≡ 10 ng/mL) | treated as a bath value (no field) | dial | — | — |
 | `nut` nutrient (optional) | as `o2` with `Da_nut = 0.3·Da` | +z face | — | gates synthesis `nut/(nut + 0.1)` |
 
@@ -231,6 +260,13 @@ mesh is gone (Nikolaev 2010; Buschmann 1992; Kisiday 2004). `kGagDeg·m` at IL-1
 `C₀ = 0.2 mol/m³` and a construct half-thickness `H = 1 mm`, `Da ≈ 0.75`; the default `Da = 3`
 represents a ~2 mm-thick construct and yields a top-to-bottom gradient from 21 % to ~2–4 % at
 21 % bath, matching Malda 2004. `Km = 0.1` (≈ 2 % O₂; Zhou 2004).
+
+**As built** there is no `Da`: the profile is set by `kO2 : D` = 0.7 : 0.06, and it is calibrated on
+the 5 % case that the phenotype rule turns on. Measured layer by layer at day 56 of scenario 1
+(seed 7): with a 5 % bath the medium face holds the dial exactly and the deep face settles at 1.0 %,
+mean 2.4 %; with a 21 % bath it is 21 % → 11.8 %, mean 15.1 %. So the hypoxic case is the spec's and
+the room-air case is shallower than the 2–4 % predicted here — the model separates 5 % from 21 % by
+the DEEP value (1 % against 12 %), which is what `hyp` reads.
 
 ### 2.3 Cells
 
@@ -285,12 +321,20 @@ d cat/dt = (infl − cat)/tauC,  tauC = 1 d up, 6 d down (Rayan 1994: degradatio
 The `spread` term is the fibrotic drift loop: dedifferentiated output (collagen I) stiffens a
 fibrous matrix, which lets cells spread, which lowers `phi` further. Optional proliferation:
 `dN/dt = 0.015·N·(1 − conf)·(1 − N/Nmax)` (DNA doubling over 6 weeks once the gel degrades:
-Bryant & Anseth 2003); off by default so the story stays about the matrix.
+Bryant & Anseth 2003); off by default so the story stays about the matrix (and it is not built).
+
+**Where §2.3 differs from the code in FORM** (values are in the as-built column of §2.7):
+one halo, not two — a cell carries three scalars and two are taken, so `haloG` and `haloC` are
+summed into one pool `c ∈ [0, 3]`, full at `Pcap = 1`, and released in the fixed ratio `sG : sC2`;
+the release is `kRel·(1 − conf)⁴·c`, not `kRel·(1 − conf)·halo`, because the spec's single power
+drained the islands while the mesh was still tight and scenario 3's pericellular islands never
+formed; and motility is `v0·(1 − phi)²·(1 − scaf)`, not `v0·(1 − phi)·(1 − scaf)`, so a chondrocyte
+(`phi ≈ 0.9`) is pinned at 0.004 L/d while a dedifferentiated cell crawls.
 
 ### 2.4 Stiffness rule (kPa)
 
 ```
-E = E0 + E_scaf0(xl)·scaf
+E = E0 + E_scaf0(xl)·scaf            as built: E_scaf0(xl)·scaf²  (percolation; see §2.1)
       + E_gag · gag^1.5 · (0.25 + 0.75·col2/(col2 + 0.3))
       + E_col2 · col2²
       + E_col1 · col1² · (1 + kStrain·strain)
@@ -310,7 +354,7 @@ Williamson 2001). Fibrocartilage (`col1 0.8, gag 0.2`) → ~60 kPa.
 | Dynamic compression amplitude | `amp` (a) | 0–20 % (1 Hz, 3 h/d implied) | 0 for d 0–14, then 10 % | pressure | ~10 % stimulates; > 15 % injures; harmful inside a dense gel with TGF-β3 (Lima 2007) | E and GAG rise after loading starts; GAG loss rises too; > 15 % → `phi` and GAG fall |
 | Oxygen tension | `o2Ext` | 1–21 % | 5 % | altitude (thin air) | hypoxia → HIF-2α/SOX9 → collagen II, aggrecan; 21 % → hypertrophy/dedifferentiation; < 1 % starves | O₂ gradient layer; `phi` at 21 % vs 5 % |
 | Inflammation (IL-1) | `infl` | 0–1 (1 ≡ 10 ng/mL) | 0 | temperature (heat evaporates) | IL-1 → ADAMTS-5/MMP-13, synthesis shut-down, collagen II→I | GAG melts first, collagen II a week later; slow recovery after 0 |
-| Hydrogel crosslink density | `xl` | 0–1 | 0.5 | the trellis | mesh size, initial modulus (5–65 kPa) and time to reverse gelation (7–35 d) | pericellular islands (high) vs early collapse (low) |
+| Hydrogel crosslink density | `xl` | 0–1 | 0.5 | the trellis | mesh size, initial modulus (5–65 kPa) and time to reverse gelation (7–165 d as built; the spec's linear law gave 7–35) | pericellular islands (high) vs early collapse (low) |
 | Cell number | `nCells` | 40–400 | 160 | droplet nuclei | seeding density 20–60 × 10⁶/mL; more cells → faster fronts and steeper O₂ gradients | time to bulk matrix; O₂ floor |
 | Serum (toggle) | `serum` | 0/1 | 0 | smog | 10 % FBS: proliferation, dedifferentiation, blunts TGF-β3 effect (Byers 2008) | `phi` drift, collagen I |
 
@@ -330,7 +374,8 @@ halos empty, 160 agents at random positions. Statements are machine-checkable ta
    day 14; at the first day `t*` with `scaf < 0.1`, `gag(t*) < 0.3` and `E(t*) < 5 kPa`; `min E < 0.3·E(0)`;
    cumulative GAG loss fraction `> 60 %` by day 28; `gag(56) < 0.5` and `E(56) < 60 kPa` (both below
    scenario 1 at the same day).
-3. **Scaffold too dense / too slow.** As (1) but `xl 1.0` (`E_scaf0 65 kPa`, `tRG 35 d`). Expect:
+3. **Scaffold too dense / too slow.** As (1) but `xl 1.0` (`E_scaf0 65 kPa`, `tRG 165 d` as built —
+   35 d under the spec's linear law, which is why that law had to go; §2.1). Expect:
    `scaf > 0.4` at day 42; bulk `gag < 0.2` at day 42 while `mean halo > 0.8·Pcap` by day 21 (pericellular
    islands); `m` mean `≥ 2×` scenario 1 over days 7–42; `E` declines monotonically until `scaf < 0.2`
    and `E(56) < 0.7·E(0)` (Skaalure 2014: 2-fold drop); `phi > 0.7` (round cells keep their phenotype).
@@ -352,36 +397,40 @@ halos empty, 160 agents at random positions. Statements are machine-checkable ta
 ### 2.7 Parameter table
 
 This table is the **specification**: every value with the measurement it answers to and its source.
-What the implementation actually runs is the generated block under it (rewritten by
-`node tools/check_params_doc.mjs --write`, checked by `npm test`) — the two are allowed to differ,
-because tuning a scenario against its `checks` is how a value earns its place, but the difference is
-now visible instead of silent.
+The third column is what `src/tissues/cartilage.js` runs today, row by row, so a reader can see the
+difference without holding two documents in their head; "same" means the code runs the spec's value.
+The authoritative record of the built numbers is still the generated block under the table
+(rewritten by `node tools/check_params_doc.mjs --write`, checked by `npm test`) — this column is
+hand-written and has to be re-read when a parameter moves. The two are allowed to differ, because
+tuning a scenario against its `checks` is how a value earns its place; what is not allowed is the
+difference being invisible. Where the FORM of an equation differs, and not only its constants, the
+note is in §2.1–§2.3 beside the equation.
 
-| symbol | value (engine units) | plausible real range | source |
-|---|---|---|---|
-| `L`, agents | 300 µm; 160 agents ≈ 3–10 cells each | 10–60 × 10⁶ cells/mL | Mauck 2003b; Buschmann 1992 |
-| `E_scaf0(xl)` | 5 + 60·xl kPa | PEG gels 30–960 kPa (K); 42 kPa cell-laden MMP-gel | Bryant & Anseth 2002; Schneider 2020 |
-| `tRG(xl)` | 7 + 28·xl d | clusters cleared ≤ 13 d; bulk 2–4 wk; PEG-LA 2–6 wk | Schneider 2020; Bryant & Anseth 2003 |
-| `sOff` | 2.3 | reverse gelation at 60–80 % of initial ρx | Dhote & Vernerey 2014 |
-| `kEnz`, `mK` | 0.15 /d, 0.05 | enzyme Michaelis–Menten, k_cat 0.05 s⁻¹ | Schneider 2020; Akalp 2016 |
-| `kLoadDeg` | 0.5 | 4 wk loading accelerated degradation | Roberts 2011 |
-| mesh vs ECM size | `conf = xl·scaf`; b = (1 − conf)² | mesh ~60 nm vs ECM r_m > 200 nm | Schneider 2020; Akalp 2016 |
-| `Pcap` | 0.03 density units per agent | halo radius ≈ 1.5 r_cell | Schneider 2020 |
-| `sG`, `sC2`, `sC1` | 0.30, 0.06, 0.5 /d per agent | GAG native in 6–8 wk; collagen ~1/8 native at 8 wk | Byers 2008; Hung 2004 |
-| `fT` half-point | 0.25 (≈ 2.5 ng/mL) | 2.5–5 ng/mL transient suffices | Byers 2008 |
-| `a*`, `aInj` | 10 %, 18 % | 10 % / 1 Hz optimal; 1–5 % stimulates explants; ≥ 50 % injurious | Mauck 2000; Sah 1989; Kurz 2001 |
-| `kStim`, `kInj`, `kEarly` | 1.0, 0.6, 1.0 | 6× modulus; −90 % when concurrent with TGF-β3 | Mauck 2000; Lima 2007; Bryant 2004 |
-| `Da`, `Km` | 3, 0.1 | Q = 10 nmol/10⁶ cells/h; D = 3.8 × 10⁻¹⁰ m²/s; 2–5 % at centre | Zhou 2004; Malda 2004 |
-| `aHyp` | 0.8 | 5 % vs 21 %: 1.5–8× incorporation | Domm 2002/2004 |
-| `kGagLoss`, `cRet` | 0.05 /d, 0.15 | most PG retained in agarose; loss ↑ with loading | Buschmann 1992; Kisiday 2004; Nikolaev 2010 |
-| `kGagDeg` | 0.4 /d × m | 38 % GAG release in 3 d; aggrecan gone in 1 wk | Pratta 2003 |
-| `kCol2Deg`, `gProt` | 0.05 /d × m, 0.2 | collagen lost in week 2, protected by aggrecan | Pratta 2003 |
-| `mInfl`, `mFib`, `kMxl` | 20·infl², 3·(1 − phi), 3 | ADAMTS-5/MMP-13 induction; MMP-13 ~25× in tight gels | Glasson 2005; Nicodemus 2011 |
-| `tau_phi` down / up | 7 d / 14 d | II→I switch ≈ 7 d; redifferentiation 2–4 wk | Goldring 1988; Domm 2002; Murphy 2001 |
-| `tauC` up / down | 1 d / 6 d | degradation recovers 3 d, synthesis > 8 d | Rayan & Hardingham 1994 |
-| `E_gag`, `E_col2`, `E_col1`, `E0` | 600, 400, 80, 0.5 kPa | native 0.5–1 MPa; constructs 0.1–1.3 MPa; fibrocartilage inferior | Athanasiou 1991; Lima 2007; Armiento 2019 |
-| `v0` | 0.05 L/d × (1 − phi)(1 − scaf) | chondrocytes essentially stationary | Morales 2007 |
-| `fCrowd` scale | 1.6 | product inhibition at physiological GAG | Nikolaev 2010 |
+| symbol | spec value (engine units) | as built | plausible real range | source |
+|---|---|---|---|---|
+| `L`, agents | 300 µm; 160 agents ≈ 3–10 cells each | same (`domainMicrons 300`, `N 12`, `rCell 0.03`) | 10–60 × 10⁶ cells/mL | Mauck 2003b; Buschmann 1992 |
+| `E_scaf0(xl)` | 5 + 60·xl kPa | same values, but the term is `E_scaf0·scaf²` (§2.1) | PEG gels 30–960 kPa (K); 42 kPa cell-laden MMP-gel | Bryant & Anseth 2002; Schneider 2020 |
+| `tRG(xl)` | 7 + 28·xl d | **7 + 28·xl + 130·xl⁴ d** (7–165; §2.1) | clusters cleared ≤ 13 d; bulk 2–4 wk; PEG-LA 2–6 wk | Schneider 2020; Bryant & Anseth 2003 |
+| `sOff` | 2.3 | same | reverse gelation at 60–80 % of initial ρx | Dhote & Vernerey 2014 |
+| `kEnz`, `mK` | 0.15 /d, 0.05 | **0.0015 /d, 0.1** — with the `(scaf + sOff)` multiplier the spec's `kEnz` clears even the densest gel in four days | enzyme Michaelis–Menten, k_cat 0.05 s⁻¹ | Schneider 2020; Akalp 2016 |
+| `kLoadDeg` | 0.5 | same | 4 wk loading accelerated degradation | Roberts 2011 |
+| mesh vs ECM size | `conf = xl·scaf`; b = (1 − conf)² | same; `b` is also the species-transport mobility | mesh ~60 nm vs ECM r_m > 200 nm | Schneider 2020; Akalp 2016 |
+| `Pcap` | 0.03 density units per agent | **1.0** — one pool per cell, normalised (state `c ∈ [0, 3]`, full at 1) | halo radius ≈ 1.5 r_cell | Schneider 2020 |
+| `sG`, `sC2`, `sC1` | 0.30, 0.06, 0.5 /d per agent | **0.7, 0.12, 0.45** — the spec's rates reach `gag ≈ 0.35` in eight weeks against the 0.7 of §2.6 once the losses above are in; the 5× lag `sG : sC2` is kept | GAG native in 6–8 wk; collagen ~1/8 native at 8 wk | Byers 2008; Hung 2004 |
+| `fT` half-point | 0.25 (≈ 2.5 ng/mL) | same (`tgfHalf`, `fT0 0.45`) | 2.5–5 ng/mL transient suffices | Byers 2008 |
+| `a*`, `aInj` | 10 %, 18 % | same | 10 % / 1 Hz optimal; 1–5 % stimulates explants; ≥ 50 % injurious | Mauck 2000; Sah 1989; Kurz 2001 |
+| `kStim`, `kInj`, `kEarly` | 1.0, 0.6, 1.0 | same — but the early-loading penalty is spent inside a day and the model ends up REWARDING early loading; see the open model request in `src/tissues/cartilage.js` | 6× modulus; −90 % when concurrent with TGF-β3 | Mauck 2000; Lima 2007; Bryant 2004 |
+| `Da`, `Km` | 3, 0.1 | **no `Da`**: an explicit field, `kO2 0.7 /d` per agent with `D 0.06 L²/d` (their ratio is the Damköhler number), `o2Km 0.1`, anoxia knee `o2Anox 0.03` (§2.2) | Q = 10 nmol/10⁶ cells/h; D = 3.8 × 10⁻¹⁰ m²/s; 2–5 % at centre | Zhou 2004; Malda 2004 |
+| `aHyp` | 0.8 | same (`o2Half 0.25`) | 5 % vs 21 %: 1.5–8× incorporation | Domm 2002/2004 |
+| `kGagLoss`, `cRet` | 0.05 /d, 0.15 | **0.045 /d, 0.06**, plus the second half of the split retention: `gSelf 1.2`, `kWash 2`, `kWashNew 0.68`, `wC2 2.5`, `haloBridge 0.8`, and a `sink` of 0.1 /d at the medium face (§2.1) | most PG retained in agarose; loss ↑ with loading | Buschmann 1992; Kisiday 2004; Nikolaev 2010 |
+| `kGagDeg` | 0.4 /d × m | same value, but × `max(0, m − mTimp)`, `mTimp 0.05` | 38 % GAG release in 3 d; aggrecan gone in 1 wk | Pratta 2003 |
+| `kCol2Deg`, `gProt` | 0.05 /d × m, 0.2 | **0.095 /d × m**, `gProt` same — collagen II has to lose a fifth of itself by day 14 of scenario 5 | collagen lost in week 2, protected by aggrecan | Pratta 2003 |
+| `mInfl`, `mFib`, `kMxl` | 20·infl², 3·(1 − phi), 3 | **8·infl², 1.5·(1 − phi), 20** (`mBasal 0.35`): 20·infl² strips the whole GAG pool in three days; `kMxl 20` carries the mesh hindrance the field's constant `D` cannot (§2.2) | ADAMTS-5/MMP-13 induction; MMP-13 ~25× in tight gels | Glasson 2005; Nicodemus 2011 |
+| `tau_phi` down / up | 7 d / 14 d | 7 d / **8 d** — at 14 d the drift of scenario 4 only returns to `phi 0.55` by day 84, against that scenario's own `> 0.6` | II→I switch ≈ 7 d; redifferentiation 2–4 wk | Goldring 1988; Domm 2002; Murphy 2001 |
+| `tauC` up / down | 1 d / 6 d | same | degradation recovers 3 d, synthesis > 8 d | Rayan & Hardingham 1994 |
+| `E_gag`, `E_col2`, `E_col1`, `E0` | 600, 400, 80, 0.5 kPa | same (`EgagBase 0.25`, `Ecol2Half 0.3`, `kStrain 0.5`, `ampRef 0.2`) | native 0.5–1 MPa; constructs 0.1–1.3 MPa; fibrocartilage inferior | Athanasiou 1991; Lima 2007; Armiento 2019 |
+| `v0` | 0.05 L/d × (1 − phi)(1 − scaf) | **0.35 L/d × (1 − phi)²(1 − scaf)** — a chondrocyte still crawls at 0.004 L/d, a dedifferentiated cell on cleared matrix at fibroblast speed | chondrocytes essentially stationary | Morales 2007 |
+| `fCrowd` scale | 1.6 | **2.2** — at 1.6 product inhibition shuts synthesis down at `gag + col2 ≈ 1.1`, which no loss term can balance | product inhibition at physiological GAG | Nikolaev 2010 |
 
 <!-- params:cartilage -->
 <!-- Generated from src/tissues/cartilage.js by `node tools/check_params_doc.mjs --write`.
