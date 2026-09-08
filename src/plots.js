@@ -480,11 +480,10 @@ export class FluxGauge {
   constructor(canvas, theme, labels = {}) {
     this.canvas = canvas; this.theme = theme; this.dep = 0; this.deg = 0; this.scaf = 0;
     const L = Object.assign({ left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation', scaffold: 'scaffold dissolving' }, labels || {});
-    if (L.caption && !(labels && labels.ratio)) L.ratio = L.caption;   // `caption` is the EXTENDING §1 name for it
+    // §1 names the ratio caption `ratio`; `caption` is the accepted alias, and `ratio` wins when
+    // a definition sets both (docs/EXTENDING.md §1 copy.gauge)
+    if (L.caption && !(labels && labels.ratio)) L.ratio = L.caption;
     this.labels = L;
-    // a tissue that RENAMED the ratio gets its own words in the one-line reading too; the default
-    // name is three words long, so the default reading keeps the compact "2.50 ×"
-    this.ratioNamed = !!(labels && (labels.ratio || labels.caption));
     this.fontPx = Number.isFinite(L.fontPx) ? L.fontPx : PLOT_FONT_PX;
     this.size = { w: canvas.clientWidth || 0, h: canvas.clientHeight || 0 };
     this._tall = false;
@@ -498,16 +497,23 @@ export class FluxGauge {
   /** Text scale (presentation mode). */
   setFontPx(px) { if (Number.isFinite(px) && px !== this.fontPx) { this.fontPx = px; this.draw(); } }
   /**
-   * The gauge as one compact line for the value beside the readout title (the app's only reader
-   * of it): "0.05/d vs 0.02/d · 2.50 ×", plus "· hydrogel dissolving 0.01/d" when a scaffold is
-   * dissolving — in the tissue's own words for both (`copy.gauge.scaffold`, `copy.gauge.ratio`),
-   * so the DOM value says what the canvas says.
+   * The gauge as one line for the value beside the readout title (the app's only reader of it),
+   * and the text a screen reader gets instead of the picture: "condensing 0.03/d · evaporating
+   * 0.01/d · deposition / degradation = 2.09", plus "· hydrogel dissolving 0.01/d" when a
+   * scaffold is dissolving.
+   *
+   * Every word in it is the tissue's own (`copy.gauge` — left, right, ratio/caption, scaffold):
+   * the reading used to glue the two rates together with a hard-coded "vs" and print the ratio as
+   * a bare "2.50 ×", so a tissue that had named its two directions and its ratio said one thing
+   * on the canvas and another in the DOM. The three captions are now the same words and the same
+   * "name = value" shape as the ones draw() paints.
    */
   describe() {
     const ratio = (this.dep + 1e-9) / (this.deg + 1e-9);
     const r = ratio > 99 ? '>99' : ratio.toFixed(2);
-    let s = `${copyFormatRate(Math.max(0, this.dep))} vs ${copyFormatRate(Math.max(0, this.deg))} · ${this.ratioNamed ? `${this.labels.ratio} ${r}` : `${r} ×`}`;
-    if (this.scaf > 0) s += ` · ${this.labels.scaffold} ${copyFormatRate(this.scaf)}`;
+    const L = this.labels;
+    let s = `${L.right} ${copyFormatRate(Math.max(0, this.dep))} · ${L.left} ${copyFormatRate(Math.max(0, this.deg))} · ${L.ratio} = ${r}`;
+    if (this.scaf > 0) s += ` · ${L.scaffold} ${copyFormatRate(this.scaf)}`;
     return s;
   }
   update(dep, deg, scaffold) {

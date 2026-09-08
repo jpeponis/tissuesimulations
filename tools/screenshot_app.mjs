@@ -27,9 +27,14 @@
 // …and the accessibility findings of round 3, each of which is likewise a claim about the rendered
 // page (the WCAG success criterion each one is measured against is named at the check):
 //   1.4.4  the open legend never covers the HUD at 200 % zoom (720×450 at deviceScaleFactor 2)
-//   2.4.11 no control is left focused behind the sticky Run header on a backwards Tab pass
-//   2.1.4  the single-key shortcuts have an off switch, and OFF means off (Space excepted)
-//   1.4.3  the HUD text measures ≥ 4.5:1 against the pixels the RENDERER actually draws under it
+//   2.4.11 no control is left focused behind the sticky Run header on a backwards Tab pass, and
+//          every layer / camera chip is hit-testable at its centre while focused — at the run's
+//          own viewport AND at 320×512, the 1.4.10 Reflow width where the HUD's plates used to
+//          cover five of them (2.5.7: they are the alternative to dragging the view)
+//   2.1.4  the single-key shortcuts have an off switch, OFF means off (Space excepted), and
+//          presentation mode does not hide the switch while the shortcuts keep firing
+//   1.4.3  the HUD, chip and legend text measures ≥ 4.5:1 against the pixels the RENDERER actually
+//          draws under it — after the long run, and again with the camera dollied all the way in
 //   1.4.1  no two series in one readout share a marker; the key mirrors the chart's hatch
 //   4.1.2  the operable 3D canvas points at a description of its keys
 //   2.4.3  a scenario or tissue change does not drop focus to the document body
@@ -50,7 +55,8 @@
 // --dsf        deviceScaleFactor. `--width 720 --height 450 --dsf 2` is a 1440×900 window at
 //              200 % browser zoom, which is where the legend used to print itself over the HUD.
 // --no-page-checks  skip the package-C page probes (for a page that is not index.html).
-// Environment: PAGE=dist/tissue-weather.html (same as --page), INJURE=1 (force injure before the long run).
+// Environment: PAGE=dist/tissue-weather.html (same as --page), INJURE=1 (force injure before the long run),
+//              WAIT_MS=240000 (how long a wait-for-ready may take; raise it on a slower machine).
 // Headless Chromium in some sandboxes cannot complete TLS to the CDNs even when
 // curl can, so CDN and font requests are served from a curl-fetched cache (tools/lib/browser.mjs).
 import { mkdirSync } from 'node:fs';
@@ -97,11 +103,22 @@ mkdirSync(cacheDir, { recursive: true });
 const issues = [];
 const failures = [];
 const check = (ok, what) => { if (!ok) failures.push(what); return ok; };
+// How long a "wait until the page is ready again" may take. Not a timing assertion — the timing
+// claims here (the "+7 days" click, the frame budget, the status cadence) measure the page's own
+// clock and are unchanged. This is the allowance for the MACHINE: with SwiftShader on a small
+// sandbox one frame can block the renderer's main thread for a minute at a stretch — measured
+// 61.7 s in a single task on a 4-core container, rebuilding the cartilage scene at 320x512, with
+// the CPU profiler reporting 100 % idle (the block is inside the GL driver, not in JS), and the
+// same 56.7 s stall on a HEAD checkout, so it is the sandbox and not the page. At 60 s the run
+// died there with a page that was in fact ready; nothing is weakened by waiting longer, because
+// every wait below is a wait for a condition, not for a deadline.
+const WAIT_MS = parseInt(process.env.WAIT_MS || '240000', 10);
 
 await withHarness({ root: serveRoot, width, height, deviceScaleFactor: dsf, cacheDir }, async ({ page, url: origin }) => {
   page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') issues.push(`${m.type()}: ${m.text()}`); });
   page.on('pageerror', (e) => issues.push(`pageerror: ${e.message}`));
-  const waitReady = () => page.waitForFunction(() => window.tissueApp && window.tissueApp.ready && document.getElementById('busy').hidden, null, { timeout: 60000 });
+  page.setDefaultTimeout(WAIT_MS);          // …and the same allowance for a click or a selector wait
+  const waitReady = () => page.waitForFunction(() => window.tissueApp && window.tissueApp.ready && document.getElementById('busy').hidden, null, { timeout: WAIT_MS });
 
   const q = new URLSearchParams();
   if (tissue) q.set('tissue', tissue);
@@ -420,7 +437,27 @@ await withHarness({ root: serveRoot, width, height, deviceScaleFactor: dsf, cach
           .filter((el) => !el.hidden && !el.closest('[hidden]'))   // #notice is a role=alert that only exists after a failure
           .map((el) => el.id || `${el.tagName.toLowerCase()}.${el.className}`),
         // the 3D view is operable, so it must point at a description of its keys
-        viewHint: (() => { const id = view.getAttribute('aria-describedby'); const t = id ? document.getElementById(id) : null; return { id, text: t ? t.textContent.slice(0, 60) : null, keys: view.getAttribute('aria-keyshortcuts') }; })(),
+        viewHint: (() => {
+          const id = view.getAttribute('aria-describedby');
+          const t = id ? document.getElementById(id) : null;
+          const layers = document.getElementById('layers');
+          const group = layers ? layers.getAttribute('aria-label') : null;
+          return {
+            id, text: t ? t.textContent.slice(0, 120) : null, keys: view.getAttribute('aria-keyshortcuts'),
+            // the description promises the same moves as buttons: name the group they are in, and
+            // let the probe check that group is really there (it moves between the stage and the
+            // console, so "under the view" is not something the sentence may promise)
+            group, namesGroup: !!(t && group && t.textContent.includes(group)),
+            camChips: layers ? layers.querySelectorAll('.cam-group .chip').length : 0,
+          };
+        })(),
+        // ARIA prohibits aria-label on the GENERIC role, so a bare <div aria-label="…"> is a name
+        // the accessibility tree is entitled to drop — Chrome reported #legend as
+        // `role: generic, name: "Colour key and how to read the view"` and axe flags
+        // aria-prohibited-attr. Every labelled generic container needs a role that can hold a name.
+        prohibitedLabels: Array.from(document.querySelectorAll('div[aria-label], span[aria-label], p[aria-label]'))
+          .filter((el) => !el.getAttribute('role'))
+          .map((el) => `${el.tagName.toLowerCase()}#${el.id || ''}.${String(el.className || '')}`),
         // heading text, disclosure names, and whether a ::before glyph leaked into either
         h1: (document.querySelector('h1') || {}).textContent,
         dialSummaries: Array.from(document.querySelectorAll('#dials .dial-more summary')).map((s) => s.getAttribute('aria-label') || s.textContent),
@@ -445,6 +482,10 @@ await withHarness({ root: serveRoot, width, height, deviceScaleFactor: dsf, cach
     // 4.1.2 / 3.3.2: the canvas is a control as well as a picture, and says so
     check(!!report.a11y.viewHint.id && /arrow keys/i.test(report.a11y.viewHint.text || '') && /Home/.test(report.a11y.viewHint.keys || ''),
       `the 3D view does not describe its keys: ${JSON.stringify(report.a11y.viewHint)}`);
+    if (report.a11y.viewHint.camChips > 0) check(report.a11y.viewHint.namesGroup,
+      `the 3D view's description promises buttons but does not name the group holding them: ${JSON.stringify(report.a11y.viewHint)}`);
+    check(report.a11y.prohibitedLabels.length === 0,
+      `aria-label on a role-less generic element — give it role="group"/"region", or a heading: ${JSON.stringify(report.a11y.prohibitedLabels)}`);
     // 2.4.6: the page's only h1 is the product name, not the name with the tagline run into it
     check((report.a11y.h1 || '').trim() === 'Tissue Weather', `the h1 reads "${report.a11y.h1}"`);
     // 2.4.6: four (or seven) disclosures in a row must not all be called the same thing
@@ -565,11 +606,14 @@ await withHarness({ root: serveRoot, width, height, deviceScaleFactor: dsf, cach
     if (pg.layout && pg.layout.hasFlux) {
       pg.gaugeAgrees = await page.evaluate(() => {
         const g = window.tissueApp.gauge;
-        return { dom: document.querySelector('#readouts .readout.gauge .val').textContent, gauge: g.describe(), scaffoldWord: g.labels.scaffold, scaf: g.scaf, ratioWord: g.ratioNamed ? g.labels.ratio : null };
+        return { dom: document.querySelector('#readouts .readout.gauge .val').textContent, gauge: g.describe(), scaffoldWord: g.labels.scaffold, scaf: g.scaf, ratioWord: g.labels.ratio, leftWord: g.labels.left, rightWord: g.labels.right };
       });
       check(pg.gaugeAgrees.dom === pg.gaugeAgrees.gauge, `the gauge's DOM value and its own reading differ: ${JSON.stringify(pg.gaugeAgrees)}`);
       if (pg.gaugeAgrees.scaf > 0) check(pg.gaugeAgrees.dom.includes(pg.gaugeAgrees.scaffoldWord), `the DOM value drops the tissue's word for the third rate: ${JSON.stringify(pg.gaugeAgrees)}`);
-      if (pg.gaugeAgrees.ratioWord) check(pg.gaugeAgrees.dom.includes(pg.gaugeAgrees.ratioWord), `the DOM value drops the tissue's name for the ratio: ${JSON.stringify(pg.gaugeAgrees)}`);
+      // every word of the reading is copy.gauge's, not a hard-coded "vs" / "×" (review C request)
+      for (const w of ['ratioWord', 'leftWord', 'rightWord']) {
+        check(pg.gaugeAgrees.dom.includes(pg.gaugeAgrees[w]), `the DOM value drops the tissue's ${w.replace('Word', '')} word for the gauge: ${JSON.stringify(pg.gaugeAgrees)}`);
+      }
     }
     await page.evaluate(() => document.querySelector('#readouts .readout:not(.gauge) canvas').focus());
     // the crosshair reading is debounced: a held arrow key used to rewrite the polite region at
@@ -634,7 +678,7 @@ await withHarness({ root: serveRoot, width, height, deviceScaleFactor: dsf, cach
     pg.weekJump = { clickMs: Date.now() - tClick, target: await page.evaluate(() => window.tissueApp.stopAt), playing: await page.evaluate(() => window.tissueApp.playing) };
     check(pg.weekJump.clickMs < 400, `"+7 days" blocked the UI for ${pg.weekJump.clickMs} ms — it must run, not step`);
     check(pg.weekJump.playing && Math.abs(pg.weekJump.target - (beforeWeek + 7)) < 1e-6, `"+7 days" did not set a stopAt: ${JSON.stringify(pg.weekJump)}`);
-    await page.waitForFunction(() => !window.tissueApp.playing, null, { timeout: 30000 }).catch(() => {});
+    await page.waitForFunction(() => !window.tissueApp.playing, null, { timeout: WAIT_MS }).catch(() => {});
     pg.weekJump.day = await page.evaluate(() => window.tissueApp.engine.state.time);
     pg.weekJump.stopAtAfter = await page.evaluate(() => window.tissueApp.stopAt);
     check(Math.abs(pg.weekJump.day - (beforeWeek + 7)) < 0.5 && pg.weekJump.stopAtAfter === null,
@@ -768,6 +812,30 @@ await withHarness({ root: serveRoot, width, height, deviceScaleFactor: dsf, cach
     check(pg.spaceWithShortcutsOff, 'Space stopped working when the single-key shortcuts were turned off');
     await page.evaluate(() => { window.tissueApp.setPlaying(false); document.getElementById('opt-shortcuts').click(); document.getElementById('about').open = false; });
     check(await page.evaluate(() => window.tissueApp.shortcuts), 'the shortcuts toggle did not switch back on');
+    // …and presentation mode must not take the switch away while r / i / p / 1-9 keep firing.
+    // `body.present .note { display: none }` did exactly that, and ?present=1 — the state the Copy
+    // link button hands out — is reachable by a link, so a shared URL could land a speech-input
+    // user in a page whose every dictated "r" resets the run with no way to stop it.
+    pg.shortcutsInPresent = await page.evaluate(() => {
+      const app = window.tissueApp, was = app.present;
+      app.setPresent(true, false);
+      document.getElementById('about').open = true;
+      const chip = document.getElementById('opt-shortcuts');
+      const r = chip ? chip.getBoundingClientRect() : { width: 0, height: 0 };
+      if (chip) chip.focus();
+      const out = {
+        present: document.body.classList.contains('present'), shortcutsLive: app.shortcuts,
+        w: Math.round(r.width), h: Math.round(r.height),
+        focusable: !!chip && document.activeElement === chip,
+        parentDisplay: chip ? getComputedStyle(chip.parentElement).display : null,
+      };
+      if (chip) chip.blur();
+      document.getElementById('about').open = false;
+      app.setPresent(was, false);
+      return out;
+    });
+    check(pg.shortcutsInPresent.w > 0 && pg.shortcutsInPresent.h > 0 && pg.shortcutsInPresent.focusable,
+      `presentation mode hides the single-key-shortcut off switch while the shortcuts stay live (WCAG 2.1.4): ${JSON.stringify(pg.shortcutsInPresent)}`);
 
     // WCAG 2.4.11 Focus Not Obscured: a backwards Tab pass up the console ----------------------
     // Chrome scrolls a focused element into view only when it is OUTSIDE the scrollport, so one
@@ -850,67 +918,6 @@ await withHarness({ root: serveRoot, width, height, deviceScaleFactor: dsf, cach
     });
     if (pg.scale.um > 0) check(!!pg.scale.text && /µm|mm/.test(pg.scale.text), `domainMicrons ${pg.scale.um} but no legend scale row`);
     else check(pg.scale.text === null, `a legend scale row appeared without a domainMicrons: "${pg.scale.text}"`);
-
-    // WCAG 1.4.3: the HUD text against the pixels the RENDERER draws under it --------------------
-    // Not against --ground: the sentence and the clock float over the tissue, whose pixels run
-    // from black to a pale hydrogel. Each text line is measured over four camera azimuths, with
-    // every background between it and the canvas composited in the order the browser paints them.
-    if (loaded.renderer === 'ready') {
-      pg.hudContrast = await page.evaluate(async () => {
-        const app = window.tissueApp;
-        const lum = ([r, g, b]) => { const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
-        const ratio = (a, b) => { const [x, y] = [lum(a) + 0.05, lum(b) + 0.05]; return x > y ? x / y : y / x; };
-        const parse = (c) => { const m = /rgba?\(([^)]+)\)/.exec(c); if (!m) return null; const p = m[1].split(',').map(Number); return { rgb: p.slice(0, 3), a: p.length > 3 ? p[3] : 1 }; };
-        const over = (fg, bg) => fg.rgb.map((v, i) => fg.a * v + (1 - fg.a) * bg[i]);
-        // every background between the text and the canvas, top-most last
-        const stack = (el) => { const out = []; for (let n = el; n && n.id !== 'stage'; n = n.parentElement) { const c = parse(getComputedStyle(n).backgroundColor); if (c && c.a > 0) out.unshift(c); } return out; };
-        const canvas = document.getElementById('view');
-        const cr = canvas.getBoundingClientRect();
-        const lines = [];
-        const walk = document.createTreeWalker(document.querySelector('.hud-top'), NodeFilter.SHOW_TEXT);
-        for (let t = walk.nextNode(); t; t = walk.nextNode()) {
-          if (!t.textContent.trim()) continue;
-          const range = document.createRange(); range.selectNodeContents(t);
-          for (const r of range.getClientRects()) {
-            if (r.width < 2 || r.height < 2) continue;
-            const el = t.parentElement;
-            const cs = getComputedStyle(el);
-            lines.push({ text: t.textContent.trim().slice(0, 24), rect: { x: r.left - cr.left, y: r.top - cr.top, w: r.width, h: r.height }, color: parse(cs.color).rgb, big: parseFloat(cs.fontSize) >= 24 || (parseFloat(cs.fontSize) >= 18.66 && +cs.fontWeight >= 700), bgs: stack(el) });
-          }
-        }
-        const off = document.createElement('canvas');
-        off.width = Math.round(cr.width); off.height = Math.round(cr.height);
-        const ctx = off.getContext('2d', { willReadFrequently: true });
-        const worst = new Map();
-        for (let k = 0; k < 4; k++) {
-          const img = new Image();
-          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = app.renderer.screenshot(); });
-          ctx.drawImage(img, 0, 0, off.width, off.height);
-          for (const L of lines) {
-            const x0 = Math.max(0, Math.round(L.rect.x)), y0 = Math.max(0, Math.round(L.rect.y));
-            const w = Math.min(off.width - x0, Math.round(L.rect.w)), h = Math.min(off.height - y0, Math.round(L.rect.h));
-            if (w < 1 || h < 1) continue;
-            const px = ctx.getImageData(x0, y0, w, h).data;
-            let low = Infinity;
-            for (let i = 0; i < px.length; i += 4 * 3) {                       // every third pixel
-              let bg = [px[i], px[i + 1], px[i + 2]];
-              for (const b of L.bgs) bg = over(b, bg);
-              const c = ratio(L.color, bg);
-              if (c < low) low = c;
-            }
-            const prev = worst.get(L.text);
-            if (!prev || low < prev.ratio) worst.set(L.text, { ratio: +low.toFixed(2), big: L.big });
-          }
-          app.renderer.orbit(Math.PI / 2, 0);
-          app.renderer.render();
-        }
-        return Array.from(worst, ([text, v]) => ({ text, ratio: v.ratio, need: v.big ? 3 : 4.5 }));
-      });
-      for (const line of pg.hudContrast) {
-        check(line.ratio >= line.need, `HUD text "${line.text}" measures ${line.ratio}:1 over the rendered pixels, needs ${line.need}:1`);
-      }
-      await page.evaluate(() => { const b = document.getElementById('btn-rotate'); if (b && b.getAttribute('aria-pressed') === 'false') b.click(); });
-    }
 
     // C13 / the first-run card: "Got it" survives a tissue switch --------------------------------
     if (loaded.tissues.length > 1) {
@@ -1004,6 +1011,234 @@ await withHarness({ root: serveRoot, width, height, deviceScaleFactor: dsf, cach
     report.panelScrollTop = await page.evaluate(() => document.getElementById('panel').scrollTop);
     check(report.panelScrollTop === 0, `panel did not scroll to the top (${report.panelScrollTop})`);
   }
+  // ---- WCAG 2.4.11 / 2.5.7 / 2.1.1: every layer and camera chip is reachable AND hit-testable --
+  // The camera chips are the single-pointer alternative to dragging the view, so a chip that is
+  // painted over is not a cosmetic problem: its click lands on whatever is on top. Each chip is
+  // FOCUSED first (2.4.11 asks about the control that has focus, and focusing scrolls a docked
+  // chip into view), then elementFromPoint is asked at its centre and over a 7x5 grid.
+  // 320x512 is probed on every run whatever the run's own viewport is: that is the WCAG 1.4.10
+  // Reflow benchmark width, and it is where the HUD's plates used to cover five of them.
+  if (pageChecks) {
+    const pg = report.page;
+    const probeChips = () => page.evaluate(() => {
+      const panel = document.getElementById('panel');
+      const rows = [];
+      for (const b of document.querySelectorAll('#layers button')) {
+        b.focus();
+        const r = b.getBoundingClientRect();
+        let covered = 0, total = 0; const by = new Set();
+        for (let i = 1; i <= 7; i++) for (let j = 1; j <= 5; j++) {
+          total++;
+          const top = document.elementFromPoint(r.left + (r.width * i) / 8, r.top + (r.height * j) / 6);
+          if (top && (top === b || b.contains(top))) continue;
+          covered++;
+          by.add(top ? `${top.tagName}${top.id ? `#${top.id}` : `.${String(top.className).split(' ')[0]}`}` : 'outside the viewport');
+        }
+        const mid = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        rows.push({
+          name: (b.getAttribute('aria-label') || b.textContent || '').trim().slice(0, 30),
+          w: Math.round(r.width), h: Math.round(r.height),
+          clickable: !!(mid && (mid === b || b.contains(mid))),
+          hit: mid ? `${mid.tagName}${mid.id ? `#${mid.id}` : `.${String(mid.className).split(' ')[0]}`}` : null,
+          coveredPct: Math.round((100 * covered) / total), coveredBy: [...by],
+          focused: document.activeElement === b,
+          onScreen: r.top > -1 && r.left > -1 && r.bottom < window.innerHeight + 1 && r.right < window.innerWidth + 1,
+        });
+      }
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      if (panel) panel.scrollTop = 0;
+      const sr = document.getElementById('stage').getBoundingClientRect();
+      // Clickability is only half of it: the chips take the higher z-index, so they stay clickable
+      // even while they are PAINTED over the live sentence, and text over text is a loss of content
+      // either way (C14 measures the same thing for the legend). On the stage the block must clear
+      // every HUD plate and stay inside the stage; docked in the console there is nothing to clear.
+      const box = document.getElementById('layers');
+      const br = box.getBoundingClientRect();
+      const over = (a, b) => Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+      const onStage = !!box.closest('#stage');
+      let overlapHud = 0;
+      if (onStage) for (const plate of document.querySelector('.hud-top').children) {
+        const r = plate.getBoundingClientRect();
+        if (r.width > 1 && r.height > 1) overlapHud += over(br, r);
+      }
+      // The legend is the OTHER block in the same corner, and the chips are now the higher layer:
+      // they may neither paint over it nor swallow the click on it. Both halves are real — a chip
+      // block allowed to cross the middle of the stage drew chips over the open legend, and the
+      // empty half of its full-width camera row took the click on the CLOSED “Legend” pill
+      // (elementFromPoint landed on DIV.cam-group between 480 and 900 px wide). Measured in both
+      // disclosure states, because the two failures show up in different ones.
+      const lb = document.getElementById('legend-box');
+      const sum = lb ? lb.querySelector('summary') : null;
+      const legend = { onStage: !!(lb && lb.closest('#stage')), states: [] };
+      if (lb && sum && onStage && legend.onStage) {
+        const wasOpen = lb.open;
+        for (const open of [wasOpen, !wasOpen]) {
+          lb.open = open;
+          const gr = lb.getBoundingClientRect();
+          let px = 0;
+          for (const el of box.querySelectorAll('.chip, .chips-label span')) px += over(el.getBoundingClientRect(), gr);
+          const s = sum.getBoundingClientRect();
+          const top = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2);
+          legend.states.push({
+            open, over: Math.round(px),
+            hit: top ? `${top.tagName}${top.id ? `#${top.id}` : `.${String(top.className).split(' ')[0]}`}` : null,
+            clickable: !!(top && (top === sum || sum.contains(top))),
+          });
+        }
+        lb.open = wasOpen;
+      }
+      return {
+        vw: window.innerWidth, vh: window.innerHeight, stage: [Math.round(sr.width), Math.round(sr.height)],
+        docked: document.body.classList.contains('chips-docked'), legendDocked: document.body.classList.contains('legend-docked'),
+        onStage, overlapHud: Math.round(overlapHud), offStage: onStage ? Math.round(Math.max(0, sr.top - br.top) + Math.max(0, br.bottom - sr.bottom)) : 0,
+        legend, rows,
+      };
+    });
+    pg.chips = {};
+    pg.chips[`${width}x${height}@${dsf}`] = Object.assign({ want: [width, height] }, await probeChips());
+    {
+      // Wait for the page to have SEEN the new size, and then for it to have been TOLD about it.
+      // `window.innerWidth` and every rectangle update the moment the viewport changes, but the
+      // `resize` event and the ResizeObserver notifications that drive layoutChips/layoutLegend are
+      // both delivered as part of the rendering steps — and software GL renders a frame here about
+      // once a second. Waiting on wall-clock time measured a layout the app had not yet been told
+      // about, and every chip then passed at the OLD geometry: a false pass. Wait for frames.
+      const settle = async (w, h) => {
+        await page.setViewportSize({ width: w, height: h });
+        await page.waitForFunction(([ww, hh]) => window.innerWidth === ww && window.innerHeight === hh, [w, h], { timeout: WAIT_MS });
+        await page.evaluate(() => new Promise((res) => {
+          let n = 0;
+          const tick = () => (++n >= 3 ? setTimeout(res, 120) : requestAnimationFrame(tick));
+          requestAnimationFrame(tick);
+        }));
+      };
+      // 320x512 is the Reflow benchmark width, where the HUD's plates covered five camera chips.
+      // 800x760 is the other interesting shape: below the 900 px breakpoint the console is under
+      // the stage, so the chips and the legend share the bottom of a full-width stage — that is
+      // where a chip block allowed to cross the middle painted over the legend and ate the click
+      // on its summary. Both are probed on every run, whatever the run's own viewport is.
+      for (const [w, h] of [[320, 512], [800, 760]]) {
+        if (w === width && h === height) continue;
+        await settle(w, h);
+        pg.chips[`${w}x${h}`] = Object.assign({ want: [w, h] }, await probeChips());
+      }
+      await settle(width, height);
+    }
+    for (const [size, at] of Object.entries(pg.chips)) {
+      // a probe taken at the wrong size is a FALSE PASS, not a missing result
+      check(at.vw === at.want[0] && at.vh === at.want[1], `the chip probe for ${size} ran at ${at.vw}x${at.vh}`);
+      check(at.rows.length >= 4, `only ${at.rows.length} layer/camera chip(s) at ${size}`);
+      check(at.docked !== at.onStage, `${size}: the chips-docked flag and where the chip block lives disagree (${JSON.stringify({ docked: at.docked, onStage: at.onStage })})`);
+      check(at.overlapHud === 0, `${size}: the chip block covers ${at.overlapHud} px² of the HUD's plates — it should have moved into the console`);
+      check(at.offStage === 0, `${size}: the chip block hangs ${at.offStage} px outside the stage, where nothing can scroll to it`);
+      for (const c of at.rows) {
+        check(c.clickable, `${size}: the "${c.name}" chip is not clickable — a click at its centre lands on ${c.hit} (${c.coveredPct} % covered by ${JSON.stringify(c.coveredBy)}, chips ${at.docked ? 'docked in the console' : 'on the stage'})`);
+        check(c.onScreen, `${size}: the "${c.name}" chip is off screen even with focus on it (${JSON.stringify(c)})`);
+        check(c.focused, `${size}: the "${c.name}" chip did not take focus`);
+        check(c.w >= 24 && c.h >= 24, `${size}: the "${c.name}" chip is ${c.w}x${c.h} CSS px`);
+      }
+      for (const st of (at.legend && at.legend.states) || []) {
+        check(st.over === 0, `${size}: the chip block paints ${st.over} px² over the ${st.open ? 'open' : 'closed'} legend — the two blocks share the bottom of the stage and the chips are the higher layer`);
+        check(st.clickable, `${size}: with the legend ${st.open ? 'open' : 'closed'}, a click on its summary lands on ${st.hit} — the chip block above it must not take the pointer with its empty space`);
+      }
+    }
+  }
+
+  // ---- WCAG 1.4.3: HUD, chip and legend text against the pixels the RENDERER draws under them --
+  // Not against --ground: this text floats over the tissue, whose pixels run from black to a pale
+  // hydrogel. Three things make this probe able to FAIL rather than able to pass:
+  //   * it runs HERE, after the long run — at day 0 the cube is nearly empty, the pixels behind
+  //     the HUD are almost all --ground and every ratio is trivially 6:1 or better;
+  //   * it walks `.hud-top, .hud-layers, #legend`, not `.hud-top` alone — the "show" label and the
+  //     layer chips sit on the same rendered pixels, and the label was the line that failed (1.0:1);
+  //   * it takes a second pass with the camera DOLLIED IN, because that is what fills the frame
+  //     with bright matrix; eight presses of the app's own Zoom in chip, the same move the + key
+  //     and two wheel notches make.
+  // Every DOM background between the text and the canvas is composited in paint order, and the
+  // walk stops at #stage: the stage's own opaque --ground is painted BEHIND the canvas, so
+  // compositing it swamps the measurement and turns every line into a false pass.
+  if (pageChecks && loaded.renderer === 'ready') {
+    const pg = report.page;
+    const hudProbe = async (zoomPresses) => page.evaluate(async (presses) => {
+      const app = window.tissueApp;
+      if (app.autoRotate) app.setAutoRotate(false, true);
+      const inBtn = document.getElementById('btn-cam-in');
+      for (let i = 0; i < presses; i++) { if (inBtn) inBtn.click(); }
+      const lum = ([r, g, b]) => { const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+      const ratio = (a, b) => { const [x, y] = [lum(a) + 0.05, lum(b) + 0.05]; return x > y ? x / y : y / x; };
+      const parse = (c) => { const m = /rgba?\(([^)]+)\)/.exec(c); if (!m) return null; const p = m[1].split(/[,\s/]+/).filter(Boolean).map(Number); return { rgb: p.slice(0, 3), a: p.length > 3 ? p[3] : 1 }; };
+      const over = (fg, bg) => fg.rgb.map((v, i) => fg.a * v + (1 - fg.a) * bg[i]);
+      // every background between the text and the canvas, top-most last; STOP at #stage
+      const stack = (el) => { const out = []; for (let n = el; n && n.id !== 'stage'; n = n.parentElement) { const c = parse(getComputedStyle(n).backgroundColor); if (c && c.a > 0) out.unshift(c); } return out; };
+      const canvas = document.getElementById('view');
+      const cr = canvas.getBoundingClientRect();
+      const lines = [];
+      for (const root of document.querySelectorAll('.hud-top, .hud-layers, #legend')) {
+        if (!root.closest('#stage')) continue;               // docked into the console: not over the canvas
+        const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+          if (!t.textContent.trim()) continue;
+          const el = t.parentElement;
+          if (!el || !el.checkVisibility || !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) continue;
+          const range = document.createRange(); range.selectNodeContents(t);
+          for (const r of range.getClientRects()) {
+            if (r.width < 2 || r.height < 2) continue;
+            const cs = getComputedStyle(el);
+            lines.push({
+              text: `${root.id || root.className.split(' ')[1] || root.className} “${t.textContent.trim().slice(0, 24)}”`,
+              rect: { x: r.left - cr.left, y: r.top - cr.top, w: r.width, h: r.height },
+              color: parse(cs.color).rgb,
+              big: parseFloat(cs.fontSize) >= 24 || (parseFloat(cs.fontSize) >= 18.66 && +cs.fontWeight >= 700),
+              bgs: stack(el),
+            });
+          }
+        }
+      }
+      const off = document.createElement('canvas');
+      off.width = Math.round(cr.width); off.height = Math.round(cr.height);
+      const ctx = off.getContext('2d', { willReadFrequently: true });
+      const worst = new Map();
+      for (let k = 0; k < 6; k++) {
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = app.renderer.screenshot(); });
+        ctx.drawImage(img, 0, 0, off.width, off.height);
+        for (const L of lines) {
+          const x0 = Math.max(0, Math.round(L.rect.x)), y0 = Math.max(0, Math.round(L.rect.y));
+          const w = Math.min(off.width - x0, Math.round(L.rect.w)), h = Math.min(off.height - y0, Math.round(L.rect.h));
+          if (w < 1 || h < 1) continue;
+          const px = ctx.getImageData(x0, y0, w, h).data;
+          let low = Infinity, below = 0, n = 0, raw = null;
+          const need = L.big ? 3 : 4.5;
+          for (let i = 0; i < px.length; i += 4) {           // EVERY pixel: a bright sliver is a fail
+            let bg = [px[i], px[i + 1], px[i + 2]];
+            for (const b of L.bgs) bg = over(b, bg);
+            const c = ratio(L.color, bg); n++;
+            if (c < need) below++;
+            if (c < low) { low = c; raw = [px[i], px[i + 1], px[i + 2]]; }
+          }
+          const prev = worst.get(L.text);
+          if (!prev || low < prev.ratio) worst.set(L.text, { ratio: +low.toFixed(2), need, pctBelow: +(100 * below / n).toFixed(1), rawPixel: raw });
+        }
+        app.renderer.orbit(Math.PI / 3, k % 2 ? 0.35 : -0.35);
+        app.renderer.render();
+      }
+      return { camDist: +app.renderer.camera.position.distanceTo(app.renderer.controls.target).toFixed(3), presses, lines: lines.length, worst: Array.from(worst, ([text, v]) => ({ text, ...v })).sort((a, b) => a.ratio - b.ratio) };
+    }, zoomPresses);
+
+    pg.hudContrast = { framed: await hudProbe(0) };
+    await page.evaluate(() => document.getElementById('btn-cam-home').click());
+    pg.hudContrast.zoomed = await hudProbe(8);
+    await page.evaluate(() => { document.getElementById('btn-cam-home').click(); const b = document.getElementById('btn-rotate'); if (b && b.getAttribute('aria-pressed') === 'false') b.click(); });
+    for (const [where, pass] of Object.entries(pg.hudContrast)) {
+      check(pass.lines > 0, `the 1.4.3 probe found no HUD text to measure (${where})`);
+      for (const line of pass.worst) {
+        check(line.ratio >= line.need, `${where} (camera distance ${pass.camDist}): ${line.text} measures ${line.ratio}:1 over the rendered pixels — needs ${line.need}:1, and ${line.pctBelow} % of the line is below it (worst pixel rgb(${line.rawPixel}))`);
+      }
+    }
+    // keep only the five worst lines per pass in the printed report
+    for (const pass of Object.values(pg.hudContrast)) pass.worst = pass.worst.slice(0, 5);
+  }
+
   report.stats = await page.evaluate(() => window.tissueApp.stats);
   report.canvasLabel = await page.evaluate(() => document.getElementById('view').getAttribute('aria-label'));
   report.equilibrium = await page.evaluate(() => document.getElementById('equilibrium').textContent);

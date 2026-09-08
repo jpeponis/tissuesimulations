@@ -49,10 +49,16 @@ const APP_EVENTS_KEY = 'tw.autoEvents';
 const APP_HINT_KEY = 'tw.hintDismissed';    // the first-run card, dismissed for this session
 const APP_SHORTCUT_KEY = 'tw.shortcuts';    // single-key shortcuts on/off, remembered between visits
 const APP_LEGEND_MIN_H = 132;   // px of stage left under the HUD before the legend moves into the console
+const APP_CHIPS_CLEAR = 26;     // px the chip block keeps between itself and the HUD's lowest plate
+const APP_CHIPS_HYST = 16;      // …and the extra room the stage must offer before they move back
+const APP_EXPORT_FIELDS_KEY = 'tw.exportFields';   // "include field grids" in the export, per session
 const APP_KEYS = [
   ['Space', 'play / pause'], ['R', 'reset the scenario (previous run stays dashed)'], ['I', 'injure (when the tissue supports it)'],
   ['1 – 9', 'pick a scenario'], ['P', 'presentation mode (bigger sentence and clock)'],
   ['← →', 'nudge the focused dial (Home / End for the extremes); on a focused chart, move the crosshair (Esc drops it)'],
+  // the 3D view's own keys belong in the table, not only in the note below it: presentation mode
+  // hides every .note, and the camera is the one control a projector audience watches
+  ['← ↑ → ↓ + − Home', 'with the 3D view focused: orbit, zoom, back to the default framing (the same seven moves are the chips under the view)'],
   ['Tab', 'move between controls; the 3D view and every chart are focusable and describe themselves'],
 ];
 /**
@@ -220,6 +226,13 @@ export class TissueApp {
     this.present = false; this.autoRotate = true;
     this.hoverTimer = null;                // the keyboard crosshair speaks once, after the key rests
     this.legendDocked = false;             // the legend has moved into the console (short stage)
+    this.chipsDocked = false;              // …and so have the layer + camera chips
+    this.chipsTried = null;                // the stage geometry the chip block last failed to fit
+    // The export's ring buffer holds the per-field grids only when this is on: they are 26-38 % of
+    // every frame (docs/EXTENDING.md §5 — a reader must tolerate a frame without `fields`), and a
+    // 120-frame buffer of them is the single biggest thing this page keeps in memory. Off by
+    // default, remembered for the session, switched beside the Export button in About.
+    this.exportFields = appSession(APP_EXPORT_FIELDS_KEY) === '1';
     this.hintDismissed = appSession(APP_HINT_KEY) === '1';
     // Single-character shortcuts need a way OFF (WCAG 2.1.4 Character Key Shortcuts): a speech-input
     // user dictating anything with an "r" in it would otherwise destroy the run. Default on — they
@@ -305,7 +318,7 @@ export class TissueApp {
     // window and presentation mode: the sticky Run header's height (it becomes #panel's
     // scroll-padding, so Shift+Tab never parks focus behind it) and the room the stage leaves
     // under the HUD (the legend's cap).
-    const measure = () => { this.measureRun(); this.layoutLegend(); };
+    const measure = () => { this.measureRun(); this.layoutChips(); this.layoutLegend(); };
     if (typeof ResizeObserver === 'function') {
       this.sizeObserver = new ResizeObserver(measure);
       for (const sel of ['.run', '#stage', '.hud-top']) { const el = document.querySelector(sel); if (el) this.sizeObserver.observe(el); }
@@ -354,7 +367,10 @@ export class TissueApp {
       document.body.classList.toggle('legend-docked', dockIt);
       dock.hidden = !dockIt;
       if (dockIt) dock.append(box);
-      else if (layers) stage.insertBefore(box, layers); else stage.append(box);
+      // …before the chips when they are on the stage; they may be docked in the console instead,
+      // and insertBefore(node, aNodeThatIsNotAChild) throws
+      else if (layers && layers.parentElement === stage) stage.insertBefore(box, layers);
+      else stage.insertBefore(box, appEl('notice'));
     }
     if (dockIt) box.style.removeProperty('--legend-max');
     else box.style.setProperty('--legend-max', `${Math.max(0, room)}px`);
@@ -362,6 +378,71 @@ export class TissueApp {
   }
   /** A capped legend scrolls: give it a tab stop while it does, and none while it does not. */
   syncLegendScroll() { appScrollable(appEl('legend'), 'y'); }
+
+  /**
+   * Where the layer and camera chips may live. The legend's problem in the opposite corner: the
+   * block is absolutely positioned in the stage and grows UPWARD from the bottom, so on a short
+   * stage it climbs into the HUD — and the HUD is the top layer, with opaque plates. At 320x512
+   * that left five of the seven camera chips painted over by the live sentence and swallowing
+   * their clicks, and pushed a layer chip 23 px above the top of the stage with no way to scroll
+   * to it (WCAG 2.4.11 Focus Not Obscured, 2.5.7 Dragging Movements, 2.1.1 Keyboard).
+   *
+   * z-order alone does not fix that — two blocks of content would still be drawn on top of each
+   * other, one of them illegible — so when the stage cannot hold the block clear of the HUD the
+   * whole group moves into the console, exactly as layoutLegend() moves the legend.
+   *
+   * The HUD's own rectangle is not the measurement: `.hud-top` spans the stage while its three
+   * children are `width: fit-content`, so the PLATES are what the chips have to clear.
+   */
+  layoutChips() {
+    const stage = appEl('stage'), hud = document.querySelector('.hud-top'), box = appEl('layers'), dock = appEl('chips-dock');
+    if (!stage || !hud || !box || !dock) return;
+    // How much stage is left under the HUD's lowest plate, and how tall the block is WHERE IT
+    // CURRENTLY SITS. On the stage both numbers are exact; docked in the console the height is
+    // only an estimate of what it would be back on the stage (a different width wraps the chips
+    // into a different number of rows), which is why moving back is a speculative move that is
+    // then checked in place.
+    const fits = () => {
+      const sr = stage.getBoundingClientRect();
+      let hudBottom = sr.top;
+      for (const child of hud.children) {
+        const r = child.getBoundingClientRect();
+        if (r.width > 1 && r.height > 1) hudBottom = Math.max(hudBottom, r.bottom);
+      }
+      return { room: sr.bottom - hudBottom - APP_CHIPS_CLEAR, need: box.scrollHeight, width: sr.width };
+    };
+    const a = fits();
+    if (!this.chipsDocked) {
+      // on the stage: an exact measurement, so this decision is final
+      if (a.room < a.need) { this.setChipsDocked(true); this.chipsTried = a; } else this.chipsTried = null;
+      return;
+    }
+    if (a.room < a.need + APP_CHIPS_HYST) return;                 // plainly not enough room: stay
+    // …and do not try again with the geometry that already failed, or the block moves back and
+    // forth on every resize notification (the console can be WIDER than the chip band on the
+    // stage, so the estimate can say "it fits" where the real thing does not)
+    const t = this.chipsTried;
+    if (t && a.room <= t.room + 8 && Math.abs(a.width - t.width) <= 8) return;
+    this.setChipsDocked(false);
+    const b = fits();
+    if (b.room < b.need) { this.setChipsDocked(true); this.chipsTried = b; } else this.chipsTried = null;
+  }
+
+  /** Move the chip group between the stage and the console, keeping focus where it was. */
+  setChipsDocked(on) {
+    const stage = appEl('stage'), box = appEl('layers'), dock = appEl('chips-dock');
+    if (!stage || !box || !dock) return;
+    this.chipsDocked = on;
+    document.body.classList.toggle('chips-docked', on);
+    dock.hidden = !on;
+    // moving a subtree blurs whatever inside it had focus, and focus on <body> restarts the tab
+    // ring at the skip link (WCAG 2.4.3): put it back on the same chip
+    const active = document.activeElement;
+    const refocus = active && box.contains(active) ? active : null;
+    if (on) dock.append(box);
+    else stage.insertBefore(box, appEl('notice'));   // …where it was: before the notice overlay
+    if (refocus && typeof refocus.focus === 'function') refocus.focus();
+  }
 
   onKey(e) {
     if (e.defaultPrevented || e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -805,7 +886,21 @@ export class TissueApp {
       ])) : []);
       const ghostKey = appH('span', { class: 'ghost-key', hidden: true }, [appH('i', { class: 'dash' }), document.createTextNode('previous run (dashed)')]);
       keys.append(ghostKey);
-      box.append(appH('div', { class: 'readout' }, [head, meaning, canvas, keys]));
+      // A SERIES may carry its own unit and meaning (docs/EXTENDING.md §1 readouts[].series[]);
+      // both were accepted and rendered nowhere — only the readout's own r.unit / r.meaning were.
+      // They go under the key, in a disclosure because a four-series readout is four paragraphs;
+      // the summary is named per readout so seven of them are not seven identical stops (2.4.6).
+      const noted = (r.series || []).filter((x) => x.unit || x.meaning);
+      const notes = noted.length ? appH('details', { class: 'series-notes-box' }, [
+        appH('summary', { text: 'What each line means', 'aria-label': `${r.label}: what each line means` }),
+        appH('ul', { class: 'series-notes' }, noted.map((x) => appH('li', {}, [
+          appH('b', { text: `${x.label} ` }),
+          x.unit ? appH('span', { class: 'unit', text: x.unit }) : '',
+          x.unit && x.meaning ? document.createTextNode(' — ') : '',
+          x.meaning ? document.createTextNode(x.meaning) : '',
+        ]))),
+      ]) : '';
+      box.append(appH('div', { class: 'readout' }, [head, meaning, canvas, keys, notes]));
       const plot = new TimeSeriesPlot(canvas, {
         series, yDomain, yFormat, windowDays: 90, theme: APP_THEME, fontPx,
         onHover: (lines, i, source) => this.onPlotHover(r, lines, source),
@@ -981,10 +1076,13 @@ export class TissueApp {
   // ---------- layers, legend, about ----------
   buildLayers() {
     const box = appEl('layers'); box.replaceChildren(); this.layerButtons = {};
+    this.chipsTried = null;                // a different tissue is a different number of chips
     const t = this.tissue;
     // a visible word in front of the chip row: "show fibers cells …" reads as a control, a bare
     // row of pills reads as decoration (C13). The group already carries an aria-label.
-    box.append(appH('span', { class: 'chips-label', 'aria-hidden': 'true', text: 'show' }));
+    // the inner span carries the plate: the outer one is a full-width flex line (the chips start
+    // on the next row), and a plate on THAT would draw a bar across the row (WCAG 1.4.3)
+    box.append(appH('span', { class: 'chips-label', 'aria-hidden': 'true' }, [appH('span', { text: 'show' })]));
     const items = [['fibers', 'fibers'], ['cells', 'cells']];
     const gel = (t.species || []).filter((s) => s.kind === 'gel');
     const scaffold = (t.species || []).filter((s) => s.kind === 'scaffold');
@@ -1025,7 +1123,7 @@ export class TissueApp {
     if (old) old.remove();
     const r = this.renderer;
     const items = APP_CAMERA.filter(([, , , method]) => r && typeof r[method] === 'function');
-    if (!items.length) return;
+    if (!items.length) { this.layoutChips(); return; }
     const row = appH('div', { class: 'cam-group', role: 'group', 'aria-label': '3D camera' });
     for (const [id, glyph, name, method, args] of items) {
       const b = appH('button', {
@@ -1041,6 +1139,7 @@ export class TissueApp {
       row.append(b);
     }
     box.append(row);
+    this.layoutChips();          // one more row of chips: the stage may no longer have room for them
   }
 
   /** Auto-rotate, from the chip or from the renderer (a drag or a key press stops it). */
@@ -1076,6 +1175,10 @@ export class TissueApp {
     if (Number.isFinite(um) && um > 0) rows.push(appH('li', { class: 'legend-row legend-scale' }, [appH('span', { class: 'swatch scale-swatch', 'aria-hidden': 'true' }), appH('span', { text: `Cube edge ≈ ${um >= 1000 ? `${(um / 1000).toFixed(um % 1000 ? 1 : 0)} mm` : `${Math.round(um)} µm`}` })]));
     // the legend is capped against the stage and scrolls inside that cap (layoutLegend), so it
     // needs a name and — while it actually scrolls — a tab stop of its own
+    // …and a ROLE to carry the name: ARIA prohibits aria-label on the generic role, so on a bare
+    // div Chrome reports `role: generic, name: "…"` and axe flags aria-prohibited-attr. `group`
+    // rather than `region`, which would make a colour key a landmark on every page.
+    box.setAttribute('role', 'group');
     box.setAttribute('aria-label', 'Colour key and how to read the view');
     box.append(appH('ul', { class: 'legend-swatches', 'aria-label': 'Colour key' }, rows));
     // "How to read the view": every string the definition put in copy.legend, in its own
@@ -1127,6 +1230,35 @@ export class TissueApp {
     box.hidden = this.hasPlayed || this.hintDismissed;
   }
 
+  /** What the About note says about the export, which depends on the field-grid switch. */
+  exportNoteText() {
+    return `The export holds one frame every ${this.exportEvery} simulated days since the last reset`
+      + (this.exportFields
+        ? ', including each diffusible field as a grid — the largest part of a frame.'
+        : ', without the diffusible-field grids (they are the largest part of a frame; the switch above keeps them).')
+      + ' In the hosted viewer you will be asked to confirm the save.';
+  }
+
+  /**
+   * Whether the export ring buffer keeps the per-field grids (engine.snapshot({ fields }),
+   * docs/EXTENDING.md §5: a reader must tolerate a frame without them). Frames already captured
+   * are left as they are — the buffer is a rolling window, so the switch takes effect as the run
+   * goes on rather than by re-recording the past.
+   */
+  setExportFields(on, fromUi) {
+    this.exportFields = !!on;
+    if (fromUi) appSession(APP_EXPORT_FIELDS_KEY, this.exportFields ? '1' : '0');
+    const b = appEl('opt-export-fields');
+    if (b) b.setAttribute('aria-pressed', String(this.exportFields));
+    const note = appEl('export-note');
+    if (note) note.textContent = this.exportNoteText();
+    if (fromUi) {
+      this.announce(this.exportFields
+        ? 'Field grids will be included in exported frames from now on. They are the biggest part of a frame.'
+        : 'Field grids left out of exported frames from now on. Everything else — species, cells, fiber tensors — still travels.', true);
+    }
+  }
+
   /** Open the About details and put it in view (the hint's "What am I looking at?" button). */
   openAbout() {
     const ab = appEl('about');
@@ -1159,14 +1291,28 @@ export class TissueApp {
       title: 'R, I, P and 1–9. Turn them off if you use dictation or a switch that sends letters. Space always plays and pauses.',
       onclick: () => this.setShortcuts(!this.shortcuts, true),
     });
-    ab.append(appH('p', { class: 'note' }, [shortcutChip]));
-    ab.append(appH('p', { class: 'note', text: 'The single letters and digits above work while nothing is being typed into. Turn them off with the button and only Space, Tab and the arrow keys on a focused control stay.' }));
+    // `opt-note`, not a bare `note`: presentation mode hides every .note, and hiding the ONLY way
+    // to turn r / i / p / 1-9 off while they keep firing is the state WCAG 2.1.4 forbids —
+    // ?present=1 is exactly the link the Copy link button produces (index.html body.present).
+    ab.append(appH('p', { class: 'note opt-note' }, [shortcutChip]));
+    // …and the sentence that says what the button does travels with it: a switch whose only
+    // explanation is a title attribute is not a mechanism anyone finds (2.1.4 again)
+    ab.append(appH('p', { class: 'note opt-note', text: 'The single letters and digits above work while nothing is being typed into. Turn them off with the button and only Space, Tab and the arrow keys on a focused control stay.' }));
     ab.append(appH('p', { class: 'note', text: 'Drag the 3D view to orbit, scroll to zoom. With the view focused, the arrow keys orbit, + and − zoom and Home reframes it. Hover a chart for exact values, or focus it and walk the crosshair with the arrow keys; the Table button under the readouts lists the same numbers as text.' }));
     ab.append(appH('div', { class: 'tools' }, [
       appH('button', { type: 'button', text: 'Export trajectory (JSON for Blender)', onclick: () => this.exportJSON() }),
+      // The per-field grids are 26-38 % of every frame and the buffer holds 120 of them, so they
+      // are opt-in (engine.snapshot({ fields }), docs/EXTENDING.md §5). Session-remembered, so an
+      // instructor who wants the haze in Blender turns it on once per visit.
+      appH('button', {
+        type: 'button', class: 'chip', id: 'opt-export-fields', 'aria-pressed': String(this.exportFields),
+        text: 'Include field grids',
+        title: 'Keep the diffusible-field grids (growth factor, protease, oxygen) in each exported frame. They are the largest part of a frame, so they are left out unless you ask; frames already recorded keep whatever they were captured with.',
+        onclick: () => this.setExportFields(!this.exportFields, true),
+      }),
       appH('a', { href: 'https://github.com/jpeponis/tissuesimulations', target: '_blank', rel: 'noopener', text: 'Model notes & source' }),
     ]));
-    ab.append(appH('p', { class: 'note', text: `The export holds one frame every ${this.exportEvery} simulated days since the last reset. In the hosted viewer you will be asked to confirm the save.` }));
+    ab.append(appH('p', { class: 'note', id: 'export-note', text: this.exportNoteText() }));
     ab.append(appH('p', { class: 'note', text: `${t.name}${t.version ? ` · definition v${t.version}` : ''}` }));
   }
 
@@ -1486,10 +1632,11 @@ export class TissueApp {
   }
 
   /**
-   * The flux gauge as text for the value beside its title: "0.05/d vs 0.02/d · 2.50 ×". The gauge
-   * itself owns the wording, so the tissue's own word for a dissolving scaffold
-   * (`copy.gauge.scaffold`) reaches the DOM value and not only the canvas — this text is what a
-   * screen reader gets instead of the picture.
+   * The flux gauge as text for the value beside its title: "condensing 0.03/d · evaporating
+   * 0.01/d · deposition / degradation = 2.09". The gauge itself owns every word of it, so a
+   * tissue's own names for the two directions, the ratio and a dissolving scaffold
+   * (`copy.gauge` — left, right, ratio, scaffold) reach the DOM value and not only the canvas —
+   * this text is what a screen reader gets instead of the picture.
    */
   gaugeValueText() { return this.gauge && typeof this.gauge.describe === 'function' ? this.gauge.describe() : ''; }
 
@@ -1569,9 +1716,9 @@ export class TissueApp {
     for (const p of this.plots) { p.plot.spec.fontPx = fontPx; p.plot.draw(); }
     if (this.gauge && typeof this.gauge.setFontPx === 'function') this.gauge.setFontPx(fontPx);
     if (this.renderer && typeof this.renderer.resize === 'function') this.renderer.resize();
-    // the sentence and the clock grow, so the HUD is taller and the legend has less room; the
-    // console's type grows too, so the sticky header is taller
-    this.measureRun(); this.layoutLegend();
+    // the sentence and the clock grow, so the HUD is taller and both the legend and the chip block
+    // have less room; the console's type grows too, so the sticky header is taller
+    this.measureRun(); this.layoutChips(); this.layoutLegend();
     if (fromUi) {
       this.scheduleUrl();
       this.announce(this.present ? 'Presentation mode on: bigger sentence and clock, hints hidden.' : 'Presentation mode off.', true);
@@ -1619,7 +1766,9 @@ export class TissueApp {
     const st = this.engine.state;
     const t = st.time;
     if (t + 1e-9 >= this.nextExportT) {
-      this.exportFrames.push(this.engine.snapshot());
+      // `fields` is opt-in: the grids are 26-38 % of a frame, and this buffer holds 120 of them
+      // (docs/EXTENDING.md §5 — a format-2 reader tolerates a frame without them)
+      this.exportFrames.push(this.engine.snapshot({ fields: this.exportFields }));
       this.nextExportT = t + this.exportEvery;
       if (this.exportFrames.length > 120) this.exportFrames.shift();
     }

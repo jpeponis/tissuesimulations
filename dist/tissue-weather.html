@@ -79,10 +79,15 @@ kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--ru
 .hud-top { left: 20px; top: 16px; right: 20px; display: grid; gap: 6px; max-width: 560px; z-index: 3; }
 /* Every HUD block sits on the rendered tissue, whose pixels run from black to pale hydrogel, so
    a text-shadow softens the collision but cannot promise a ratio (WCAG 1.4.3). Each block gets
-   its own plate instead: at 0.88 alpha over --ground, even a WHITE pixel underneath leaves
-   --muted at 4.8:1 and --text at 11:1. tools/screenshot_app.mjs measures the real worst pixel
-   under each line against the frame the renderer drew. */
-.hud-top > * { width: fit-content; max-width: 100%; background: rgba(11,15,20,0.88); border-radius: 8px; padding: 3px 10px; margin-left: -10px; }
+   its own plate instead. The alpha is 0.93, not 0.88: 0.88 carries --muted (4.97:1 over a WHITE
+   pixel) but leaves --faint — the "(week N)" span — at 4.22:1, and the renderer really does draw
+   near-white pixels once the camera is dollied in. At 0.93 the worst case over pure white is
+   --text 13.9:1, --muted 5.8:1, --faint 4.9:1. tools/screenshot_app.mjs measures the real worst
+   pixel under each line against the frame the renderer drew, zoomed in and at day 40.
+   pointer-events: none because these three blocks hold no controls: the HUD is the TOP layer, so
+   an opaque plate over the layer/camera chips would otherwise swallow their clicks (2.5.7 / 2.1.1
+   — it did, at 320 px, where the live sentence covered five camera chips). */
+.hud-top > * { width: fit-content; max-width: 100%; background: rgba(11,15,20,0.93); border-radius: 8px; padding: 3px 10px; margin-left: -10px; pointer-events: none; }
 .brand-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .brand { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 30px; line-height: 1.05; letter-spacing: -0.01em; }
 .brand em { font-style: italic; color: var(--amber-ink); }
@@ -114,7 +119,7 @@ body.debug #fps { display: inline; }
      leaves too little to read, app.js moves the whole disclosure into the console (see
      body.legend-docked). */
   max-height: var(--legend-max, calc(100% - 200px)); }
-.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--text); font-size: 12px; flex: none; }
+.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); background: rgba(16,22,30,0.93); color: var(--text); font-size: 12px; flex: none; }
 .hud-legend summary::-webkit-details-marker { display: none; }
 /* the alt-text form keeps the arrow visual: without it the disclosure is NAMED "▾ Legend", and
    the expanded/collapsed state is already announced (the first declaration is the fallback for
@@ -122,10 +127,17 @@ body.debug #fps { display: inline; }
 .hud-legend summary::before { content: "▸ "; content: "▸ " / ""; color: var(--muted); }
 .hud-legend[open] summary::before { content: "▾ "; content: "▾ " / ""; }
 /* the open legend + guide must never reach the HUD at the top, on any screen (C14) */
-#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.85); border-radius: 8px; padding: 8px 10px; max-height: min(45vh, calc(100vh - 220px)); flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.93); border-radius: 8px; padding: 8px 10px; max-height: min(45vh, calc(100vh - 220px)); flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 /* docked (app.js: too short a stage for the legend to open without covering the HUD) */
 body.legend-docked .hud-legend { position: static; max-width: none; max-height: none; }
 body.legend-docked #legend { max-height: none; background: var(--surface); }
+/* docked (app.js layoutChips: too short a stage to hold the chip block clear of the HUD) */
+body.chips-docked .hud-layers { position: static; max-width: none; justify-content: flex-start; }
+body.chips-docked .chips-label { text-align: left; }
+body.chips-docked .chips-label span { background: none; padding: 0; }
+body.chips-docked .cam-group { justify-content: flex-start; }
+/* …not the pressed ones: --surface-2 is half of how a pressed chip reads (the ✓ is the other) */
+body.chips-docked .chip:not([aria-pressed="true"]) { background: var(--surface); }
 .legend-scale .scale-swatch { background: linear-gradient(90deg, var(--deco) 0 2px, transparent 2px calc(100% - 2px), var(--deco) calc(100% - 2px)); height: 6px; border-radius: 0; }
 .legend-swatches { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
 .legend-row { display: flex; align-items: center; gap: 8px; }
@@ -135,13 +147,30 @@ body.legend-docked #legend { max-height: none; background: var(--surface); }
 .legend-guide[open] summary::before { content: "▾ "; content: "▾ " / ""; }
 .legend-guide ul { margin: 6px 0 0; padding-left: 16px; display: grid; gap: 4px; max-width: 46ch; }
 
-.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 48%; z-index: 1; }
-.chips-label { flex: 0 0 100%; text-align: right; font-size: 12px; color: var(--muted); text-transform: lowercase; letter-spacing: 0.04em; text-shadow: 0 1px 6px rgba(0,0,0,0.8); margin-bottom: 1px; }
+/* The chips are CONTROLS and the HUD above them is text, so they take the higher layer: a plate
+   may never paint over a button, and elementFromPoint must land on the chip (2.4.11 / 2.5.7).
+   Where the stage is too short to hold the block clear of the HUD, app.js docks the whole group
+   into the console instead (body.chips-docked) — z-order alone cannot stop two blocks of content
+   from being drawn on top of each other. */
+.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 48%; z-index: 4; }
+/* …and only the CONTROLS in it take the pointer. The label and the camera row are full-width flex
+   lines, so their EMPTY half spans the stage: with the block on top, `.cam-group` swallowed the
+   click on the closed “Legend” pill in the opposite corner (elementFromPoint landed on
+   DIV.cam-group between 480 and 900 px wide). The chips themselves keep it. */
+.hud-layers > * { pointer-events: none; }
+.hud-layers .chip { pointer-events: auto; }
+/* the label is a full-width flex line so the chips start on the next row; the PLATE is the inner
+   span, so it shrink-wraps the word instead of drawing a bar across the row. A text-shadow is not
+   a contrast method: over pale collagen "show" measured 1.0:1 (WCAG 1.4.3). */
+.chips-label { flex: 0 0 100%; text-align: right; font-size: 12px; color: var(--muted); text-transform: lowercase; letter-spacing: 0.04em; margin-bottom: 1px; }
+.chips-label span { background: rgba(11,15,20,0.93); border-radius: 6px; padding: 2px 8px; }
 /* the camera chips (orbit / zoom / recentre) take a row of their own under the layer chips:
    the single-pointer alternative to dragging the view (WCAG 2.5.7) */
-.cam-group { flex: 0 0 100%; display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+/* flex-wrap, because under `pointer: coarse` the seven chips are 44 px wide each: 344 px of them
+   do not fit a 320 px screen, and a non-wrapping row would push the console sideways (1.4.10). */
+.cam-group { flex: 0 0 100%; display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 4px; }
 .cam-group .chip { padding: 4px 9px; min-width: 34px; font-family: var(--font-mono); }
-.chip { border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--muted); border-radius: 999px; padding: 4px 11px; min-height: 28px; font-size: 12px; cursor: pointer; }
+.chip { border: 1px solid var(--control-border); background: rgba(16,22,30,0.93); color: var(--muted); border-radius: 999px; padding: 4px 11px; min-height: 28px; font-size: 12px; cursor: pointer; }
 /* a pressed control is not distinguished by colour alone: the tick has its space reserved, so
    turning a layer on and off never reflows the row (C7). `/ ""` is the alt text: without it the
    glyph lands in the accessible NAME ("✓fibers") on top of the pressed state a screen reader
@@ -262,6 +291,15 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .readout canvas:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .readout .keys i.dash { width: 14px; height: 0; border-top: 2px dashed var(--muted); vertical-align: 3px; border-radius: 0; }
 .readout .keys [hidden] { display: none; }
+/* A readout's SERIES may carry their own unit and meaning (docs/EXTENDING.md §1); without this
+   they were accepted and never shown. One line per series that declares either, under the key —
+   in a disclosure, because a four-series readout is four paragraphs of it. */
+.readout .series-notes-box { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.readout .series-notes-box summary { cursor: pointer; color: var(--faint); min-height: 24px; line-height: 24px; }
+.readout .series-notes-box summary::marker { color: var(--deco); }
+.readout .series-notes { margin: 2px 0 0; padding: 0; list-style: none; display: grid; gap: 3px; }
+.readout .series-notes b { color: var(--text); font-weight: 500; }
+.readout .series-notes .unit { color: var(--text); }
 .gauge canvas { width: 100%; height: 62px; display: block; background: var(--surface); border-radius: 6px; }
 .tools-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .tools-row button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber-ink); }
@@ -310,7 +348,7 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
    The room reads the sentence and the clock from the back; the per-dial hints and the first-run
    card are noise on a projector, and the console gets a little wider so the readouts breathe. */
 body.present { --sentence: 24px; --clock: 18px; --panel-w: 460px; }
-body.present .equilibrium { max-width: 30ch; background: rgba(11,15,20,0.88); border-radius: 10px; padding: 8px 12px; margin-left: -12px; text-shadow: none; line-height: 1.3; }
+body.present .equilibrium { max-width: 30ch; background: rgba(11,15,20,0.93); border-radius: 10px; padding: 8px 12px; margin-left: -12px; text-shadow: none; line-height: 1.3; }
 body.present .clock b { color: var(--text); }
 /* The dial hints are the node each slider's aria-describedby points at: display:none would take
    them out of the layout and make the page depend on accname §4.1 keeping a directly referenced
@@ -320,9 +358,13 @@ body.present .brand-sub,
 body.present .dial-more,
 body.present .hint-card,
 body.present .readout .meaning,
+body.present .readout .series-notes-box,
 body.present .tissue-short,
 body.present .scenario-card details,
-body.present .note { display: none; }
+/* …but NOT .opt-note: it holds the single-key-shortcut off switch, and presentation mode is
+   reachable by the P key, by the chip and by ?present=1 — which is the link Copy link produces.
+   Hiding the switch while r / i / p / 1-9 keep firing is the state WCAG 2.1.4 forbids. */
+body.present .note:not(.opt-note) { display: none; }
 body.present .hud-legend { font-size: 13px; }
 body.present .readout:not(.gauge) canvas { height: 104px; }   /* the gauge draws to a fixed layout */
 body.present .dial label { font-size: 15px; }
@@ -344,12 +386,19 @@ body.present #panel { font-size: 15px; }
 @media (max-width: 900px) {
   #app { grid-template-columns: 1fr; grid-template-rows: 58vh auto; height: auto; }
   #panel { border-left: 0; border-top: 1px solid var(--rule); }
-  .hud-top { max-width: 70%; }
+  /* no 70 % cap here: the blocks inside are width: fit-content and the sentence is capped at
+     46ch, so a WIDER hud-top is a SHORTER one — at 320 px the 70 % cap wrapped the sentence to
+     eight lines and pushed the whole HUD 41 px past the bottom of the stage. */
   .brand { font-size: 24px; }
   /* the token, not the rule: a hard font-size here also shrank the sentence in PRESENTATION mode,
      and a narrow viewport is exactly what 200 % browser zoom on a laptop looks like */
   body:not(.present) { --sentence: 13px; }
   .hud-legend { max-width: calc(50% - 30px); }
+  /* Half the stage, the mirror of the legend's cap above: the two blocks share the bottom of the
+     stage, and a chip block that may cross the middle PAINTS over the open legend (measured 4.7-9.4
+     kpx² of chips over the legend box at 480-900 px wide). Fewer rows is not worth that: when the
+     chips no longer fit above the HUD in half a stage, app.js docks the whole group (layoutChips)
+     and the console gives them the full width anyway. */
   .hud-layers { max-width: calc(50% - 22px); }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
@@ -369,7 +418,7 @@ body.present #panel { font-size: 15px; }
          aria-describedby + aria-keyshortcuts say so, since nothing else on the way in does. -->
     <canvas id="view" role="img" tabindex="0" aria-label="3D tissue view, loading"
             aria-describedby="view-keys-hint" aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Plus Minus Home"></canvas>
-    <p class="sr-only" id="view-keys-hint">Focusable 3D view: the arrow keys orbit the camera, plus and minus zoom, Home puts it back on the default framing. The same moves are on the orbit, zoom and recentre buttons under the layer chips. Dragging the view stops the automatic rotation.</p>
+    <p class="sr-only" id="view-keys-hint">Focusable 3D view: the arrow keys orbit the camera, plus and minus zoom, Home puts it back on the default framing. The same seven moves are buttons in the &ldquo;3D view: layers and camera&rdquo; group, which sits under the view when the view is tall enough and in the console below it otherwise. Dragging the view stops the automatic rotation.</p>
     <div class="hud hud-top">
       <div class="brand-row"><h1 class="brand"><em>Tissue Weather</em></h1><p class="brand-sub">dynamic reciprocity</p></div>
       <div class="clock"><span>day <b id="day">0.0</b> <span class="week" id="week">(week 0.0)</span></span><span id="tissue-name"></span><span id="scenario-name"></span><span id="fps" class="note"></span></div>
@@ -421,8 +470,10 @@ body.present #panel { font-size: 15px; }
         <input class="link-out" id="link-out" type="text" readonly aria-label="Link to this view" hidden>
       </div>
     </section>
-    <!-- Where the legend goes when the stage is too short to open it over the view without
-         covering the HUD (app.js layoutLegend moves #legend-box in and out of here). -->
+    <!-- Where the layer and camera chips go when the stage is too short to hold them clear of
+         the HUD, and where the legend goes when it cannot open over the view without covering it
+         (app.js layoutChips / layoutLegend move #layers and #legend-box in and out of these). -->
+    <div id="chips-dock" hidden></div>
     <div id="legend-dock" hidden></div>
     <div class="hint-card" id="hint" role="note">
       <div class="hint-body"><p><b>First time here?</b> Pick a scenario, press Play, then move a dial.</p></div>
@@ -826,8 +877,10 @@ function copyEquilibriumSentence(stats, vocabulary) {
  *  engine.loadMode   'tension' (default: T relaxes onto the load axis z, the v0.3 behaviour) or
  *                    'compression' (T relaxes into the plane ⊥ to z; a cell's out.loadAlign
  *                    likewise pulls its polarity into that plane).  Trace-preserving either way.
- *  cellType.motile   `false` is honoured: the cell keeps its polarity and position (no guidance,
- *                    load alignment, noise draws or migration) and repulsion moves only the
+ *  cellType.motile   OPTIONAL boolean, default TRUE (an omitted key seeds a motile cell, which is
+ *                    what every pre-v0.4 definition meant).  `false` is honoured: the cell keeps
+ *                    its polarity and position (no guidance, load alignment, noise draws or
+ *                    migration) and repulsion moves only the
  *                    motile partner of a pair — which then takes the WHOLE overlap correction
  *                    (the ½ split is between the partners that can move), so it acts as an
  *                    obstacle rather than a soft partner.  Its hooks still run.
@@ -2682,7 +2735,9 @@ class TissueEngine {
           err.push(`cellType '${c.key}' radius object must be { by: 'a'|'b', min > 0, max > 0 }`);
         }
       } else err.push(`cellType '${c.key}' radius must be a number > 0 or { by, min, max }`);
-      if (typeof c.motile !== 'boolean') err.push(`cellType '${c.key}' motile must be boolean`);
+      // OPTIONAL: an omitted `motile` means true (the engine reads `c.motile === false`), so a
+      // definition written before v0.4 stays valid and keeps its motile cells.
+      if (c.motile !== undefined && typeof c.motile !== 'boolean') err.push(`cellType '${c.key}' motile must be a boolean (omit it for the default, true)`);
       if (c.fraction !== undefined && (!isNum(c.fraction) || c.fraction < 0)) err.push(`cellType '${c.key}' fraction must be ≥ 0`);
       if (c.count !== undefined) {
         if (!Number.isInteger(c.count) || c.count < 0) err.push(`cellType '${c.key}' count must be an integer ≥ 0`);
@@ -3098,6 +3153,25 @@ class TissueEngine {
  *    the mean can reach the 0.3 of scenario 4.
  *
  * ---------------------------------------------------------------------------
+ * OPEN MODEL REQUEST (round 4; not taken — that round and this one were copy only)
+ * ---------------------------------------------------------------------------
+ *  EARLY LOADING IS NOT PUNISHED HERE, AND IN A REAL CONSTRUCT IT IS. Mauck 2000 and
+ *    Bian 2011 report that dynamic compression started before the matrix is elaborated does
+ *    less good than the same protocol started after it; in this model loading from day 0 is
+ *    strictly the better move. The penalty term is real but short-lived — at amp 0.1, race
+ *    dials, evaluated at the cube's mean state, fL = 1 + kStim·s(a)·(1 − d(a))·matPresent
+ *    − kInj·d(a) − kEarly·s(a)·conf·(0.5 + 0.5·hT) is 0.50 on day 0 and back above 1 inside a
+ *    day (1.25 on day 1), because the pericellular halo fills and matPresent runs 0 → 0.80 in
+ *    that time — while kLoadDeg opens the mesh sooner and keeps it open: with the squeeze from
+ *    day 0 the connected fraction is below 0.05 on day 17.7 against day 25.7 without it. The
+ *    second effect wins by a wide margin (race, day 56, scripted events off: 504 kPa loading
+ *    from day 0 against 350 kPa never loading). A biphasic response needs a genuinely delayed
+ *    term — a larger or longer-lived kEarly, or a mesh-strain injury that scales with conf —
+ *    plus re-recorded scenario checks and tests/golden/cartilage.engine.json, so it is a model
+ *    change and not a copy fix. Until someone takes it, the compression dial says plainly what
+ *    this model does and that a real construct behaves differently.
+ *
+ * ---------------------------------------------------------------------------
  * PARAMETER / EQUATION CHANGES (the spec's constants are placeholders, and two of
  * its scenario targets contradict its own parameter table; verified with
  * tools/run_headless.mjs + tools/plot_scenarios.py + the scenario checks)
@@ -3258,19 +3332,24 @@ const TISSUE_CARTILAGE = {
     { key: 'amp', label: 'Dynamic compression', min: 0, max: 0.2, step: 0.01, default: 0, format: 'percent', role: 'load',
       metaphor: 'Pressure: a steady squeeze, on and off, three hours a day.',
       biology: 'Peak-to-peak strain of a 1 Hz squeeze. Around 10 % it stimulates synthesis most; past 15 % the injury term grows fast, and at 20 % it wrecks the construct. Squeezing a still-dense gel does blunt the stimulus for the first days — but the squeeze also opens the mesh sooner, and here that is the bigger of the two, so this model does not punish early loading the way a real construct does (Mauck 2000).',
-      watch: 'Stiffness and GAG climb faster whenever it is on, and the earlier the better here: hold the first scenario\'s dials, turn it on at day 0, and the cube ends about 40 % stiffer than with no squeeze at all. The two effects cancel at about 16 %, and past that both fall away.' },
+      watch: 'Stiffness and GAG climb faster whenever it is on, and the earlier the better here: hold the first scenario\'s dials with Auto-apply off, turn it on at day 0, and the cube ends about 40 % stiffer than with no squeeze at all (500 against 350 kPa at eight weeks). Leave Auto-apply on and the gap is only 8 %, because the day-14 event squeezes the comparison run too. The two effects cancel at about 16 %, and past that both fall away.' },
     { key: 'o2Ext', label: 'Oxygen tension', min: 0.05, max: 1, step: 0.01, default: 0.24,
       format: (v) => `${Math.round(v * 21)} %`,
       metaphor: 'Altitude: thin air — except that up here the cloud forms better.',
-      biology: 'Oxygen in the medium, 1–21 %. Cartilage is avascular; 5 % keeps cells chondrogenic, 21 % pushes them toward collagen I and hypertrophy, and under 1 % they starve.',
+      biology: 'Oxygen in the medium, 1–21 %. Cartilage is avascular; 5 % keeps cells chondrogenic and 21 % pushes them toward collagen I and hypertrophy. The bottom of the dial is 1 %, and there the cells stay chondrogenic but the anoxia term bites: the oxygen trace settles at 0.02 instead of the 0.11 it holds at 5 %, and the construct ends at half the stiffness (175 against 350 kPa at eight weeks; switch Auto-apply on as well and the day-14 squeeze on top of the thin air leaves it at 12).',
       watch: 'Switch on the oxygen layer: the medium face stays bright and the deep half goes dark. Phenotype follows the deep value, not the dial. Give it a fortnight — a real 300 µm construct settles its gradient in minutes, this one integrates it in time and needs about two weeks.' },
     { key: 'infl', label: 'Inflammation (IL-1)', min: 0, max: 1, step: 0.01, default: 0, format: 'fixed2',
       metaphor: 'Temperature: heat turns droplets back into vapor.',
       biology: 'IL-1β in the medium (1 ≈ 10 ng/mL). It switches on aggrecanase and MMP-13 and shuts synthesis down, and the cells stay suppressed after it is gone.',
       watch: 'The teal GAG band melts within days; the ivory collagen II band only starts to go in the second week. Recovery takes weeks.' },
+    // The fall-apart range is measured, not read off tRG: the day the connected fraction drops
+    // below 0.05, race dials, no scripted events (seed 7) — xl 0 → day 6.8, 0.1 → 9.4, 0.5 → 25.7,
+    // 0.9 → 82.9, 1 → 104.8 (15 weeks). tRG itself carries a quartic term (7 + 28·xl + 130·xl⁴,
+    // 7–165 d), so the top of the dial is nowhere near linear. With the first scenario's day-14
+    // squeeze on as well, xl 1 comes down to day 81.4 (11.6 weeks).
     { key: 'xl', label: 'Crosslink density', min: 0, max: 1, step: 0.05, default: 0.5, format: 'fixed2',
       metaphor: 'The trellis: a frame the gardener builds and expects to rot.',
-      biology: 'How tightly the hydrogel is crosslinked. It sets the starting stiffness (5–65 kPa), the mesh size, and how long the gel takes to fall apart (1–11 weeks).',
+      biology: 'How tightly the hydrogel is crosslinked. It sets the starting stiffness (5–65 kPa), the mesh size, and how long the gel takes to fall apart: about a week at the bottom of the dial, fifteen at the top — eleven if you are squeezing it as well.',
       watch: 'High: matrix stays trapped as pericellular islands and the cube stays grey. Low: the lattice is gone before there is anything to replace it.' },
     { key: 'nCells', label: 'Cell number', min: 40, max: 400, step: 10, default: 160, format: 'cells', role: 'cellCount',
       metaphor: 'Condensation nuclei: droplets need something to form on.',
@@ -3498,8 +3577,13 @@ const TISSUE_CARTILAGE = {
         reality: 'The hydrogel has no counterpart in the metaphor at all. It is a trellis a gardener builds and expects to rot, and the whole story is whether the plant grows before the trellis falls.' },
       { claim: 'Thin air at altitude makes it harder for a cloud to form.',
         reality: 'Cartilage has no blood supply. At 5 % oxygen the cells make more aggrecan and more collagen II than at room air; 21 % is the abnormal condition, and it pushes them toward collagen I.' },
+      // "Four times" is exact, not rounded: the net factor on the aggrecan term is
+      // 0.25 + 0.75·col2/(col2 + 0.3), i.e. 0.25 with no collagen and 1 with plenty. The two kPa
+      // figures are the first scenario at day 56 (gag 0.88, col2 0.23) put through stiffnessOf()
+      // with its collagen and with col2 = 0. The 6× of the literature is Mauck 2000's dynamic-
+      // loading benefit, not the collagen net, and it had been borrowed across.
       { claim: 'More cloud means a stiffer, heavier cloud.',
-        reality: 'Aggrecan alone is nearly worthless mechanically. It is an osmotic sponge, and it only becomes stiffness once a collagen net exists to resist the swelling. Same amount of matrix, six times the modulus, depending on the net.' },
+        reality: 'Aggrecan alone is nearly worthless mechanically. It is an osmotic sponge, and it only becomes stiffness once a collagen net exists to resist the swelling. A full net is worth four times the modulus for the same aggrecan; the first scenario\'s construct has only part of one by day 56, and even so it is 307 kPa where the same aggrecan with no collagen at all would be 125.' },
       { claim: 'Droplets are droplets: they do not decide what to be.',
         reality: 'A chondrocyte can become a fibroblast-like cell, and then it makes a different, aligned matrix. Put the medium right again and the cell comes back — but the collagen I it laid down stays.' },
     ],
@@ -3523,6 +3607,9 @@ const TISSUE_CARTILAGE = {
     vocabulary: {
       matrix: 'proteoglycan and collagen',
       cellsActive: 'the chondrocytes are pumping out aggrecan',
+      // Out of reach by design: `quiet` is 0 below, because this axis has no idle end (see the
+      // thresholds note). Kept as the words the tissue would use if a future threshold gave the
+      // branch a state that is really quiet.
       cellsQuiet: 'the chondrocytes have stopped making cartilage matrix',
       cellsMid: 'the chondrocytes are turning into fibroblasts',  // `a` is a phenotype axis, not a switch
       // The generic continuations are written for a tissue whose only stiffness is the matrix its
@@ -3536,14 +3623,21 @@ const TISSUE_CARTILAGE = {
       activeSoftening: 'and what they make is not holding the cube up yet',
       stillHint: 'the cube is all hydrogel so far — give the chondrocytes a day and the first aggrecan appears.',
       // stiffKPa 90: the stiffest fresh gel this tissue can be cast as is 65 kPa (xl 1), so past 90
-      //   the two clauses above are literally true; in the race the switch lands on day 22 (94 kPa),
-      //   the day the equilibrium() override below hands back, so the two never leave a gap.
-      // quiet 0.12: a low phenotype here does not mean an idle cell, it means a fibroblast-like one
-      //   that is making collagen I hard. The generic "quiet" tail ("slow basal deposition") is only
-      //   true at the very bottom of the axis, which is where the drift scenario finally lands.
+      //   the two clauses above are literally true; in the race the switch lands on day 21.6
+      //   (90 kPa) and the equilibrium() override below hands back on day 22.1 (96 kPa), so the two
+      //   never leave a gap. A bar of 150 would open one: days 22.1–28.6 of the race would read
+      //   "what they make is not holding the cube up yet" while the modulus climbed 96 → 150 kPa,
+      //   already past any gel this tissue can be cast as.
+      // quiet 0: this axis has NO idle end, so the generic quiet branch is switched off rather than
+      //   placed. A phenotype near 0 here is a fibroblast-like cell working flat out on collagen I:
+      //   measured in Fibrocartilage drift with the day-56 correction left off, phenotype crosses
+      //   0.12 on day 59.8 with deposition 0.022/d and rising to 0.028/d by day 93 while the
+      //   modulus climbs 22 → 83 kPa — and the branch's own tail calls that "slow basal deposition
+      //   with little breakdown to oppose it". Below `active` the sentence says the cells are
+      //   turning into fibroblasts, which is what they are doing all the way down.
       // still 5e-4: the rate at which copyFormatRate() itself starts printing "0/d", so neither the
       //   sentence nor the trend dot says a cube is condensing while both of its numbers read zero.
-      thresholds: { stiffKPa: 90, quiet: 0.12, still: 5e-4 },
+      thresholds: { stiffKPa: 90, quiet: 0, still: 5e-4 },
       scaffoldNoun: 'hydrogel dissolving',            // the third flux bar (stats().scaffoldFlux)
       /**
        * The one thing the shared sentence cannot say about this cube: the trellis. deposition and
@@ -3569,7 +3663,18 @@ const TISSUE_CARTILAGE = {
           : ratio > T.condensing ? m.condensing : ratio < T.evaporating ? m.evaporating : m.steady;
         const a = Number.isFinite(s.cells ? s.cells.a : s.meanAlpha) ? (s.cells ? s.cells.a : s.meanAlpha) : 0;
         const who = a > T.active ? V.cellsActive : a < T.quiet ? V.cellsQuiet : V.cellsMid;
-        const race = drain > dep
+        // NET matrix (deposition − degradation) against the drain, not gross deposition: while the
+        // mesh is still tight most of what the cells make washes straight back out, so the gross
+        // comparison told the student the cells were winning at the exact moments the cube was
+        // losing ground. Measured (seed 7, events on, tools/run_headless.mjs, CSV every 0.26 d):
+        // the race flipped to "filling in faster" on day 9.4, when net matrix was 0.023/d against a
+        // drain of 0.038/d and the stiffness trace was still below the fresh gel, and it stayed
+        // there through the whole handover dip; Scaffold-too-dense flipped on day 36.7 and held the
+        // claim through its stiffness minimum (14.1 kPa, day 51.7) — answering the opposite of that
+        // card's own question. On the net measure the race says "the trellis is going faster" for
+        // the whole life of the override (days 0.3–21.8) and too-dense turns over on day 57.4, five
+        // days after the minimum, exactly as the released islands start lifting the modulus.
+        const race = drain > dep - deg
           ? 'and the trellis is going faster than they can fill in'
           : 'and they are filling in faster than the trellis goes';
         return `Deposition ${copyFormatRate(dep)}, degradation ${copyFormatRate(deg)}, hydrogel draining `
@@ -4007,7 +4112,7 @@ const TISSUE_FIBROUS = {
         'Wait another four weeks and compare stiffness and activation with where they started.',
       ],
       question: 'You turned the bath down to 0.2 — lower than this tissue has ever run — yet the growth-factor haze stays at about twice that. Where is it coming from, and what would you turn down to break the loop?',
-      expect: 'Dense, stiff, poorly aligned matrix by week four: density 0.82, stiffness about 37 kPa, activation 0.88, and the whole-tissue alignment only 0.13 — scar, not tendon. After you drop the bath, activation dips to about 0.73 and settles near 0.80, while stiffness does not dip at all and climbs past 130 kPa by week thirteen. The tissue does not retrace its path.',
+      expect: 'Dense, stiff, poorly aligned matrix by week four: density 0.82, stiffness about 37 kPa, activation 0.88, and the whole-tissue alignment only 0.13 — scar, not tendon. Drop the bath yourself at week four and activation dips to about 0.73 two weeks later, then settles near 0.80; leave it to the day-45 auto event instead and the dip comes later and is shallower, about 0.79, settling in the same place. On either path stiffness does not dip at all and climbs past 130 kPa by week thirteen. The tissue does not retrace its path.',
       dials: { Gext: 0.9, strain: 0.3, protease: 0.2, nCells: 160 },
       init: { species: { new: 0.15, mat: 0 }, jitter: 0.2 },
       events: [{ at: 45, dials: { Gext: 0.2 } }],
@@ -4763,11 +4868,10 @@ class FluxGauge {
   constructor(canvas, theme, labels = {}) {
     this.canvas = canvas; this.theme = theme; this.dep = 0; this.deg = 0; this.scaf = 0;
     const L = Object.assign({ left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation', scaffold: 'scaffold dissolving' }, labels || {});
-    if (L.caption && !(labels && labels.ratio)) L.ratio = L.caption;   // `caption` is the EXTENDING §1 name for it
+    // §1 names the ratio caption `ratio`; `caption` is the accepted alias, and `ratio` wins when
+    // a definition sets both (docs/EXTENDING.md §1 copy.gauge)
+    if (L.caption && !(labels && labels.ratio)) L.ratio = L.caption;
     this.labels = L;
-    // a tissue that RENAMED the ratio gets its own words in the one-line reading too; the default
-    // name is three words long, so the default reading keeps the compact "2.50 ×"
-    this.ratioNamed = !!(labels && (labels.ratio || labels.caption));
     this.fontPx = Number.isFinite(L.fontPx) ? L.fontPx : PLOT_FONT_PX;
     this.size = { w: canvas.clientWidth || 0, h: canvas.clientHeight || 0 };
     this._tall = false;
@@ -4781,16 +4885,23 @@ class FluxGauge {
   /** Text scale (presentation mode). */
   setFontPx(px) { if (Number.isFinite(px) && px !== this.fontPx) { this.fontPx = px; this.draw(); } }
   /**
-   * The gauge as one compact line for the value beside the readout title (the app's only reader
-   * of it): "0.05/d vs 0.02/d · 2.50 ×", plus "· hydrogel dissolving 0.01/d" when a scaffold is
-   * dissolving — in the tissue's own words for both (`copy.gauge.scaffold`, `copy.gauge.ratio`),
-   * so the DOM value says what the canvas says.
+   * The gauge as one line for the value beside the readout title (the app's only reader of it),
+   * and the text a screen reader gets instead of the picture: "condensing 0.03/d · evaporating
+   * 0.01/d · deposition / degradation = 2.09", plus "· hydrogel dissolving 0.01/d" when a
+   * scaffold is dissolving.
+   *
+   * Every word in it is the tissue's own (`copy.gauge` — left, right, ratio/caption, scaffold):
+   * the reading used to glue the two rates together with a hard-coded "vs" and print the ratio as
+   * a bare "2.50 ×", so a tissue that had named its two directions and its ratio said one thing
+   * on the canvas and another in the DOM. The three captions are now the same words and the same
+   * "name = value" shape as the ones draw() paints.
    */
   describe() {
     const ratio = (this.dep + 1e-9) / (this.deg + 1e-9);
     const r = ratio > 99 ? '>99' : ratio.toFixed(2);
-    let s = `${copyFormatRate(Math.max(0, this.dep))} vs ${copyFormatRate(Math.max(0, this.deg))} · ${this.ratioNamed ? `${this.labels.ratio} ${r}` : `${r} ×`}`;
-    if (this.scaf > 0) s += ` · ${this.labels.scaffold} ${copyFormatRate(this.scaf)}`;
+    const L = this.labels;
+    let s = `${L.right} ${copyFormatRate(Math.max(0, this.dep))} · ${L.left} ${copyFormatRate(Math.max(0, this.deg))} · ${L.ratio} = ${r}`;
+    if (this.scaf > 0) s += ` · ${L.scaffold} ${copyFormatRate(this.scaf)}`;
     return s;
   }
   update(dep, deg, scaffold) {
@@ -6913,10 +7024,16 @@ const APP_EVENTS_KEY = 'tw.autoEvents';
 const APP_HINT_KEY = 'tw.hintDismissed';    // the first-run card, dismissed for this session
 const APP_SHORTCUT_KEY = 'tw.shortcuts';    // single-key shortcuts on/off, remembered between visits
 const APP_LEGEND_MIN_H = 132;   // px of stage left under the HUD before the legend moves into the console
+const APP_CHIPS_CLEAR = 26;     // px the chip block keeps between itself and the HUD's lowest plate
+const APP_CHIPS_HYST = 16;      // …and the extra room the stage must offer before they move back
+const APP_EXPORT_FIELDS_KEY = 'tw.exportFields';   // "include field grids" in the export, per session
 const APP_KEYS = [
   ['Space', 'play / pause'], ['R', 'reset the scenario (previous run stays dashed)'], ['I', 'injure (when the tissue supports it)'],
   ['1 – 9', 'pick a scenario'], ['P', 'presentation mode (bigger sentence and clock)'],
   ['← →', 'nudge the focused dial (Home / End for the extremes); on a focused chart, move the crosshair (Esc drops it)'],
+  // the 3D view's own keys belong in the table, not only in the note below it: presentation mode
+  // hides every .note, and the camera is the one control a projector audience watches
+  ['← ↑ → ↓ + − Home', 'with the 3D view focused: orbit, zoom, back to the default framing (the same seven moves are the chips under the view)'],
   ['Tab', 'move between controls; the 3D view and every chart are focusable and describe themselves'],
 ];
 /**
@@ -7084,6 +7201,13 @@ class TissueApp {
     this.present = false; this.autoRotate = true;
     this.hoverTimer = null;                // the keyboard crosshair speaks once, after the key rests
     this.legendDocked = false;             // the legend has moved into the console (short stage)
+    this.chipsDocked = false;              // …and so have the layer + camera chips
+    this.chipsTried = null;                // the stage geometry the chip block last failed to fit
+    // The export's ring buffer holds the per-field grids only when this is on: they are 26-38 % of
+    // every frame (docs/EXTENDING.md §5 — a reader must tolerate a frame without `fields`), and a
+    // 120-frame buffer of them is the single biggest thing this page keeps in memory. Off by
+    // default, remembered for the session, switched beside the Export button in About.
+    this.exportFields = appSession(APP_EXPORT_FIELDS_KEY) === '1';
     this.hintDismissed = appSession(APP_HINT_KEY) === '1';
     // Single-character shortcuts need a way OFF (WCAG 2.1.4 Character Key Shortcuts): a speech-input
     // user dictating anything with an "r" in it would otherwise destroy the run. Default on — they
@@ -7169,7 +7293,7 @@ class TissueApp {
     // window and presentation mode: the sticky Run header's height (it becomes #panel's
     // scroll-padding, so Shift+Tab never parks focus behind it) and the room the stage leaves
     // under the HUD (the legend's cap).
-    const measure = () => { this.measureRun(); this.layoutLegend(); };
+    const measure = () => { this.measureRun(); this.layoutChips(); this.layoutLegend(); };
     if (typeof ResizeObserver === 'function') {
       this.sizeObserver = new ResizeObserver(measure);
       for (const sel of ['.run', '#stage', '.hud-top']) { const el = document.querySelector(sel); if (el) this.sizeObserver.observe(el); }
@@ -7218,7 +7342,10 @@ class TissueApp {
       document.body.classList.toggle('legend-docked', dockIt);
       dock.hidden = !dockIt;
       if (dockIt) dock.append(box);
-      else if (layers) stage.insertBefore(box, layers); else stage.append(box);
+      // …before the chips when they are on the stage; they may be docked in the console instead,
+      // and insertBefore(node, aNodeThatIsNotAChild) throws
+      else if (layers && layers.parentElement === stage) stage.insertBefore(box, layers);
+      else stage.insertBefore(box, appEl('notice'));
     }
     if (dockIt) box.style.removeProperty('--legend-max');
     else box.style.setProperty('--legend-max', `${Math.max(0, room)}px`);
@@ -7226,6 +7353,71 @@ class TissueApp {
   }
   /** A capped legend scrolls: give it a tab stop while it does, and none while it does not. */
   syncLegendScroll() { appScrollable(appEl('legend'), 'y'); }
+
+  /**
+   * Where the layer and camera chips may live. The legend's problem in the opposite corner: the
+   * block is absolutely positioned in the stage and grows UPWARD from the bottom, so on a short
+   * stage it climbs into the HUD — and the HUD is the top layer, with opaque plates. At 320x512
+   * that left five of the seven camera chips painted over by the live sentence and swallowing
+   * their clicks, and pushed a layer chip 23 px above the top of the stage with no way to scroll
+   * to it (WCAG 2.4.11 Focus Not Obscured, 2.5.7 Dragging Movements, 2.1.1 Keyboard).
+   *
+   * z-order alone does not fix that — two blocks of content would still be drawn on top of each
+   * other, one of them illegible — so when the stage cannot hold the block clear of the HUD the
+   * whole group moves into the console, exactly as layoutLegend() moves the legend.
+   *
+   * The HUD's own rectangle is not the measurement: `.hud-top` spans the stage while its three
+   * children are `width: fit-content`, so the PLATES are what the chips have to clear.
+   */
+  layoutChips() {
+    const stage = appEl('stage'), hud = document.querySelector('.hud-top'), box = appEl('layers'), dock = appEl('chips-dock');
+    if (!stage || !hud || !box || !dock) return;
+    // How much stage is left under the HUD's lowest plate, and how tall the block is WHERE IT
+    // CURRENTLY SITS. On the stage both numbers are exact; docked in the console the height is
+    // only an estimate of what it would be back on the stage (a different width wraps the chips
+    // into a different number of rows), which is why moving back is a speculative move that is
+    // then checked in place.
+    const fits = () => {
+      const sr = stage.getBoundingClientRect();
+      let hudBottom = sr.top;
+      for (const child of hud.children) {
+        const r = child.getBoundingClientRect();
+        if (r.width > 1 && r.height > 1) hudBottom = Math.max(hudBottom, r.bottom);
+      }
+      return { room: sr.bottom - hudBottom - APP_CHIPS_CLEAR, need: box.scrollHeight, width: sr.width };
+    };
+    const a = fits();
+    if (!this.chipsDocked) {
+      // on the stage: an exact measurement, so this decision is final
+      if (a.room < a.need) { this.setChipsDocked(true); this.chipsTried = a; } else this.chipsTried = null;
+      return;
+    }
+    if (a.room < a.need + APP_CHIPS_HYST) return;                 // plainly not enough room: stay
+    // …and do not try again with the geometry that already failed, or the block moves back and
+    // forth on every resize notification (the console can be WIDER than the chip band on the
+    // stage, so the estimate can say "it fits" where the real thing does not)
+    const t = this.chipsTried;
+    if (t && a.room <= t.room + 8 && Math.abs(a.width - t.width) <= 8) return;
+    this.setChipsDocked(false);
+    const b = fits();
+    if (b.room < b.need) { this.setChipsDocked(true); this.chipsTried = b; } else this.chipsTried = null;
+  }
+
+  /** Move the chip group between the stage and the console, keeping focus where it was. */
+  setChipsDocked(on) {
+    const stage = appEl('stage'), box = appEl('layers'), dock = appEl('chips-dock');
+    if (!stage || !box || !dock) return;
+    this.chipsDocked = on;
+    document.body.classList.toggle('chips-docked', on);
+    dock.hidden = !on;
+    // moving a subtree blurs whatever inside it had focus, and focus on <body> restarts the tab
+    // ring at the skip link (WCAG 2.4.3): put it back on the same chip
+    const active = document.activeElement;
+    const refocus = active && box.contains(active) ? active : null;
+    if (on) dock.append(box);
+    else stage.insertBefore(box, appEl('notice'));   // …where it was: before the notice overlay
+    if (refocus && typeof refocus.focus === 'function') refocus.focus();
+  }
 
   onKey(e) {
     if (e.defaultPrevented || e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -7669,7 +7861,21 @@ class TissueApp {
       ])) : []);
       const ghostKey = appH('span', { class: 'ghost-key', hidden: true }, [appH('i', { class: 'dash' }), document.createTextNode('previous run (dashed)')]);
       keys.append(ghostKey);
-      box.append(appH('div', { class: 'readout' }, [head, meaning, canvas, keys]));
+      // A SERIES may carry its own unit and meaning (docs/EXTENDING.md §1 readouts[].series[]);
+      // both were accepted and rendered nowhere — only the readout's own r.unit / r.meaning were.
+      // They go under the key, in a disclosure because a four-series readout is four paragraphs;
+      // the summary is named per readout so seven of them are not seven identical stops (2.4.6).
+      const noted = (r.series || []).filter((x) => x.unit || x.meaning);
+      const notes = noted.length ? appH('details', { class: 'series-notes-box' }, [
+        appH('summary', { text: 'What each line means', 'aria-label': `${r.label}: what each line means` }),
+        appH('ul', { class: 'series-notes' }, noted.map((x) => appH('li', {}, [
+          appH('b', { text: `${x.label} ` }),
+          x.unit ? appH('span', { class: 'unit', text: x.unit }) : '',
+          x.unit && x.meaning ? document.createTextNode(' — ') : '',
+          x.meaning ? document.createTextNode(x.meaning) : '',
+        ]))),
+      ]) : '';
+      box.append(appH('div', { class: 'readout' }, [head, meaning, canvas, keys, notes]));
       const plot = new TimeSeriesPlot(canvas, {
         series, yDomain, yFormat, windowDays: 90, theme: APP_THEME, fontPx,
         onHover: (lines, i, source) => this.onPlotHover(r, lines, source),
@@ -7845,10 +8051,13 @@ class TissueApp {
   // ---------- layers, legend, about ----------
   buildLayers() {
     const box = appEl('layers'); box.replaceChildren(); this.layerButtons = {};
+    this.chipsTried = null;                // a different tissue is a different number of chips
     const t = this.tissue;
     // a visible word in front of the chip row: "show fibers cells …" reads as a control, a bare
     // row of pills reads as decoration (C13). The group already carries an aria-label.
-    box.append(appH('span', { class: 'chips-label', 'aria-hidden': 'true', text: 'show' }));
+    // the inner span carries the plate: the outer one is a full-width flex line (the chips start
+    // on the next row), and a plate on THAT would draw a bar across the row (WCAG 1.4.3)
+    box.append(appH('span', { class: 'chips-label', 'aria-hidden': 'true' }, [appH('span', { text: 'show' })]));
     const items = [['fibers', 'fibers'], ['cells', 'cells']];
     const gel = (t.species || []).filter((s) => s.kind === 'gel');
     const scaffold = (t.species || []).filter((s) => s.kind === 'scaffold');
@@ -7889,7 +8098,7 @@ class TissueApp {
     if (old) old.remove();
     const r = this.renderer;
     const items = APP_CAMERA.filter(([, , , method]) => r && typeof r[method] === 'function');
-    if (!items.length) return;
+    if (!items.length) { this.layoutChips(); return; }
     const row = appH('div', { class: 'cam-group', role: 'group', 'aria-label': '3D camera' });
     for (const [id, glyph, name, method, args] of items) {
       const b = appH('button', {
@@ -7905,6 +8114,7 @@ class TissueApp {
       row.append(b);
     }
     box.append(row);
+    this.layoutChips();          // one more row of chips: the stage may no longer have room for them
   }
 
   /** Auto-rotate, from the chip or from the renderer (a drag or a key press stops it). */
@@ -7940,6 +8150,10 @@ class TissueApp {
     if (Number.isFinite(um) && um > 0) rows.push(appH('li', { class: 'legend-row legend-scale' }, [appH('span', { class: 'swatch scale-swatch', 'aria-hidden': 'true' }), appH('span', { text: `Cube edge ≈ ${um >= 1000 ? `${(um / 1000).toFixed(um % 1000 ? 1 : 0)} mm` : `${Math.round(um)} µm`}` })]));
     // the legend is capped against the stage and scrolls inside that cap (layoutLegend), so it
     // needs a name and — while it actually scrolls — a tab stop of its own
+    // …and a ROLE to carry the name: ARIA prohibits aria-label on the generic role, so on a bare
+    // div Chrome reports `role: generic, name: "…"` and axe flags aria-prohibited-attr. `group`
+    // rather than `region`, which would make a colour key a landmark on every page.
+    box.setAttribute('role', 'group');
     box.setAttribute('aria-label', 'Colour key and how to read the view');
     box.append(appH('ul', { class: 'legend-swatches', 'aria-label': 'Colour key' }, rows));
     // "How to read the view": every string the definition put in copy.legend, in its own
@@ -7991,6 +8205,35 @@ class TissueApp {
     box.hidden = this.hasPlayed || this.hintDismissed;
   }
 
+  /** What the About note says about the export, which depends on the field-grid switch. */
+  exportNoteText() {
+    return `The export holds one frame every ${this.exportEvery} simulated days since the last reset`
+      + (this.exportFields
+        ? ', including each diffusible field as a grid — the largest part of a frame.'
+        : ', without the diffusible-field grids (they are the largest part of a frame; the switch above keeps them).')
+      + ' In the hosted viewer you will be asked to confirm the save.';
+  }
+
+  /**
+   * Whether the export ring buffer keeps the per-field grids (engine.snapshot({ fields }),
+   * docs/EXTENDING.md §5: a reader must tolerate a frame without them). Frames already captured
+   * are left as they are — the buffer is a rolling window, so the switch takes effect as the run
+   * goes on rather than by re-recording the past.
+   */
+  setExportFields(on, fromUi) {
+    this.exportFields = !!on;
+    if (fromUi) appSession(APP_EXPORT_FIELDS_KEY, this.exportFields ? '1' : '0');
+    const b = appEl('opt-export-fields');
+    if (b) b.setAttribute('aria-pressed', String(this.exportFields));
+    const note = appEl('export-note');
+    if (note) note.textContent = this.exportNoteText();
+    if (fromUi) {
+      this.announce(this.exportFields
+        ? 'Field grids will be included in exported frames from now on. They are the biggest part of a frame.'
+        : 'Field grids left out of exported frames from now on. Everything else — species, cells, fiber tensors — still travels.', true);
+    }
+  }
+
   /** Open the About details and put it in view (the hint's "What am I looking at?" button). */
   openAbout() {
     const ab = appEl('about');
@@ -8023,14 +8266,28 @@ class TissueApp {
       title: 'R, I, P and 1–9. Turn them off if you use dictation or a switch that sends letters. Space always plays and pauses.',
       onclick: () => this.setShortcuts(!this.shortcuts, true),
     });
-    ab.append(appH('p', { class: 'note' }, [shortcutChip]));
-    ab.append(appH('p', { class: 'note', text: 'The single letters and digits above work while nothing is being typed into. Turn them off with the button and only Space, Tab and the arrow keys on a focused control stay.' }));
+    // `opt-note`, not a bare `note`: presentation mode hides every .note, and hiding the ONLY way
+    // to turn r / i / p / 1-9 off while they keep firing is the state WCAG 2.1.4 forbids —
+    // ?present=1 is exactly the link the Copy link button produces (index.html body.present).
+    ab.append(appH('p', { class: 'note opt-note' }, [shortcutChip]));
+    // …and the sentence that says what the button does travels with it: a switch whose only
+    // explanation is a title attribute is not a mechanism anyone finds (2.1.4 again)
+    ab.append(appH('p', { class: 'note opt-note', text: 'The single letters and digits above work while nothing is being typed into. Turn them off with the button and only Space, Tab and the arrow keys on a focused control stay.' }));
     ab.append(appH('p', { class: 'note', text: 'Drag the 3D view to orbit, scroll to zoom. With the view focused, the arrow keys orbit, + and − zoom and Home reframes it. Hover a chart for exact values, or focus it and walk the crosshair with the arrow keys; the Table button under the readouts lists the same numbers as text.' }));
     ab.append(appH('div', { class: 'tools' }, [
       appH('button', { type: 'button', text: 'Export trajectory (JSON for Blender)', onclick: () => this.exportJSON() }),
+      // The per-field grids are 26-38 % of every frame and the buffer holds 120 of them, so they
+      // are opt-in (engine.snapshot({ fields }), docs/EXTENDING.md §5). Session-remembered, so an
+      // instructor who wants the haze in Blender turns it on once per visit.
+      appH('button', {
+        type: 'button', class: 'chip', id: 'opt-export-fields', 'aria-pressed': String(this.exportFields),
+        text: 'Include field grids',
+        title: 'Keep the diffusible-field grids (growth factor, protease, oxygen) in each exported frame. They are the largest part of a frame, so they are left out unless you ask; frames already recorded keep whatever they were captured with.',
+        onclick: () => this.setExportFields(!this.exportFields, true),
+      }),
       appH('a', { href: 'https://github.com/jpeponis/tissuesimulations', target: '_blank', rel: 'noopener', text: 'Model notes & source' }),
     ]));
-    ab.append(appH('p', { class: 'note', text: `The export holds one frame every ${this.exportEvery} simulated days since the last reset. In the hosted viewer you will be asked to confirm the save.` }));
+    ab.append(appH('p', { class: 'note', id: 'export-note', text: this.exportNoteText() }));
     ab.append(appH('p', { class: 'note', text: `${t.name}${t.version ? ` · definition v${t.version}` : ''}` }));
   }
 
@@ -8350,10 +8607,11 @@ class TissueApp {
   }
 
   /**
-   * The flux gauge as text for the value beside its title: "0.05/d vs 0.02/d · 2.50 ×". The gauge
-   * itself owns the wording, so the tissue's own word for a dissolving scaffold
-   * (`copy.gauge.scaffold`) reaches the DOM value and not only the canvas — this text is what a
-   * screen reader gets instead of the picture.
+   * The flux gauge as text for the value beside its title: "condensing 0.03/d · evaporating
+   * 0.01/d · deposition / degradation = 2.09". The gauge itself owns every word of it, so a
+   * tissue's own names for the two directions, the ratio and a dissolving scaffold
+   * (`copy.gauge` — left, right, ratio, scaffold) reach the DOM value and not only the canvas —
+   * this text is what a screen reader gets instead of the picture.
    */
   gaugeValueText() { return this.gauge && typeof this.gauge.describe === 'function' ? this.gauge.describe() : ''; }
 
@@ -8433,9 +8691,9 @@ class TissueApp {
     for (const p of this.plots) { p.plot.spec.fontPx = fontPx; p.plot.draw(); }
     if (this.gauge && typeof this.gauge.setFontPx === 'function') this.gauge.setFontPx(fontPx);
     if (this.renderer && typeof this.renderer.resize === 'function') this.renderer.resize();
-    // the sentence and the clock grow, so the HUD is taller and the legend has less room; the
-    // console's type grows too, so the sticky header is taller
-    this.measureRun(); this.layoutLegend();
+    // the sentence and the clock grow, so the HUD is taller and both the legend and the chip block
+    // have less room; the console's type grows too, so the sticky header is taller
+    this.measureRun(); this.layoutChips(); this.layoutLegend();
     if (fromUi) {
       this.scheduleUrl();
       this.announce(this.present ? 'Presentation mode on: bigger sentence and clock, hints hidden.' : 'Presentation mode off.', true);
@@ -8483,7 +8741,9 @@ class TissueApp {
     const st = this.engine.state;
     const t = st.time;
     if (t + 1e-9 >= this.nextExportT) {
-      this.exportFrames.push(this.engine.snapshot());
+      // `fields` is opt-in: the grids are 26-38 % of a frame, and this buffer holds 120 of them
+      // (docs/EXTENDING.md §5 — a format-2 reader tolerates a frame without them)
+      this.exportFrames.push(this.engine.snapshot({ fields: this.exportFields }));
       this.nextExportT = t + this.exportEvery;
       if (this.exportFrames.length > 120) this.exportFrames.shift();
     }

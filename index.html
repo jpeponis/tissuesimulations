@@ -79,10 +79,15 @@ kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--ru
 .hud-top { left: 20px; top: 16px; right: 20px; display: grid; gap: 6px; max-width: 560px; z-index: 3; }
 /* Every HUD block sits on the rendered tissue, whose pixels run from black to pale hydrogel, so
    a text-shadow softens the collision but cannot promise a ratio (WCAG 1.4.3). Each block gets
-   its own plate instead: at 0.88 alpha over --ground, even a WHITE pixel underneath leaves
-   --muted at 4.8:1 and --text at 11:1. tools/screenshot_app.mjs measures the real worst pixel
-   under each line against the frame the renderer drew. */
-.hud-top > * { width: fit-content; max-width: 100%; background: rgba(11,15,20,0.88); border-radius: 8px; padding: 3px 10px; margin-left: -10px; }
+   its own plate instead. The alpha is 0.93, not 0.88: 0.88 carries --muted (4.97:1 over a WHITE
+   pixel) but leaves --faint — the "(week N)" span — at 4.22:1, and the renderer really does draw
+   near-white pixels once the camera is dollied in. At 0.93 the worst case over pure white is
+   --text 13.9:1, --muted 5.8:1, --faint 4.9:1. tools/screenshot_app.mjs measures the real worst
+   pixel under each line against the frame the renderer drew, zoomed in and at day 40.
+   pointer-events: none because these three blocks hold no controls: the HUD is the TOP layer, so
+   an opaque plate over the layer/camera chips would otherwise swallow their clicks (2.5.7 / 2.1.1
+   — it did, at 320 px, where the live sentence covered five camera chips). */
+.hud-top > * { width: fit-content; max-width: 100%; background: rgba(11,15,20,0.93); border-radius: 8px; padding: 3px 10px; margin-left: -10px; pointer-events: none; }
 .brand-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .brand { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 30px; line-height: 1.05; letter-spacing: -0.01em; }
 .brand em { font-style: italic; color: var(--amber-ink); }
@@ -114,7 +119,7 @@ body.debug #fps { display: inline; }
      leaves too little to read, app.js moves the whole disclosure into the console (see
      body.legend-docked). */
   max-height: var(--legend-max, calc(100% - 200px)); }
-.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--text); font-size: 12px; flex: none; }
+.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); background: rgba(16,22,30,0.93); color: var(--text); font-size: 12px; flex: none; }
 .hud-legend summary::-webkit-details-marker { display: none; }
 /* the alt-text form keeps the arrow visual: without it the disclosure is NAMED "▾ Legend", and
    the expanded/collapsed state is already announced (the first declaration is the fallback for
@@ -122,10 +127,17 @@ body.debug #fps { display: inline; }
 .hud-legend summary::before { content: "▸ "; content: "▸ " / ""; color: var(--muted); }
 .hud-legend[open] summary::before { content: "▾ "; content: "▾ " / ""; }
 /* the open legend + guide must never reach the HUD at the top, on any screen (C14) */
-#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.85); border-radius: 8px; padding: 8px 10px; max-height: min(45vh, calc(100vh - 220px)); flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.93); border-radius: 8px; padding: 8px 10px; max-height: min(45vh, calc(100vh - 220px)); flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 /* docked (app.js: too short a stage for the legend to open without covering the HUD) */
 body.legend-docked .hud-legend { position: static; max-width: none; max-height: none; }
 body.legend-docked #legend { max-height: none; background: var(--surface); }
+/* docked (app.js layoutChips: too short a stage to hold the chip block clear of the HUD) */
+body.chips-docked .hud-layers { position: static; max-width: none; justify-content: flex-start; }
+body.chips-docked .chips-label { text-align: left; }
+body.chips-docked .chips-label span { background: none; padding: 0; }
+body.chips-docked .cam-group { justify-content: flex-start; }
+/* …not the pressed ones: --surface-2 is half of how a pressed chip reads (the ✓ is the other) */
+body.chips-docked .chip:not([aria-pressed="true"]) { background: var(--surface); }
 .legend-scale .scale-swatch { background: linear-gradient(90deg, var(--deco) 0 2px, transparent 2px calc(100% - 2px), var(--deco) calc(100% - 2px)); height: 6px; border-radius: 0; }
 .legend-swatches { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
 .legend-row { display: flex; align-items: center; gap: 8px; }
@@ -135,13 +147,30 @@ body.legend-docked #legend { max-height: none; background: var(--surface); }
 .legend-guide[open] summary::before { content: "▾ "; content: "▾ " / ""; }
 .legend-guide ul { margin: 6px 0 0; padding-left: 16px; display: grid; gap: 4px; max-width: 46ch; }
 
-.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 48%; z-index: 1; }
-.chips-label { flex: 0 0 100%; text-align: right; font-size: 12px; color: var(--muted); text-transform: lowercase; letter-spacing: 0.04em; text-shadow: 0 1px 6px rgba(0,0,0,0.8); margin-bottom: 1px; }
+/* The chips are CONTROLS and the HUD above them is text, so they take the higher layer: a plate
+   may never paint over a button, and elementFromPoint must land on the chip (2.4.11 / 2.5.7).
+   Where the stage is too short to hold the block clear of the HUD, app.js docks the whole group
+   into the console instead (body.chips-docked) — z-order alone cannot stop two blocks of content
+   from being drawn on top of each other. */
+.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 48%; z-index: 4; }
+/* …and only the CONTROLS in it take the pointer. The label and the camera row are full-width flex
+   lines, so their EMPTY half spans the stage: with the block on top, `.cam-group` swallowed the
+   click on the closed “Legend” pill in the opposite corner (elementFromPoint landed on
+   DIV.cam-group between 480 and 900 px wide). The chips themselves keep it. */
+.hud-layers > * { pointer-events: none; }
+.hud-layers .chip { pointer-events: auto; }
+/* the label is a full-width flex line so the chips start on the next row; the PLATE is the inner
+   span, so it shrink-wraps the word instead of drawing a bar across the row. A text-shadow is not
+   a contrast method: over pale collagen "show" measured 1.0:1 (WCAG 1.4.3). */
+.chips-label { flex: 0 0 100%; text-align: right; font-size: 12px; color: var(--muted); text-transform: lowercase; letter-spacing: 0.04em; margin-bottom: 1px; }
+.chips-label span { background: rgba(11,15,20,0.93); border-radius: 6px; padding: 2px 8px; }
 /* the camera chips (orbit / zoom / recentre) take a row of their own under the layer chips:
    the single-pointer alternative to dragging the view (WCAG 2.5.7) */
-.cam-group { flex: 0 0 100%; display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+/* flex-wrap, because under `pointer: coarse` the seven chips are 44 px wide each: 344 px of them
+   do not fit a 320 px screen, and a non-wrapping row would push the console sideways (1.4.10). */
+.cam-group { flex: 0 0 100%; display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 4px; }
 .cam-group .chip { padding: 4px 9px; min-width: 34px; font-family: var(--font-mono); }
-.chip { border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--muted); border-radius: 999px; padding: 4px 11px; min-height: 28px; font-size: 12px; cursor: pointer; }
+.chip { border: 1px solid var(--control-border); background: rgba(16,22,30,0.93); color: var(--muted); border-radius: 999px; padding: 4px 11px; min-height: 28px; font-size: 12px; cursor: pointer; }
 /* a pressed control is not distinguished by colour alone: the tick has its space reserved, so
    turning a layer on and off never reflows the row (C7). `/ ""` is the alt text: without it the
    glyph lands in the accessible NAME ("✓fibers") on top of the pressed state a screen reader
@@ -262,6 +291,15 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .readout canvas:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .readout .keys i.dash { width: 14px; height: 0; border-top: 2px dashed var(--muted); vertical-align: 3px; border-radius: 0; }
 .readout .keys [hidden] { display: none; }
+/* A readout's SERIES may carry their own unit and meaning (docs/EXTENDING.md §1); without this
+   they were accepted and never shown. One line per series that declares either, under the key —
+   in a disclosure, because a four-series readout is four paragraphs of it. */
+.readout .series-notes-box { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.readout .series-notes-box summary { cursor: pointer; color: var(--faint); min-height: 24px; line-height: 24px; }
+.readout .series-notes-box summary::marker { color: var(--deco); }
+.readout .series-notes { margin: 2px 0 0; padding: 0; list-style: none; display: grid; gap: 3px; }
+.readout .series-notes b { color: var(--text); font-weight: 500; }
+.readout .series-notes .unit { color: var(--text); }
 .gauge canvas { width: 100%; height: 62px; display: block; background: var(--surface); border-radius: 6px; }
 .tools-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .tools-row button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber-ink); }
@@ -310,7 +348,7 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
    The room reads the sentence and the clock from the back; the per-dial hints and the first-run
    card are noise on a projector, and the console gets a little wider so the readouts breathe. */
 body.present { --sentence: 24px; --clock: 18px; --panel-w: 460px; }
-body.present .equilibrium { max-width: 30ch; background: rgba(11,15,20,0.88); border-radius: 10px; padding: 8px 12px; margin-left: -12px; text-shadow: none; line-height: 1.3; }
+body.present .equilibrium { max-width: 30ch; background: rgba(11,15,20,0.93); border-radius: 10px; padding: 8px 12px; margin-left: -12px; text-shadow: none; line-height: 1.3; }
 body.present .clock b { color: var(--text); }
 /* The dial hints are the node each slider's aria-describedby points at: display:none would take
    them out of the layout and make the page depend on accname §4.1 keeping a directly referenced
@@ -320,9 +358,13 @@ body.present .brand-sub,
 body.present .dial-more,
 body.present .hint-card,
 body.present .readout .meaning,
+body.present .readout .series-notes-box,
 body.present .tissue-short,
 body.present .scenario-card details,
-body.present .note { display: none; }
+/* …but NOT .opt-note: it holds the single-key-shortcut off switch, and presentation mode is
+   reachable by the P key, by the chip and by ?present=1 — which is the link Copy link produces.
+   Hiding the switch while r / i / p / 1-9 keep firing is the state WCAG 2.1.4 forbids. */
+body.present .note:not(.opt-note) { display: none; }
 body.present .hud-legend { font-size: 13px; }
 body.present .readout:not(.gauge) canvas { height: 104px; }   /* the gauge draws to a fixed layout */
 body.present .dial label { font-size: 15px; }
@@ -344,12 +386,19 @@ body.present #panel { font-size: 15px; }
 @media (max-width: 900px) {
   #app { grid-template-columns: 1fr; grid-template-rows: 58vh auto; height: auto; }
   #panel { border-left: 0; border-top: 1px solid var(--rule); }
-  .hud-top { max-width: 70%; }
+  /* no 70 % cap here: the blocks inside are width: fit-content and the sentence is capped at
+     46ch, so a WIDER hud-top is a SHORTER one — at 320 px the 70 % cap wrapped the sentence to
+     eight lines and pushed the whole HUD 41 px past the bottom of the stage. */
   .brand { font-size: 24px; }
   /* the token, not the rule: a hard font-size here also shrank the sentence in PRESENTATION mode,
      and a narrow viewport is exactly what 200 % browser zoom on a laptop looks like */
   body:not(.present) { --sentence: 13px; }
   .hud-legend { max-width: calc(50% - 30px); }
+  /* Half the stage, the mirror of the legend's cap above: the two blocks share the bottom of the
+     stage, and a chip block that may cross the middle PAINTS over the open legend (measured 4.7-9.4
+     kpx² of chips over the legend box at 480-900 px wide). Fewer rows is not worth that: when the
+     chips no longer fit above the HUD in half a stage, app.js docks the whole group (layoutChips)
+     and the console gives them the full width anyway. */
   .hud-layers { max-width: calc(50% - 22px); }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
@@ -369,7 +418,7 @@ body.present #panel { font-size: 15px; }
          aria-describedby + aria-keyshortcuts say so, since nothing else on the way in does. -->
     <canvas id="view" role="img" tabindex="0" aria-label="3D tissue view, loading"
             aria-describedby="view-keys-hint" aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Plus Minus Home"></canvas>
-    <p class="sr-only" id="view-keys-hint">Focusable 3D view: the arrow keys orbit the camera, plus and minus zoom, Home puts it back on the default framing. The same moves are on the orbit, zoom and recentre buttons under the layer chips. Dragging the view stops the automatic rotation.</p>
+    <p class="sr-only" id="view-keys-hint">Focusable 3D view: the arrow keys orbit the camera, plus and minus zoom, Home puts it back on the default framing. The same seven moves are buttons in the &ldquo;3D view: layers and camera&rdquo; group, which sits under the view when the view is tall enough and in the console below it otherwise. Dragging the view stops the automatic rotation.</p>
     <div class="hud hud-top">
       <div class="brand-row"><h1 class="brand"><em>Tissue Weather</em></h1><p class="brand-sub">dynamic reciprocity</p></div>
       <div class="clock"><span>day <b id="day">0.0</b> <span class="week" id="week">(week 0.0)</span></span><span id="tissue-name"></span><span id="scenario-name"></span><span id="fps" class="note"></span></div>
@@ -421,8 +470,10 @@ body.present #panel { font-size: 15px; }
         <input class="link-out" id="link-out" type="text" readonly aria-label="Link to this view" hidden>
       </div>
     </section>
-    <!-- Where the legend goes when the stage is too short to open it over the view without
-         covering the HUD (app.js layoutLegend moves #legend-box in and out of here). -->
+    <!-- Where the layer and camera chips go when the stage is too short to hold them clear of
+         the HUD, and where the legend goes when it cannot open over the view without covering it
+         (app.js layoutChips / layoutLegend move #layers and #legend-box in and out of these). -->
+    <div id="chips-dock" hidden></div>
     <div id="legend-dock" hidden></div>
     <div class="hint-card" id="hint" role="note">
       <div class="hint-body"><p><b>First time here?</b> Pick a scenario, press Play, then move a dial.</p></div>
