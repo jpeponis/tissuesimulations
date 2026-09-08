@@ -4,6 +4,12 @@
 //   node tools/new_tissue.mjs <key> "<Name>"        (or: npm run new-tissue -- <key> "<Name>")
 //   node tools/new_tissue.mjs <key> "<Name>" --dry-run     print what would change, write nothing
 //
+// It writes THREE things:
+//   src/tissues/<key>.js      the definition, copied from the starter template
+//   src/tissues/index.js      one import line and one registry entry
+//   docs/tissues/<key>.md     the as-built parameter document `npm test` requires, with its
+//                             generated block already filled in
+//
 // It copies src/tissues/_template.js to src/tissues/<key>.js with
 //   • the exported constant renamed TISSUE_TEMPLATE → TISSUE_<KEY>,
 //   • any `tpl…` helper renamed to `<camelKey>…` (top-level identifiers must be unique
@@ -13,22 +19,28 @@
 // TISSUES object. Both edits are idempotent-by-refusal: if the key, the file or the identifier
 // is already there, nothing is written and the tool exits 1 with a message.
 //
-// It does NOT write the as-built parameter block that `npm test` requires (docs/tissues/<key>.md
-// plus an entry in PARAMS_DOCS in tools/check_params_doc.mjs) — that file is prose about the
-// model, so it is step 5 of EXTENDING §8 and the tool only prints the recipe for it.
+// docs/tissues/<key>.md is a PROSE stub (what the tissue is, where the numbers come from) around
+// the generated `<!-- params:<key> -->` … `<!-- /params:<key> -->` block, which is filled here by
+// tools/check_params_doc.mjs itself — the same code path as `node tools/check_params_doc.mjs
+// --write`, so the block is byte-identical to what the checker expects. Nothing in tools/ has to
+// be edited: the checker resolves a tissue's document as docs/tissues/<key>.md by those markers
+// (PARAMS_DOCS is only the exception list for the two shipped tissues). An existing document is
+// never overwritten. Re-run `node tools/check_params_doc.mjs --write` after changing a parameter.
 //
 // The generated file obeys the build constraints of docs/EXTENDING.md §0 (ES module, named
 // exports only, unique top-level identifiers, local imports on one line), so
 // `node tools/build_single.mjs` and `node --test tests/*.test.mjs` keep working; the starter
 // passes the conformance suite unchanged, which is the point of scaffolding from it.
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TISSUE_DIR = join(root, 'src', 'tissues');
 const INDEX = join(TISSUE_DIR, 'index.js');
 const TEMPLATE = join(TISSUE_DIR, '_template.js');
+const PARAMS_DOC_REL = (k) => `docs/tissues/${k}.md`;
+const CHECKER = join(root, 'tools', 'check_params_doc.mjs');
 const RESERVED = new Set(['index', 'template', '_template', 'total', 'fiber']);
 
 const argv = process.argv.slice(2);
@@ -95,6 +107,43 @@ let body = template
 if (!body.includes(`export const ${CONST} = {`)) die('the template no longer exports TISSUE_TEMPLATE — update tools/new_tissue.mjs');
 if (!new RegExp(`key:\\s*'${key}'`).test(body)) die("could not set the tissue's `key` field — update tools/new_tissue.mjs");
 
+// ---------------------------------------------------------------- the as-built parameter document
+// `npm test` (tests/tools.test.mjs → tools/check_params_doc.mjs) requires every REGISTERED tissue to
+// have a document carrying a generated block between the two markers. Everything outside them is
+// yours: the sources, the plausible ranges, the reasoning. The block itself is filled in below by
+// check_params_doc's own writer, so it matches the checker byte for byte.
+const docRel = PARAMS_DOC_REL(key);
+const docPath = join(root, docRel);
+const docStub = `# Tissue definition: ${name}
+
+Scaffolded by \`tools/new_tissue.mjs\`. This document is the record of what
+\`src/tissues/${key}.js\` is and why its numbers are what they are; \`npm test\` only checks the
+generated block at the bottom, everything else here is yours to write.
+
+## 1. The biology in plain language
+
+What the tissue is, which cells are in it, what they build and what breaks it down. Write it for
+someone who has not read the code.
+
+## 2. What the definition models
+
+- **species** — what each per-voxel density means (1 ≈ native-like content) and how it is drawn.
+- **fields** — what diffuses, where it comes from and where it goes.
+- **cells** — what the state scalars \`a\` / \`b\` / \`c\` stand for.
+- **dials** — what a student is really turning, and over what range.
+- **scenarios** — the story each one teaches, and the \`checks\` that pin it.
+
+## 3. Where the numbers come from
+
+Sources (with DOIs) and the plausible range each parameter has to stay inside. This is the section
+that makes a number defensible; the block below only records what the code currently runs.
+
+## 4. As built
+
+<!-- params:${key} -->
+<!-- /params:${key} -->
+`;
+
 // ---------------------------------------------------------------- the registry
 const lines = index.split('\n');
 const isImport = (l) => /^import\s+\{[^}]*\}\s+from\s+'\.\/[^']+\.js';\s*$/.test(l);
@@ -119,22 +168,40 @@ const nextIndex = lines.join('\n');
 
 // ---------------------------------------------------------------- write
 if (DRY) {
-  console.log(`--dry-run: would write ${rel} (${(body.length / 1024).toFixed(1)} KB) and register it in src/tissues/index.js:\n`);
+  const docNote = existsSync(docPath) ? `${docRel} already exists and would be left alone` : `would write ${docRel} (as-built parameter block)`;
+  console.log(`--dry-run: would write ${rel} (${(body.length / 1024).toFixed(1)} KB), ${docNote}, and register it in src/tissues/index.js:\n`);
   console.log(nextIndex.split('\n').map((l) => `  ${l}`).join('\n'));
   process.exit(0);
 }
 writeFileSync(target, body);
 writeFileSync(INDEX, nextIndex);
-console.log(`wrote ${rel} (${CONST}) and registered '${key}' in src/tissues/index.js
+
+// The document, then its generated block — through check_params_doc.mjs, so there is one writer.
+// A failure here is a warning, never a failure of the scaffold: the tissue and the registry are
+// already written, and `node tools/check_params_doc.mjs --write` finishes the job by hand.
+let docLine = `${docRel} (as-built parameter block)`;
+if (existsSync(docPath)) {
+  docLine = `${docRel} (already there — left alone)`;
+} else {
+  mkdirSync(dirname(docPath), { recursive: true });
+  writeFileSync(docPath, docStub);
+  try {
+    const { paramsCheckTissue } = await import(pathToFileURL(CHECKER).href);
+    const r = paramsCheckTissue(key, { write: true });
+    if (r.problems.length) docLine = `${docRel} (markers written; run \`node tools/check_params_doc.mjs --write\` to fill the block)`;
+  } catch (e) {
+    docLine = `${docRel} (markers written; run \`node tools/check_params_doc.mjs --write\` to fill the block)`;
+  }
+}
+
+console.log(`wrote ${rel} (${CONST}) and ${docLine}, and registered '${key}' in src/tissues/index.js
 
 next (docs/EXTENDING.md §8):
   2. fill in species, fields, cellTypes, dials and at least two scenarios with \`checks\`
   3. write makeRules(): what the cells secrete, what the matrix does
   4. node tools/run_headless.mjs --tissue ${key}   &&  python3 tools/plot_scenarios.py --tissue ${key}
-  5. the as-built parameter block the test suite requires:
-       create docs/tissues/${key}.md with a section wrapped in
-         <!-- params:${key} -->  …  <!-- /params:${key} -->
-       add   ${key}: 'docs/tissues/${key}.md'   to PARAMS_DOCS in tools/check_params_doc.mjs
-       run   node tools/check_params_doc.mjs --write
+  5. write the prose of ${docRel} around its generated block (what the tissue is, where the
+     numbers come from). The block itself is already filled in, and nothing in tools/ needs an
+     edit; after changing a parameter, run   node tools/check_params_doc.mjs --write
   6. node --test tests/*.test.mjs   (tune until it passes)
   7. node tools/build_single.mjs   &&  open index.html?tissue=${key}`);

@@ -277,26 +277,40 @@ describe('tools/check_params_doc.mjs', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  // A newcomer who scaffolds a tissue meets this checker before they meet the biology, so it has to
-  // name the file to write. It must NOT ask them to edit this tool: the document defaults to
-  // docs/tissues/<key>.md and is found by its markers (docs/EXTENDING.md §8).
-  test('a newly scaffolded tissue is told which document to write, and needs no edit to the tool', () => {
+  // A newcomer must not meet a red suite before they meet the biology: tools/new_tissue.mjs now
+  // writes docs/tissues/<key>.md WITH its generated block (through this tool's own writer), so a
+  // scaffolded tissue passes `npm test` as it comes out. And whichever way the document arrives,
+  // nothing in tools/ is edited: it defaults to docs/tissues/<key>.md, found by its markers
+  // (docs/EXTENDING.md §8 step 5).
+  test('a newly scaffolded tissue arrives with its as-built document, and needs no edit to the tool', () => {
     const dir = scratchRepo(['src', 'docs', 'tools/new_tissue.mjs', 'tools/check_params_doc.mjs']);
     try {
-      assert.equal(run(dir, 'new_tissue.mjs', ['demotissue', 'Demo tissue']).status, 0);
+      const scaffold = run(dir, 'new_tissue.mjs', ['demotissue', 'Demo tissue']);
+      assert.equal(scaffold.status, 0, scaffold.stderr);
+      assert.match(scaffold.stdout, /docs\/tissues\/demotissue\.md/, 'the scaffolder says which document it wrote');
 
+      const doc = join(dir, 'docs', 'tissues', 'demotissue.md');
+      assert.ok(existsSync(doc), 'the as-built document is scaffolded alongside the definition');
+      assert.match(readFileSync(doc, 'utf8'),
+        /<!-- params:demotissue -->[\s\S]*```text[\s\S]*engine[\s\S]*params[\s\S]*<!-- \/params:demotissue -->/,
+        'with the generated block already filled in');
+      assert.equal(run(dir, 'check_params_doc.mjs').status, 0, 'so the checker is green with no edit at all');
+
+      // an older scaffold, or a document deleted by hand: the checker still names the file and the
+      // markers to write — never a tool to edit
+      rmSync(doc);
       const missing = run(dir, 'check_params_doc.mjs');
       assert.equal(missing.status, 1, 'a tissue with no as-built block fails the check');
       assert.match(missing.stderr, /no as-built block for tissue 'demotissue'/);
       assert.match(missing.stderr, /docs\/tissues\/demotissue\.md/, 'it names the document to write');
       assert.match(missing.stderr, /<!-- params:demotissue -->/, 'and the markers to put in it');
+      assert.ok(!/PARAMS_DOCS/.test(missing.stderr), 'and never asks for an edit to tools/check_params_doc.mjs');
 
-      writeFileSync(join(dir, 'docs', 'tissues', 'demotissue.md'),
-        '# Demo tissue\n\n## Parameters\n\n<!-- params:demotissue -->\n<!-- /params:demotissue -->\n');
+      writeFileSync(doc, '# Demo tissue\n\n## Parameters\n\n<!-- params:demotissue -->\n<!-- /params:demotissue -->\n');
       const w = run(dir, 'check_params_doc.mjs', ['--write']);
       assert.equal(w.status, 0, `${w.stdout}${w.stderr}`);
       assert.match(w.stdout, /docs\/tissues\/demotissue\.md/);
-      assert.match(readFileSync(join(dir, 'docs', 'tissues', 'demotissue.md'), 'utf8'), /```text[\s\S]*engine[\s\S]*params/);
+      assert.match(readFileSync(doc, 'utf8'), /```text[\s\S]*engine[\s\S]*params/);
       assert.equal(run(dir, 'check_params_doc.mjs').status, 0, 'and the check is green from then on');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });

@@ -339,15 +339,29 @@ describe('fidelity: what the copy claims, measured (docs/REVIEW.md F1–F9)', ()
       'misconception 1 must not claim the load dial misses the cells: it is inside the cell rule, as tension');
   });
 
-  // Every registered tissue, not just fibrous: both shipped cubes are the same 300 µm, and the
-  // round that fixed this fixed one tissue at a time. Looping is what would have caught the
-  // second one.
-  test('R7: the cube is 300 µm everywhere, and the app can say so', () => {
+  // Every registered tissue, not just fibrous: the round that fixed this fixed one tissue at a
+  // time, and looping is what would have caught the second one. `domainMicrons` stays OPTIONAL
+  // (docs/EXTENDING.md §1), so this checks CONSISTENCY, not the constant 300: a tissue that
+  // declares a scale must say the same number in its own words, and a tissue that declares none
+  // is simply not making the claim. Both shipped tissues declare 300 µm.
+  //
+  // The scale in words, exactly as the app's legend row prints it (src/app.js buildLegend).
+  const scaleWords = (um) => (um >= 1000 ? `${(um / 1000).toFixed(um % 1000 ? 1 : 0)} mm` : `${Math.round(um)} µm`);
+
+  test('R7: a tissue that declares a cube size says the same size in its copy', () => {
+    let declared = 0;
     for (const [key, t] of Object.entries(TISSUES)) {
-      assert.equal(t.domainMicrons, 300, `${key}: the definition declares its scale, so the colour key can print it`);
+      const um = Number(t.domainMicrons);
       const copy = tissueCopy(t);
-      assert.ok(!/third of a millimetre/i.test(copy), `${key}: a third of a millimetre is 333 µm; the docs derive every micron figure from 300`);
-      assert.match(copy, /300 µm/, `${key}: the intro states the scale`);
+      assert.ok(!/third of a millimetre/i.test(copy), `${key}: a third of a millimetre is 333 µm; the docs derive every micron figure from the declared size`);
+      if (!Number.isFinite(um) || um <= 0) continue;              // no declared scale: no claim to check
+      declared++;
+      assert.ok(copy.includes(scaleWords(um)),
+        `${key}: the definition declares domainMicrons ${um}, so the legend prints "Cube edge ≈ ${scaleWords(um)}" — the intro must state the same number ("${scaleWords(um)}"), not a different one`);
+    }
+    assert.ok(declared >= 2, `both shipped tissues declare their cube size (found ${declared})`);
+    for (const [key, um] of [['fibrous', 300], ['cartilage', 300]]) {
+      assert.equal(TISSUES[key].domainMicrons, um, `${key}: the shipped cube is ${um} µm — docs/SPEC.md and every micron figure derive from it`);
     }
     for (const doc of ['README.md', 'docs/MODEL.md', 'docs/SPEC.md']) {
       assert.ok(!/third of a millimetre/i.test(read(doc)), `${doc} must use the same number`);

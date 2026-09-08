@@ -31,7 +31,7 @@ opt-in, and a golden recorded under v0.3 has to be re-recorded if the definition
 | what changed | who is affected | how to keep the old numbers |
 |---|---|---|
 | `fields[].mode` / `species[].mode` default to `'auto'` (§2.6) | a field or species whose `lam = D·dt/h²` is above 1/6 — v0.3 silently clamped it, so it integrated with a smaller D (cartilage's `o2` moves ~1.6 % on its check stats, more on `globalFA`) | pin `mode: 'explicit'` |
-| `cellTypes[].motile: false` is honoured (§1) | a definition that already carried the key: such a cell no longer moves AND draws no random numbers, so every later draw shifts | drop the key (`motile: true`) |
+| `cellTypes[].motile: false` is honoured (§1) | a definition that already carried the key: such a cell no longer moves AND draws no random numbers, so every later draw shifts | set `motile: true`, or drop the key — it is optional and defaults to true |
 | species `sink` is gated by the voxel hook's `out.mobility` (§2.4) | a tissue that writes both `sink` and `out.mobility` — cartilage's aggrecan moves up to ~3 % on the flux stats (and further in RELATIVE terms on near-zero ones such as `globalFA`) | write `out.mobility = 1` |
 | `out.scaffoldLoss` is capped by the scaffold density the voxel actually lost (§2.2) | a hook that reports more dissolution than the species had left | cap it yourself, as before |
 
@@ -61,7 +61,8 @@ src/plots.js, src/render.js, src/app.js   consume the definition, never a specif
 ```
 
 Build order for the single-file bundle (tools/build_single.mjs discovers
-`src/tissues/*.js` automatically, `index.js` last among them):
+`src/tissues/*.js` automatically, `index.js` last among them; a file whose name starts with `_`
+is skipped, which is how `_template.js` stays out of the bundle while the tests still run it):
 copy → engine → tissues/* → tissues/index → plots → recipe → render → app.
 All files: ES modules, named exports only, unique top-level identifiers,
 local imports written on one line as `import { a, b } from './x.js';`.
@@ -70,13 +71,23 @@ local imports written on one line as `import { a, b } from './x.js';`.
 
 ```js
 export const TISSUE_FIBROUS = {
-  key: 'fibrous',                       // URL/registry key, [a-z0-9-]  (not one the test fixtures use — see §8)
+  key: 'fibrous',                       // URL/registry key, [a-z0-9-]. `TissueEngine.validate()` asks
+                                        // only for that; tools/new_tissue.mjs additionally wants it to
+                                        // START with a letter and refuses `index`, `template`,
+                                        // `_template`, `total` and `fiber` — and do not take a key a
+                                        // test fixture already uses (see §8 step 1)
   name: 'Fibrous connective tissue',    // shown in the tissue picker
   short: 'Fibroblasts build, align and mature collagen under load',
   version: '0.2.0',
-  // domainMicrons: 300,                // OPTIONAL (v0.4): how wide the cube really is. A positive
+  domainMicrons: 300,                   // OPTIONAL (v0.4): how wide the cube really is. A positive
                                         // number adds a "Cube edge ≈ 300 µm" row to the app legend
                                         // (≥ 1000 is shown in mm); omit it and there is no row.
+                                        // Declaring it is a claim about the tissue, so say the same
+                                        // number in the copy: tests/fidelity.test.mjs R7 checks that a
+                                        // tissue with a declared scale states it in words, exactly as
+                                        // the legend row prints it ("300 µm", "1.5 mm"). Both shipped
+                                        // tissues declare 300; a tissue that declares none is not
+                                        // making the claim and is not checked.
 
   // ---- matrix species: per-voxel scalar densities (0 .. ~1.5; 1 ≈ native-like content)
   species: [
@@ -119,6 +130,9 @@ export const TISSUE_FIBROUS = {
   //                                   is reported through `renderer.hintWarnings`, not dropped
   //                                   silently. The engine does not read `render` at all.
   // The keys 'total', 'fiberTotal' and 'tissueTotal' are reserved by the stat paths.
+  // `describe` is DOCUMENTATION ONLY: it is for whoever reads the definition, and nothing in the
+  // app, the renderer, the tools or the export renders it (`readouts[].key` below is the same —
+  // required by validate(), read by nothing). Anything a student must see belongs in `copy`.
 
   // ---- diffusible fields
   fields: [
@@ -138,11 +152,16 @@ export const TISSUE_FIBROUS = {
   //   style: 'spheres' | 'points'     how they are drawn (renderer default: spheres)
 
   // ---- cell types (one or more; each cell carries a type index)
+  // REQUIRED per type: `key`, `label`, `colors`, `shape`, `radius`. Everything else below is
+  // optional, with the default named beside it.
   cellTypes: [
     { key: 'fibroblast', label: 'Fibroblast → myofibroblast',
       colors: ['#4ea3ff', '#ff7a3d'],     // colour lerped by the primary state a
       shape: { by: 'a', aspectMin: 1.0, aspectMax: 2.5 },  // ellipsoid aspect along polarity
-      radius: 0.03, motile: true,         // motile: false → the cell never moves (v0.4, §2.5)
+      radius: 0.03, motile: true,         // motile (optional, DEFAULT true): false → the cell never
+                                          // moves (v0.4, §2.5); a non-boolean is a validation error
+      // fraction: 0.7,                   // this type's share of the total cell count (default: equal
+                                          // shares among the types that declare no `count`)
       // rCell: 0.03,                     // v0.4: this type's repulsion radius (engine.rCell by default)
       // count: 20,                       // v0.4: seed exactly 20 of this type (instead of `fraction`)
       init: { a: 0.05, b: 0, c: 0 },      // starting values of the three per-cell scalars (default 0)
@@ -188,11 +207,16 @@ export const TISSUE_FIBROUS = {
   //      marks the dial used for passive fiber alignment along z and the strain term.
   dials: [
     { key: 'Gext', label: 'Growth-factor bath', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2',
-      metaphor: 'humidity', biology: '…', watch: '…' },
-    { key: 'strain', label: 'Mechanical load', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2', role: 'load', metaphor: 'pressure', biology: '…', watch: '…' },
-    { key: 'protease', label: 'Protease activity', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2', metaphor: 'temperature', biology: '…', watch: '…' },
-    { key: 'nCells', label: 'Cell number', min: 40, max: 400, step: 10, default: 160, format: 'cells', role: 'cellCount', metaphor: 'droplet nuclei', biology: '…', watch: '…' },
+      metaphor: 'Humidity: how much vapor is available to condense.', biology: '…', watch: '…' },
+    { key: 'strain', label: 'Mechanical load', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2', role: 'load', metaphor: 'Pressure: a steady push that shapes the cloud.', biology: '…', watch: '…' },
+    { key: 'protease', label: 'Protease activity', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2', metaphor: 'Temperature: how fast everything is torn apart again.', biology: '…', watch: '…' },
+    { key: 'nCells', label: 'Cell number', min: 40, max: 400, step: 10, default: 160, format: 'cells', role: 'cellCount', metaphor: 'Condensation nuclei: droplets need something to form on.', biology: '…', watch: '…' },
   ],
+  // `metaphor` has a grammar: 'Tag: one sentence.' The text BEFORE the first colon becomes the small
+  // (lower-cased, decorative) tag beside the dial label, and the rest becomes the "Like <tag>: <rest>"
+  // note inside the dial's "Metaphor & what to watch" disclosure. With no colon there is a tag and NO
+  // note — which is why all three shipped definitions use the colon form. `biology` and `watch` are
+  // the other two lines of that disclosure.
   // format: 'fixed2' | 'percent' | 'cells' | 'int' | 'onoff' (0/1 toggle shown as Off/On) | (v) => string
   // `percent` means the value IS a fraction of something (multiplied by 100 and given a % sign),
   // so a dimensionless 0–1 load knob is 'fixed2': "0.60", not "60 %" of an unnamed quantity.
@@ -201,7 +225,14 @@ export const TISSUE_FIBROUS = {
   scenarios: [
     { key: 'maturation', title: 'Scaffold to tissue', goal: '…', steps: ['…','…','…'], question: '…', expect: '…',
       dials: { Gext: 0.5, strain: 0.6, protease: 0.4, nCells: 160 },
-      init: { species: { new: 0.15, mat: 0 }, jitter: 0.2 },        // uniform ± jitter·50 %
+      init: { species: { new: 0.15, mat: 0 }, jitter: 0.2,          // uniform ± jitter·50 %
+              fields: { g: 0.2 } },                                 // OPTIONAL starting field values:
+      //   without `init.fields`, a field with a `bath` dial starts at that dial's value and every
+      //   other field starts at 0; an entry here overrides that for one field (unknown key = error)
+      events: [                                                     // OPTIONAL scripted protocol
+        { at: 20, dials: { Gext: 0.1 } },                           //   day 20: turn the bath down
+        { at: 30, injure: { center: [0.5, 0.5, 0.5], radius: 0.25 } },  // day 30: wound it
+      ],
       checks: [                                                        // machine-checkable expectations
         { at: 60, stat: 'species.total', op: 'gt', value: 0.6 },
         { at: 60, stat: 'fa', op: 'gt', value: 0.45 },
@@ -215,12 +246,42 @@ export const TISSUE_FIBROUS = {
       checks: [{ at: 60, stat: 'species.total', op: 'lt', value: 0.6 }, { at: 60, stat: 'cells.a', op: 'lt', value: 0.3 }] },
     …
   ],
+  // `events` is the scenario's SCRIPT — a protocol the tissue teaches, not a suggestion the reader
+  // has to reconstruct from the `steps` prose. Each entry is
+  //   { at: <day ≥ 0>, dials: { <dialKey>: value, … } }        change dials on day `at`
+  //   { at: <day ≥ 0>, injure: true | { center?: [x, y, z], radius?: number } }
+  // and may carry both. `injure` without a `tissue.injury` block is a validation error; an unknown
+  // dial key is too. `injure: true` (or `{}`) wounds at a random spot with the injury's own radius.
+  // WHEN they fire:
+  //   TissueEngine.checkScenario()  as soon as the clock reaches day `at` (it samples every 0.5 d,
+  //                                 so an `at` between two samples fires at the next one), BEFORE
+  //                                 the checks of that moment are read; the run is always long
+  //                                 enough to reach the last event, even past the last check
+  //   tools/run_headless.mjs        at the CSV boundary that reaches `at` (`--events false` skips
+  //                                 them all), and each firing is recorded in the trajectory's
+  //                                 `meta.events`
+  //   tools/make_golden.mjs         after stepping to the day that equals `at` — so use whole days
+  //                                 in a scenario you intend to record a golden for
+  //   the app                       ONLY with "Auto-apply scripted events" on. The toggle sits under
+  //                                 the scenario card, is OFF by default, is remembered for the
+  //                                 browser session (`sessionStorage['tw.autoEvents']`), and the card
+  //                                 lists the events either way — off, they read as instructions
+  //                                 ("Reference run … here you do it by hand"); on, the app splits
+  //                                 its step block at each event day so a fast run still fires them
+  //                                 in order, marks the time axis and announces what it did.
+  // So: write `events` when the protocol IS the teaching (a bath drop at day 20, a wound at day 30),
+  // and write the same instruction into `steps` so a student who never finds the toggle still does
+  // it. `init.from.events: true` replays the SOURCE scenario's events during a pre-run.
   // stat paths: species.<key> | species.<key>.fraction | species.total (INCLUDES scaffold species) |
-  //             species.tissueTotal (excludes them) | scaffold (their sum) | fiber.total |
+  //             species.tissueTotal (excludes them) | scaffold (their sum) |
+  //             fiber.total | species.fiberTotal (the same number under both names) |
   //             fa | globalFA | fz | logE | E | cells.a | cells.b | cells.c | cells.n | t |
   //             cells.byType.<key>[.n|.a|.b|.c] | fields.<key> | deposition | degradation |
   //             ratio (dep/deg) | scaffoldFlux | cumDeposition | cumDegradation (integrals of
   //             deposition / degradation since reset)
+  // `fz` is Tzz/trace of the tissue-MEAN tensor: 1/3 when the tissue is isotropic and 1 when
+  // everything points along the load axis z. It is NOT the mean of the per-cell `ctx.fz` of §2.1,
+  // which is |f_z| of that voxel's local principal axis (different scale, different floor).
   // EVERY per-voxel stat is a mean over ALL N³ voxels, empty ones included — `fields.m` is the
   // mean protease over the whole cube, not over the voxels that hold a cell, so a source of
   // s/day in n of N³ voxels against a decay k settles near s·n/(k·N³), not s/k (§3).
@@ -250,7 +311,11 @@ export const TISSUE_FIBROUS = {
   //   { at: [a, b], agg: 'max', stat: X, rel: { stat: X, at: 0, op: 'lt' } }     // reference BEFORE the range
   //   { at: [a, b], agg: 'max', stat: X, rel: { stat: X, op: 'lt', factor: 1.1 } }  // never rises by 10 %
 
-  // ---- readouts: which charts the panel shows (in order). type: 'stack' | 'lines' | 'log' | 'flux'
+  // ---- readouts: which charts the panel shows, in THIS order — except the `type: 'flux'` gauge,
+  //      which the app always hoists to the top of the panel (it is the readout the scenarios point
+  //      at first), so declaring it last, as both shipped tissues do, still draws it first.
+  //      type: 'stack' | 'lines' | 'log' | 'flux'. `key` is required by validate() but is read by
+  //      nothing — the app keys its series off `series[].stat` and its table rows off `label`.
   readouts: [
     { key: 'density', label: 'Matrix density', unit: 'relative (1 ≈ dense tissue)', meaning: '…', type: 'stack',
       series: [{ stat: 'species.new', label: 'new matrix', color: '#3f97dc' }, { stat: 'species.mat', label: 'mature collagen', color: '#c4822a' }] },
@@ -262,9 +327,14 @@ export const TISSUE_FIBROUS = {
     { key: 'stiff', label: 'Stiffness', unit: 'kPa (log scale)', meaning: '…', type: 'log', series: [{ stat: 'logE', label: 'stiffness', color: '#8fb8d8' }], domain: [-1, 2.5] },
     { key: 'flux', label: 'Matrix flux', unit: 'density per day', meaning: '…', type: 'flux' },
   ],
-  // The panel prints the READOUT's `unit` and `meaning` under its chart. A series may carry its
-  // own `unit` / `meaning` as documentation (fibrous does), but nothing renders them today — put
-  // anything the reader must see in the readout's `meaning` or in the series `label`.
+  // The panel prints the READOUT's `unit` and `meaning` under its chart. A SERIES' own `unit` is
+  // used for that series' row in the values table ("Table" under the readouts), falling back to the
+  // readout's — so a per-series unit is worth setting when the rows of one chart differ. A series'
+  // `meaning` renders nowhere today; put anything the reader must see in the readout's `meaning` or
+  // in the series `label`.
+  // `domain: [lo, hi]` (per readout) sets the y axis; for `type: 'log'` it is in log10 kPa. Default
+  // [-1, 2.5] for a log readout and [0, 1] for every other type. The chart WIDENS the axis rather
+  // than clipping when the data leaves the domain, so a wrong domain is cosmetic. Not validated.
   // A chart that draws two different measures on one axis must say which is which in those
   // labels: `globalFA` (the anisotropy of the SUMMED tensor — does the whole cube pull one way)
   // and `fa` (the mean of the per-voxel anisotropies — are the individual patches ordered) are
@@ -291,15 +361,22 @@ export const TISSUE_FIBROUS = {
     gauge: { left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation', scaffold: 'scaffold dissolving' },
     vocabulary: { matrix: 'collagen', cellsActive: 'activated cells are pumping out collagen', cellsQuiet: 'the cells are quiet' },
   },
-  // `legend` is drawn key by key IN ITS OWN ORDER, and only the keys that are there: `fibers`,
-  // `cells`, `scaffold`, `gel`, `load` and one line per key of `fields`. Nothing has to cover
-  // everything — a tissue with no scaffold species simply omits `scaffold`, and a field with no
-  // line under `fields` gets no sentence (the colour swatch above it is generated either way).
-  // `gauge` (v0.4) renames the two sides of the flux gauge, the ratio caption (`caption` is
-  // accepted as an alias) and the third bar; anything omitted keeps the weather wording. `ratio`
-  // and `scaffold` reach the text VALUE beside the readout title as well as the canvas (the app's
-  // `gaugeValueText()` delegates to `FluxGauge.describe()`), so they are what a screen reader
-  // hears, not just what the bars are captioned.
+  // `legend` is drawn key by key IN ITS OWN ORDER: every string value, plus every string inside a
+  // nested object (that is how `fields` produces one line per field). The key names above are the
+  // conventional ones, not a fixed set — an unrecognised key such as `wound: '…'` is rendered too.
+  // The one key the app treats specially is `load`, which is SKIPPED when the tissue has no
+  // `role: 'load'` dial (there are no arrows to explain). Nothing has to cover everything — a
+  // tissue with no scaffold species simply omits `scaffold`, and a field with no line under
+  // `fields` gets no sentence (the colour swatch above it is generated either way).
+  // `gauge` (v0.4) renames the two sides of the flux gauge, the ratio caption (`ratio` is the name;
+  // `caption` is an accepted alias and `ratio` wins) and the third bar; anything omitted keeps the
+  // weather wording. `ratio` and `scaffold` reach the text VALUE beside the readout title as well as
+  // the canvas (the app's `gaugeValueText()` delegates to `FluxGauge.describe()`), so they are what a
+  // screen reader hears, not just what the bars are captioned.
+  // The third bar can be named twice: `gauge.scaffold` OVERRIDES `vocabulary.scaffoldNoun` on the
+  // gauge (and in the value beside its title), while the values-TABLE row is always
+  // `vocabulary.scaffoldNoun`. Setting only `gauge.scaffold` therefore leaves the two disagreeing:
+  // set `scaffoldNoun` (which both read), and `gauge.scaffold` only if the bar needs other words.
   // `vocabulary` fills the equilibrium sentence (src/copy.js). Only `matrix`, `cellsActive` and
   // `cellsQuiet` are required; the rest have defaults:
   //   cellsMid / cellStateNoun            the halfway clause, and the state's noun ('activation')
@@ -328,9 +405,19 @@ export const TISSUE_FIBROUS = {
             inflammation: { sources: { g: 4, m: 1 }, tau: 5 },
             flash: 'Wound inflicted. Watch the hole refill.' },   // OPTIONAL (v0.4) app announcement
 
-  // ---- engine-level numerics this tissue wants (all optional; engine defaults shown)
+  // ---- engine-level numerics this tissue wants (all optional; engine defaults shown).
+  //      This is the COMPLETE list (ENGINE_DEFAULTS): a key that is not one of these is a hard
+  //      validation error, so the list is the allow-list as well as the reference.
   engine: { N: 12, dt: 0.02, rhoMax: 2, kLoadFib: 0.06, loadExp: 2, fEvery: 4, rCell: 0.03, kRep: 0.5,
-            trace: 'fiber',    // 'fiber': T trace = Σ fiber species; scaled on degradation
+            L: 1,              // cube side in engine units (every D is in L²/day; domainMicrons says
+                               // what it is in microns, and changing L rescales nothing else for you)
+            K: 3,              // fiber instances drawn per voxel — renderer and export meta only
+            nCellsMax: 400,    // minimum capacity of the cell arrays (the real capacity is the larger
+                               // of this and the role:'cellCount' dial's max)
+            eps: 1e-6,         // a voxel whose fiber total is ≤ eps has its tensor and fiber species
+                               // zeroed (the guard against dividing by a vanished trace)
+            trace: 'fiber',    // 'fiber': T trace = Σ fiber species; scaled on degradation.
+                               // It is the ONLY accepted value — anything else is a validation error
             loadMode: 'tension', // v0.4: 'tension' (T relaxes ONTO the load axis z) or
                                //       'compression' (T relaxes into the plane ⊥ to z)
             vox: 1 },          // number of per-voxel cell accumulators out.vox[0..vox−1] (1..4)
@@ -441,8 +528,11 @@ Outputs:
 ```
 ctx.out.dRho[s]     net rate of change of species s EXCLUDING deposition (conversion, degradation,
                     hydrolysis, loss to the medium). Negative = loss. Engine integrates and clamps ≥ 0.
-ctx.out.loss        total matrix LOSS rate this voxel (density/day, ≥ 0) — feeds the flux gauge and
-                    field release
+ctx.out.loss        total matrix LOSS rate this voxel (density/day, ≥ 0) — this is the ONLY thing it
+                    does: it is summed into stats().degradation, the evaporating side of the flux
+                    gauge. The engine does not derive dRho from it and does not release any field
+                    from it; a loss that should release something writes that itself into
+                    out.fieldSrc (below), the way fibrous releases stored growth factor.
 ctx.out.scaffoldLoss  dissolution rate of a 'scaffold' species (density/day, ≥ 0). It is neither
                     deposition nor degradation of TISSUE, so it is reported separately as
                     stats().scaffoldFlux — the third flux bar — and left out of `loss`.
@@ -455,6 +545,11 @@ ctx.out.mobility    0..1 (default 1): how freely species transport (§2.4) moves
                     declares `D` or `sink`: a diffusive face uses the mean of its two voxels, and
                     (v0.4) a `sink` uses the face voxel's own value, so a sealed mesh (mobility 0)
                     also stops the leak to the medium.
+ctx.out.fieldSrc[f] field source from the VOXEL itself (field/day), added to this voxel's source for
+                    field f alongside everything the cells in it wrote through their own
+                    out.fieldSrc. Negative is a sink (the field is clamped ≥ 0 afterwards). This is
+                    how matrix-bound signal is released as the matrix is cut:
+                      out.fieldSrc[iG] = kGrel * dv;      // src/tissues/fibrous.js
 ctx.out.E           stiffness (kPa) of this voxel now
 ```
 Fiber species and T: when the total fiber density changes through `dRho`, the
@@ -465,8 +560,11 @@ unchanged.
 
 ### 2.3 `stiffness(ctx)` (optional)
 
-If present, called after reset/injure to fill E without a full step (same
-inputs as `voxel`). Otherwise the engine calls `voxel` with dt = 0.
+If present, called after reset/injure to fill E without a full step. Its inputs are the same as
+`voxel`'s with three exceptions: `ctx.dt` is 0, `ctx.aSum` is 0 and every `ctx.vox[k]` is 0 (no
+cell pass has run yet in that call; `ctx.nCellsHere` IS the real count). Only `out.E` is read —
+every other output of that call is discarded. Without the hook the engine calls `voxel` itself
+under exactly those conditions, which is why a `voxel` hook must not assume a positive `dt`.
 
 ### 2.4 Engine-owned mechanics (parameters in `engine`)
 
@@ -586,8 +684,9 @@ steady solve, `'quasiSteady'` asks for it wherever it is well posed. A species i
 quasi-steadily — transport moves mass rather than relaxing to a profile — and asking for it is a
 validation error. Below the stability limit `'subcycled'` runs as ONE sub-step, which is the same
 arithmetic as `'explicit'`, and is reported as `'subcycled'` because that is what the definition
-asked for. `engine.fieldModes` / `engine.speciesModes` report `{ key, D, lam, mode, nSub }` for
-every field and species; `TissueEngine.validate()` prints a `console.warn` only when the engine is
+asked for. `engine.fieldModes` / `engine.speciesModes` report
+`{ key, D, lam, mode, nSub, capped }` (fields also `steady`) for every field and species (§3);
+`TissueEngine.validate()` prints a `console.warn` only when the engine is
 doing something OTHER than what was asked (a clamped `'explicit'`, a sub-cycle that hit the cap, a
 `'quasiSteady'` that fell back) — a correctly integrated fast field is not a warning, and its note
 is still in `TissueEngine.warnings()` (§7.1).
@@ -637,6 +736,8 @@ import { TISSUES, TISSUE_DEFAULT } from './tissues/index.js';
 
 const M = new TissueEngine(TISSUES.fibrous, { seed: 7, overrides: { N: 12 } });
 M.reset('maturation');                  // scenario key (first scenario if omitted)
+M.reset('maturation', { dials, init, seed })   // shallow overrides of the scenario's own dials / init
+                                        // (a headless run config is exactly { scenario, dials, init })
 M.setDials({ strain: 0 });
 M.step(50);
 M.injure();                             // if tissue.injury exists
@@ -652,17 +753,23 @@ M.speciesIndex, M.fieldIndex, M.dialIndex
 M.scratch                               // a per-engine object makeRules() may cache arrays on
 M.nVox                                  // number of per-voxel accumulators (engine.vox)
 M.revision                              // v0.4: monotonic counter, bumped by step/reset/injure/setDials
-M.fieldModes, M.speciesModes            // v0.4: [{ key, D, lam, mode, nSub }] — what §2.6 chose
+M.fieldModes, M.speciesModes            // v0.4: what §2.6 chose. Field entries are
+                                        // { key, D, lam, mode, nSub, capped, steady }, species entries
+                                        // the same without `steady` (a species is never solved steadily);
+                                        // `capped` = the diffusion number was clamped or the sub-step
+                                        // count hit the cap, `steady` = a steady solve is well posed
 TissueEngine.notes(tissue, { overrides })     // v0.4: [{ text, actionable }] — validate() prints the actionable ones (§7.1)
 TissueEngine.warnings(tissue, { overrides })  // v0.4: the same notes as plain strings
-TissueEngine.checkScenario(tissue, scenarioKey, { seed })  // runs the scenario, evaluates `checks`, returns [{check, value, ref, pass}]
+TissueEngine.checkScenario(tissue, scenarioKey, { seed, engine })  // runs the scenario (firing its
+                                        // `events`), evaluates `checks`, returns [{check, value, ref, pass}];
+                                        // pass an `engine` of the SAME tissue to reuse its init.from cache
 TissueEngine.cellStates(cellType)       // [{ key, label, range }] merged from states / stateLabels / cRange
 TissueEngine.statFrom(stats, path)      // one stat out of an existing stats() object
 ```
 
 `state`:
 ```
-N, L, h, time, dt, revision, dials{}, nCells, wound, tissue (key)
+N, L, h, time, dt, revision, dials{}, nCells, wound, tissue (key), scenario (key)
 species: Float32Array[nSpecies] (each N³)       // by species index; state.speciesKeys
 Txx..Tyz, fiberTotal (N³), fa, fx, fy, fz, E, inflam
 fields: Float32Array[nFields] (each N³)          // by field index; state.fieldKeys
@@ -698,10 +805,13 @@ when it is `undefined` (an older engine, or a hand-built state object).
 **Resumable pre-runs** (v0.4). `reset()` on a scenario with `init.from` runs the source scenario
 synchronously — 3000 steps, ~0.8 s for fibrous — the first time. `warmFrom(from, maxSteps)`
 advances that same pre-run by at most `maxSteps` steps and caches it when it finishes, so an app
-can spread the cost over animation frames: it returns `{ done, scenario, steps, remaining }` and
-is cheap to call again once `done`. `warmScenarios(maxSteps)` does it for every scenario of the
-tissue, one slice per call, and returns `{ done: true, scenario: null, … }` when every pre-run is
-cached. Slicing is bit-identical to the synchronous run (events fire on the same day boundaries),
+can spread the cost over animation frames: it returns `{ done, key, scenario, steps, remaining }`
+(`key` is the cache key, `scenario` the SOURCE scenario being pre-run) and is cheap to call again
+once `done`. `warmScenarios(maxSteps)` does it for every scenario of the tissue, one slice per
+call, and returns `{ done, scenario, from, steps, remaining }` — here `scenario` is the scenario
+that is WAITING for the pre-run and `from` the one being run for it — or
+`{ done: true, scenario: null, … }` when every pre-run is cached. Slicing is bit-identical to the
+synchronous run (events fire on the same day boundaries),
 the warmed engine's own state is untouched, and the cache key includes the seed — warm with the
 seed the reset will use. The pre-run engine is built WITHOUT resetting it to `scenarios[0]`
 first, so the first slice costs one slice even when `scenarios[0]` has an `init.from` of its own.
@@ -726,7 +836,10 @@ draws one state; `renderer.dispose()` releases the GPU resources.
 
 ```js
 renderer.update(state, layers)   // layers { fibers, cells, scaffold, gel, wound, fields: { g: true, … } }
-                                 // fibers/cells/scaffold/gel/wound default on, fields default off
+                                 // fibers/cells/scaffold/gel/wound default on, fields default off.
+                                 // With NO `fields` object the renderer also honours a top-level
+                                 // per-field flag (`layers.g`), which is how an app that keeps one
+                                 // flat checkbox map per layer works without reshaping it.
 renderer.render()                // one frame (controls damping + auto-rotate + draw)
 renderer.resize()                // fit the canvas to its parent, keep the cube framed
 renderer.setAutoRotate(on)       // fires opts.onAutoRotate(on) when the value CHANGES
@@ -774,6 +887,8 @@ TissueRenderer.tissueFromState(state)   // fallback definition when no tissue wa
 
 ```
 { "meta": { "format": 2, "tissue": "fibrous", "N":12, "L":1, "K":3, "dtDays":0.02, "scenario": "…",
+            "tissueVersion": "0.2.0", "engine": "0.3.0", "seed": 7,   // definition version, ENGINE_VERSION,
+                                                                     // and the RNG seed of the run
             "dials": {...}, "loadDial": "strain", "cellCountDial": "nCells",
             "loadRange": [0, 1],                          // v0.4: [min, max] of the load dial
             "tissueName": "…", "scenarioTitle": "…",      // v0.4: display labels
@@ -794,15 +909,23 @@ TissueRenderer.tissueFromState(state)   // fallback definition when no tissue wa
 format 2 (species-coloured fibers, gel spheres, scaffold struts) and still
 accepts format 1.
 
-`loadDial` / `cellCountDial` name the dials carrying those roles (null when the
-tissue has none), so a reader knows which dial to draw load arrows for instead of
+`tissueVersion` / `engine` are `tissue.version` and `ENGINE_VERSION`, and `seed` is the RNG seed the
+run used — the three keys that make an export reproducible: same tissue version, same engine, same
+seed, same dials → the same frames. `loadDial` / `cellCountDial` name the dials carrying those roles
+(null when the tissue has none), so a reader knows which dial to draw load arrows for instead of
 guessing at `strain`, and `loadRange` (v0.4) is that dial's `[min, max]`, so a reader can
 normalise it — a 0–0.2 compression dial should draw the same arrow range as a 0–1 stretch dial.
 `fields` (v0.4) mirrors `species` for the per-frame field grids, which are rounded to four
 decimals, and carries a field's `pointScale` / `style` render hints (§1) when the definition
 declares them — only then, so an export is byte-identical for a definition that sets neither, and
-a reader treats an absent hint as the renderer default. A species' `render` hints do NOT travel
-yet: a tissue that sets them looks right in the browser and is drawn at the defaults offline.
+a reader treats an absent hint as the renderer default.
+
+A FIBER species' `render.minDensity` and `render.radiusScale` DO travel: the renderer folds them
+into the fiber laws it resolves, so they arrive inside `meta.render.fiber` (as `minDensity`, and as
+a `radiusScale` already multiplied into the renderer's own factor), and a reader that honours
+`render` reproduces them rod for rod. Nothing else travels yet — a fiber's `render.opacity` and
+every gel / scaffold hint are honoured in the browser and drawn at the defaults offline.
+
 A reader must tolerate a frame without the field grids (older files, and `snapshot({ fields:
 false })` — a 120-frame export ring buffer is 26-38 % smaller without them) and a meta without
 `fields` / `loadRange` / `tissueName` / `scenarioTitle`. A cell type with a state-dependent radius exports the
@@ -836,10 +959,11 @@ A reader must ignore meta keys it does not know: the block grows.
   definition. Injure button shown only when `tissue.injury` exists.
 - Ghost traces: on Reset, the previous run's series stay as dashed reference
   lines until the next Reset (plots.js `setReference()`).
-- Accessibility: every control labelled, and exactly ONE announcing region — the visually
+- Accessibility: every control labelled, and ONE POLITE announcing region — the visually
   hidden `aria-live="polite"` `#status` — for state changes, flash messages and the chart
-  crosshair. The visible `#equilibrium` sentence carries no live role (it is rewritten too
-  often), and every `<output>` (the dial values and the speed readout) carries an explicit
+  crosshair, plus ONE assertive `role="alert"` region (`#notice`) used only for a fatal notice
+  such as WebGL being unavailable. The visible `#equilibrium` sentence carries no live role
+  (it is rewritten too often), and every `<output>` (the dial values and the speed readout) carries an explicit
   `aria-live="off"`, because `<output>` maps to `role="status"` and would otherwise announce
   every frame of a slider drag. Focus visible; `prefers-reduced-motion` disables auto-rotate;
   a "Table" toggle under the readouts renders the last values as an HTML table.
@@ -863,9 +987,14 @@ unregistered starter `src/tissues/_template.js`):
    through every scenario, with dial extremes and an injury
 4. every scenario's `checks` (headless run to the latest `at`, events fired, ranges sampled every 0.5 d)
 5. performance (< 1 ms/step at N = 12, 160 cells, node)
+6. the as-built parameter block: every registered tissue needs `docs/tissues/<key>.md` (or an entry
+   in `PARAMS_DOCS`) whose generated block matches its `engine` / `params` — see §8 step 5
+7. copy that agrees with the definition (tests/fidelity.test.mjs): among others, a tissue that
+   declares `domainMicrons` must state that same size in its copy, in the words the legend prints
 Plus the fibrous tissue's golden regression: `tests/golden/fibrous.json`
-(recorded from v0.1 `model.js` with seed 7) must be matched within 3 % on
-meanRho, meanRhoMat, meanFA, meanAlpha at every recorded day.
+(recorded from v0.1 `model.js` with seed 7) must be matched at every recorded day on
+meanRho, meanRhoMat, meanFA, meanAlpha, within 3 % relative or 0.01 absolute, whichever is larger
+(the absolute floor is what keeps a stat that passes through zero from failing on noise).
 Plus a feature suite on throw-away fixture tissues (species `D` conserves mass and stays
 bounded, `sink` drains only the +z layer and is gated by `out.mobility`, a fiber species carries
 T unless `carryTensor: false`, `out.mobility` hinders transport, `polS` / `alignS`, `out.vox[k]`,
@@ -874,9 +1003,13 @@ the scaffold flux — including its cap — and the cumulative stats, aggregated
 against analytic solutions, `motile: false`, `cellTypes[].count` / `rCell`, `state.revision`,
 `warmFrom` slices and `snapshot({ fields: false })`).
 Plus the engine golden of every tissue whose numbers are meant to be stable:
-`tests/golden/<tissue>.engine.json`, compared at 1e-5 relative on every recorded stat path
-(fibrous and cartilage today — `node tools/make_golden.mjs --tissue <key> --out
-tests/golden/<key>.engine.json` records one, and re-recording it is a deliberate, stated act).
+`tests/golden/<tissue>.engine.json`, compared on every recorded stat path at 1e-5 relative or 1e-7
+absolute, whichever is larger (fibrous and cartilage today). Recording one is the whole recipe —
+`node tools/make_golden.mjs --tissue <key> --out tests/golden/<key>.engine.json`, or
+`npm run golden` for fibrous — and NOTHING else: tests/engine.test.mjs discovers every
+`tests/golden/*.engine.json` and registers a suite for it, so no test file is edited. A golden
+whose tissue is no longer registered fails loudly rather than being skipped. Re-recording an
+existing golden is a deliberate act and belongs in the commit message.
 If a tissue uses an optional engine feature, exercise it in a scenario `check`: the conformance
 suite has no way to know that `D` should have spread something unless a check says so.
 
@@ -910,8 +1043,11 @@ them as data, and a console line on a healthy tissue is how a reader learns to i
 ## 8. Adding a tissue in seven steps
 
 1. `node tools/new_tissue.mjs mytissue "My tissue name"` (`npm run new-tissue -- mytissue "My
-   tissue name"` is the same tool) → copies the template to `src/tissues/mytissue.js` and
-   registers it in `src/tissues/index.js`.
+   tissue name"` is the same tool) → copies the template to `src/tissues/mytissue.js`, registers it
+   in `src/tissues/index.js`, and writes `docs/tissues/mytissue.md` with the as-built block of
+   step 5 already generated. `--dry-run` prints what it would do and writes nothing. The scaffold
+   passes the whole suite as it comes out, so run `node --test tests/*.test.mjs` once before you
+   change anything: a failure then is the environment, not your biology.
    Pick a key no test fixture already uses: `tests/tools.test.mjs` scaffolds a throw-away tissue
    into a copy of `src/`, so a real `src/tissues/<that key>.js` makes the scaffolder refuse and
    the tools suite fail before you have written a line of biology. The reserved keys are
@@ -931,15 +1067,16 @@ them as data, and a console line on a healthy tissue is how a reader learns to i
    mytissue` to see curves; the CSV carries `cumDeposition`, `cumDegradation`, `scaffoldFlux`
    and `species.tissueTotal` next to the per-species columns. (Every flag of either tool is
    documented in the header comment at the top of the file, which is the only place they are.)
-5. Write the as-built parameter block the test suite requires: create
-   `docs/tissues/mytissue.md` containing a section wrapped in
-   `<!-- params:mytissue -->` … `<!-- /params:mytissue -->`, then run
-   `node tools/check_params_doc.mjs --write` to fill the block from the definition.
+5. Write the prose of `docs/tissues/mytissue.md` — what the tissue is, where its numbers come
+   from — around the generated block the scaffolder already put there between
+   `<!-- params:mytissue -->` and `<!-- /params:mytissue -->`. After changing any `engine` or
+   `params` value, re-run `node tools/check_params_doc.mjs --write`; the suite compares every
+   number in that block with the code, so a parameter change without the rewrite fails.
    The checker resolves a tissue's document as `docs/tissues/<key>.md` by those markers, so
    NOTHING in `tools/` has to be edited (`PARAMS_DOCS` is only the exception list, for the two
    shipped tissues whose blocks live in `docs/MODEL.md` and `docs/tissues/cartilage-hydrogel.md`).
-   Without a document `npm test` fails with "no as-built block for tissue 'mytissue'", and the
-   message names the file and the two markers to write.
+   Writing the document by hand works exactly as well: without one, `npm test` fails with "no
+   as-built block for tissue 'mytissue'", and the message names the file and the two markers.
 6. Tune until `node --test tests/*.test.mjs` passes. Prefer a range check
    (`at: [from, to]` + `agg`) over a point check whenever the claim is really "it never
    drops below" or "it averages"; use `agg: 'cross'` when the claim is about HOW LONG something

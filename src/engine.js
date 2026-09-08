@@ -144,8 +144,10 @@
  *  engine.loadMode   'tension' (default: T relaxes onto the load axis z, the v0.3 behaviour) or
  *                    'compression' (T relaxes into the plane ⊥ to z; a cell's out.loadAlign
  *                    likewise pulls its polarity into that plane).  Trace-preserving either way.
- *  cellType.motile   `false` is honoured: the cell keeps its polarity and position (no guidance,
- *                    load alignment, noise draws or migration) and repulsion moves only the
+ *  cellType.motile   OPTIONAL boolean, default TRUE (an omitted key seeds a motile cell, which is
+ *                    what every pre-v0.4 definition meant).  `false` is honoured: the cell keeps
+ *                    its polarity and position (no guidance, load alignment, noise draws or
+ *                    migration) and repulsion moves only the
  *                    motile partner of a pair — which then takes the WHOLE overlap correction
  *                    (the ½ split is between the partners that can move), so it acts as an
  *                    obstacle rather than a soft partner.  Its hooks still run.
@@ -2000,7 +2002,9 @@ export class TissueEngine {
           err.push(`cellType '${c.key}' radius object must be { by: 'a'|'b', min > 0, max > 0 }`);
         }
       } else err.push(`cellType '${c.key}' radius must be a number > 0 or { by, min, max }`);
-      if (typeof c.motile !== 'boolean') err.push(`cellType '${c.key}' motile must be boolean`);
+      // OPTIONAL: an omitted `motile` means true (the engine reads `c.motile === false`), so a
+      // definition written before v0.4 stays valid and keeps its motile cells.
+      if (c.motile !== undefined && typeof c.motile !== 'boolean') err.push(`cellType '${c.key}' motile must be a boolean (omit it for the default, true)`);
       if (c.fraction !== undefined && (!isNum(c.fraction) || c.fraction < 0)) err.push(`cellType '${c.key}' fraction must be ≥ 0`);
       if (c.count !== undefined) {
         if (!Number.isInteger(c.count) || c.count < 0) err.push(`cellType '${c.key}' count must be an integer ≥ 0`);

@@ -12,7 +12,7 @@
 // shared copy helpers.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { TissueEngine, ENGINE_DEFAULTS, ENGINE_VERSION, mulberry32, tmClamp, tmRoundArray } from '../src/engine.js';
 import { TISSUES, TISSUE_DEFAULT } from '../src/tissues/index.js';
 import { TISSUE_TEMPLATE } from '../src/tissues/_template.js';
@@ -158,7 +158,8 @@ for (const [regKey, t] of Object.entries(CONFORMANCE)) {
 //   golden/<tissue>.engine.json   recorded from this engine (tools/make_golden.mjs) — "still the same
 //                                 ARITHMETIC", 1e-5 relative / 1e-7 absolute on every recorded path.
 // The suite is tissue-agnostic: a format-2 golden names its own tissue and carries its own runs, so
-// recording one for a new tissue is `make_golden --tissue <key> --out …` plus one line below.
+// recording one for a new tissue is `make_golden --tissue <key> --out tests/golden/<key>.engine.json`
+// and NOTHING here — every `tests/golden/*.engine.json` is discovered and registered below.
 const goldenSuite = (file, label, tolOf) => describe(`golden regression: tests/golden/${file} (${label})`, () => {
   const golden = JSON.parse(readFileSync(new URL(`./golden/${file}`, import.meta.url), 'utf8'));
   // v0.1 stats names → stat paths; format-2 goldens already use stat paths
@@ -217,9 +218,15 @@ const goldenSuite = (file, label, tolOf) => describe(`golden regression: tests/g
     });
   }
 });
+// tests/golden/fibrous.json is the one hand-named file: it is the v0.1 model.js reference, not an
+// engine recording, and it is compared at the looser tolerance.
 goldenSuite('fibrous.json', 'v0.1 model.js, 3 %', (gv) => Math.max(0.01, 0.03 * Math.abs(gv)));
-goldenSuite('fibrous.engine.json', 'this engine, 1e-5', (gv) => Math.max(1e-7, 1e-5 * Math.abs(gv)));
-goldenSuite('cartilage.engine.json', 'this engine, 1e-5', (gv) => Math.max(1e-7, 1e-5 * Math.abs(gv)));
+// Every engine golden in tests/golden/ runs itself: `node tools/make_golden.mjs --tissue <key> --out
+// tests/golden/<key>.engine.json` is the whole recipe for adding one (docs/EXTENDING.md §7), and a
+// golden left behind for a tissue that is no longer registered fails loudly rather than silently.
+const engineGoldens = readdirSync(new URL('./golden/', import.meta.url)).filter((f) => f.endsWith('.engine.json')).sort();
+assert.ok(engineGoldens.length, 'tests/golden/ must carry at least one <tissue>.engine.json');
+for (const file of engineGoldens) goldenSuite(file, 'this engine, 1e-5', (gv) => Math.max(1e-7, 1e-5 * Math.abs(gv)));
 
 // ---------------------------------------------------------------- engine API (using fibrous)
 describe('engine API', () => {
@@ -1066,6 +1073,30 @@ describe('engine A4/A5/B1/E1/E5: load mode, cell types, revision, export', () =>
     assert.ok(compression < 1 / 3, `compression pushes it off z (fz ${compression})`);
     assert.ok(TissueEngine.validate(bench({ engine: { loadMode: 'shear' } })).some((e) => /loadMode/.test(e)));
     assert.deepEqual(TissueEngine.validate(bench({ engine: { loadMode: 'compression' } })), []);
+  });
+
+  test('cellTypes[].motile is optional and defaults to true (docs/EXTENDING.md §1)', () => {
+    const { motile, ...noMotile } = bench().cellTypes[0];       // the same type with the key dropped
+    assert.equal(motile, true, 'the fixture declares it, so dropping it is the interesting case');
+    const bare = bench({ cellTypes: [noMotile] });
+    assert.deepEqual(TissueEngine.validate(bare), [], 'an omitted `motile` is not an error — the upgrade table says to drop it');
+    assert.ok(TissueEngine.validate(bench({ cellTypes: [Object.assign({}, noMotile, { motile: 'yes' })] })).some((e) => /motile must be a boolean/.test(e)),
+      'but a non-boolean still is');
+    // and the cell that comes out moves, exactly as `motile: true` would
+    const rules = () => ({ cell(ctx) { ctx.out.speed = 0.5; }, voxel(ctx) { ctx.out.E = 1; } });
+    const walk = (types) => {
+      const M = new TissueEngine(bench({ cellTypes: types, makeRules: rules }), { seed: 3 });
+      M.reset('run', { dials: { nCells: 8 } });
+      const x0 = Float64Array.from(M.state.cx);
+      M.step(20);
+      const x1 = M.state.cx;
+      let moved = 0;
+      for (let i = 0; i < x0.length; i++) moved += Math.abs(x1[i] - x0[i]);
+      return moved;
+    };
+    assert.ok(walk([noMotile]) > 0, 'a cell type without the key is motile');
+    assert.equal(walk([noMotile]), walk([Object.assign({}, noMotile, { motile: true })]),
+      'and moves bit-for-bit as `motile: true` does');
   });
 
   test("cellTypes[].motile: false pins a cell in place, including under repulsion", () => {

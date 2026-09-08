@@ -24,7 +24,10 @@ export const TISSUE_TEMPLATE = {
   short: 'Cells replace a dissolving hydrogel with their own fibrous matrix',
   version: '0.1.0',
   domainMicrons: 300,                           // optional: how wide the cube really is. A positive
-                                                // number adds a "Cube edge ≈ 300 µm" row to the legend.
+                                                // number adds a "Cube edge ≈ 300 µm" row to the legend
+                                                // (≥ 1000 is shown in mm). Say the same number in the
+                                                // intro below: tests/fidelity.test.mjs R7 checks that a
+                                                // tissue that declares a scale also states it in words.
 
   // ---- matrix species: per-voxel scalar densities (0 .. ~1.5; 1 ≈ native-like content).
   //      kind 'fiber' species are oriented and share the tensor T; 'gel' is an isotropic
@@ -103,7 +106,9 @@ export const TISSUE_TEMPLATE = {
   // ---- dials. role 'cellCount' is handled by the engine (adds/removes cells); role 'load'
   //      marks the dial used for the passive fiber alignment along z (ctx.load in the hooks).
   //      format: 'fixed2' | 'percent' | 'cells' | 'int' | 'onoff' | (v) => string
-  //      metaphor / biology / watch are the three lines of the dial's hint.
+  //      metaphor / biology / watch are the three lines of the dial's hint. Write the metaphor as
+  //      'Tag: one sentence.' — the app puts the part before the first colon beside the dial label
+  //      and the rest in the dial's "Metaphor & what to watch" note (no colon: a tag and no note).
   dials: [
     { key: 'Gext', label: 'Growth-factor bath', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2',
       metaphor: 'Humidity: how much vapor is available to condense.',
@@ -199,16 +204,17 @@ export const TISSUE_TEMPLATE = {
     { key: 'flux', label: 'Matrix flux', unit: 'density per day',
       meaning: 'Deposition against loss right now (gel hydrolysis counts as loss).', type: 'flux' },
   ],
-  // A series may add `marker: 'circle'|'square'|'diamond'` and, in a `stack`, `pattern: 'hatch'`
-  // or `pattern: 'none'`, so a pair of series is told apart without relying on colour. Left out,
-  // the app cycles the markers and hatches the top band of a multi-band stack itself.
+  // A series may add `marker: 'circle'|'square'|'diamond'|'triangle'|'cross'` and, in a `stack`,
+  // `pattern: 'hatch'` or `pattern: 'none'`, so a pair of series is told apart without relying on
+  // colour. Left out, the app cycles all five markers and hatches the top band of a multi-band
+  // stack itself. A series may also carry its own `unit` (the values table prints it for that row).
 
   // ---- tissue-specific copy (the app generates the About panel and legend from it)
   copy: {
     intro: {
       tagline: 'A hydrogel dissolves while the cells inside it build their replacement.',
       paragraphs: [
-        'You are looking at a cube of hydrogel seeded with cells. The fading lattice is the gel; the amber rods are the fibrous matrix the cells lay down; the small bodies are the cells, blue when quiet and orange when activated.',
+        'You are looking at a cube of hydrogel about 300 µm across, seeded with cells. The fading lattice is the gel; the amber rods are the fibrous matrix the cells lay down; the small bodies are the cells, blue when quiet and orange when activated.',
         'Two of the three dials act through the cells (growth factor, cell number); the load also pulls on the fibers directly.',
       ],
     },
@@ -241,8 +247,10 @@ export const TISSUE_TEMPLATE = {
   // ---- injury: omitted → no Injure button. (See fibrous.js for the shape; an optional
   //      `flash: '…'` is the line the app announces when the wound is made.)
 
-  // ---- engine numerics this tissue wants (all optional; the defaults are listed in
-  //      docs/EXTENDING.md §1 and live in ENGINE_DEFAULTS in src/engine.js).
+  // ---- engine numerics this tissue wants (all optional). docs/EXTENDING.md §1 lists every
+  //      accepted key with its default — N, L, dt, K, rhoMax, kLoadFib, loadExp, fEvery, rCell,
+  //      kRep, trace, nCellsMax, eps, vox, loadMode — and anything outside that list is a hard
+  //      validation error, so §1 is the allow-list as well as the reference.
   //      `vox: 1..4` asks for extra per-voxel accumulators (out.vox[k] → ctx.vox[k]); 0 is aSum.
   //      `loadMode: 'compression'` flips the passive alignment: the tensor (and any cell that
   //      writes out.loadAlign) then relaxes into the plane PERPENDICULAR to the load axis

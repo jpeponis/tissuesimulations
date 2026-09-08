@@ -30,7 +30,7 @@
     "build": "node tools/build_single.mjs",
     "check-dist": "node tools/check_dist.mjs",
     "headless": "node tools/run_headless.mjs",
-    "golden": "node tools/make_golden.mjs",
+    "golden": "node tools/make_golden.mjs --tissue fibrous --out tests/golden/fibrous.engine.json",
     "screenshot": "node tools/screenshot_app.mjs",
     "serve": "python3 -m http.server 8000",
     "new-tissue": "node tools/new_tissue.mjs"
