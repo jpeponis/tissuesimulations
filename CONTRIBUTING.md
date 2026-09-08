@@ -39,10 +39,11 @@ npm run serve     # http://localhost:8000/  (ES modules do not load from file://
 | `node tools/build_single.mjs --vendor` | also writes `dist/tissue-weather.offline.html` with Three.js inlined — the copy for a room with no network. Git-ignored on purpose (a megabyte of vendored library); CI rebuilds it on every push and uploads it as the `offline-page` artifact |
 | `npm run check-dist` | rebuilds into a temp directory and fails if the committed `dist/` is stale |
 | `npm run headless` | `node tools/run_headless.mjs` — every scenario in Node → CSV + trajectory JSON under `scratch/<tissue>/` |
-| `node tools/make_golden.mjs --tissue <key> --out tests/golden/<key>.engine.json` | re-record an engine golden (read the section below first). `npm run golden` on its own refuses: its default target is `tests/golden/fibrous.json`, the v0.1 reference that is never regenerated |
+| `npm run golden` | re-record the fibrous engine golden. The script is exactly `node tools/make_golden.mjs --tissue fibrous --out tests/golden/fibrous.engine.json` — read the section below before running it. For any other tissue, write the command out with its own `--tissue` and `--out` |
 | `node tools/check_params_doc.mjs --write` | regenerate the `<!-- params:<tissue> -->` as-built blocks in the docs after changing a parameter (`npm test` fails while they disagree) |
-| `npm run new-tissue -- <key> "<Name>"` | scaffold and register a new tissue definition |
-| `npm run screenshot` | drive the real app in headless Chromium and save screenshots (`--dsf 2` with a halved `--width`/`--height` reproduces 200 % browser zoom) |
+| `npm run new-tissue -- <key> "<Name>"` | scaffold and register a new tissue definition, and write its `docs/tissues/<key>.md` with the as-built parameter block already filled in |
+| `npm run screenshot` | drive the real app in headless Chromium, probe interaction and accessibility, and save screenshots |
+| `node tools/screenshot_app.mjs --width 720 --height 450 --dsf 2` | the 200 % browser-zoom check: a 720×450 CSS viewport at `deviceScaleFactor` 2, i.e. a 1440×900 window zoomed to 200 %. The only configuration that exercises the docked legend and the reflowed HUD; the run reports `legend.docked: true` when it is working |
 | `npm run serve` | `python3 -m http.server 8000` from the repository root |
 
 Extra flags go after `--`, e.g. `npm run headless -- --tissue fibrous --days 40 --only maturation`
@@ -94,14 +95,14 @@ blank page. Style otherwise: 2-space indent, semicolons, single quotes, comments
 ## Adding or changing a tissue
 
 ```bash
-npm run new-tissue -- mytissue "My tissue"     # copies the starter, registers it
+npm run new-tissue -- mytissue "My tissue"     # starter + registry line + docs/tissues/mytissue.md
 $EDITOR src/tissues/mytissue.js
 node --test tests/engine.test.mjs               # conformance only: schema, determinism, your checks
 npm run headless -- --tissue mytissue           # curves, without a browser
 python3 tools/plot_scenarios.py --tissue mytissue
-$EDITOR docs/tissues/mytissue.md                # the two params: markers — see "the as-built block"
-node tools/check_params_doc.mjs --write
-npm test                                        # the whole suite, once the document exists
+$EDITOR docs/tissues/mytissue.md                # the prose around the generated block — see below
+node tools/check_params_doc.mjs --write         # refill the block after a parameter change
+npm test                                        # the whole suite
 npm run build && npm run check-dist             # then open index.html?tissue=mytissue
 ```
 
@@ -112,11 +113,15 @@ says the tissue evaporates without load, write the check that says so.
 
 **The as-built block is not optional.** `npm test` fails for a registered tissue that has no
 `<!-- params:<key> -->` … `<!-- /params:<key> -->` pair in a document, because a tissue whose
-numbers are nowhere written down cannot be reviewed. The document is `docs/tissues/<key>.md`
-(`docs/MODEL.md` for the fibrous tissue, by exception); put the two markers where the values
-belong, write the surrounding prose — the sources, the ranges, the reasoning — yourself, and let
-`node tools/check_params_doc.mjs --write` fill the block between them. Nothing in `tools/` has to
-be edited to add a tissue.
+numbers are nowhere written down cannot be reviewed. The scaffolder writes that document for you —
+`docs/tissues/<key>.md`, markers in place and the block already filled from the definition — so a
+freshly scaffolded tissue passes the suite from the first run. What it cannot write is the prose
+around the block: the sources, the ranges and the reasoning are yours, and so is re-running
+`node tools/check_params_doc.mjs --write` after a parameter change, which rewrites the block in
+place and leaves your prose alone. `check_params_doc.mjs` finds the block by its markers, so
+nothing in `tools/` has to be edited to add a tissue. (The two shipped tissues are the exception to
+the file name: the fibrous block lives in `docs/MODEL.md` and the cartilage one in
+`docs/tissues/cartilage-hydrogel.md`.)
 
 Two keys are **reserved for the test fixtures**: `demotissue` and `demo-tissue`. `tests/tools.test.mjs`
 scaffolds them inside a throw-away copy of this repository, and that copy carries the real
@@ -146,16 +151,25 @@ it does not know.
 ```bash
 npm run screenshot -- --tissue fibrous --scenario maturation --days 40 --out dist/shots
 node tools/screenshot_app.mjs --page dist/tissue-weather.html    # test the built file
+node tools/screenshot_app.mjs --width 720 --height 450 --dsf 2 --days 5 --out dist/shots/zoom200
 node tools/render_smoke.mjs --out /tmp/render                    # renderer only
 ```
+
+The third line is the 200 % browser-zoom pass CI also runs: at that size the colour key docks into
+the console instead of opening over the HUD, and the run's JSON summary says `legend.docked: true`
+when it does.
 
 `scratch/`, `dist/shots/`, `dist/cdn-cache/` and `dist/tissue-weather.offline.html` are
 git-ignored. `dist/tissue-weather.html` and `dist/tissue-weather.artifact.html` are **not**: they
 are committed build artifacts, because they are what GitHub Pages serves and what an instructor
 downloads. Run `npm run build` whenever you change `index.html` or anything in `src/`, and commit
 the result — `npm run check-dist` (and CI) will tell you if you forget. The offline page stays out
-of the repository because it carries a megabyte of vendored Three.js; CI rebuilds it on every push
-and uploads it as the `offline-page` artifact, which is also where a non-developer gets it.
+of the repository because it carries a megabyte of vendored Three.js; the `offline` CI job rebuilds
+it on every push and uploads it as the **`offline-page`** artifact — *Actions → the run → Artifacts →
+`offline-page`* — which is where a non-developer gets it without installing Node. That job is
+`continue-on-error` on purpose, because `--vendor` downloads Three.js from a CDN and a CDN outage
+must not fail the `node` job; the price is that a run whose download failed has no artifact, and you
+take the one from the run before it.
 
 ## The two golden regressions
 
@@ -172,8 +186,9 @@ to leave it bit-identical, and 0.1 % of drift shows up immediately instead of hi
 
 ```bash
 node --test --test-name-pattern 'golden' tests/engine.test.mjs        # just the goldens
-node tools/make_golden.mjs --tissue fibrous --out tests/golden/fibrous.engine.json   # re-record the tight one
-node tools/make_golden.mjs --tissue mytissue                          # a golden for a new tissue
+npm run golden                                                        # re-record the tight fibrous one
+node tools/make_golden.mjs --tissue fibrous --out tests/golden/fibrous.engine.json   # what that script is
+node tools/make_golden.mjs --tissue mytissue --out tests/golden/mytissue.engine.json # a new tissue's
 ```
 
 **Re-recording `*.engine.json` is legitimate when** you deliberately changed the model, its
@@ -193,7 +208,7 @@ that moved most, and check that the scenario `checks`, `docs/TEACHING.md` and
 - [ ] A change to the engine/renderer/app/export contract is reflected in `docs/EXTENDING.md`, and the file map in `docs/ARCHITECTURE.md` still matches reality.
 - [ ] A new or changed tissue has at least two scenarios, each with `checks` that encode the teaching claim.
 - [ ] `tests/golden/fibrous.json` (the v0.1 reference) was **not** regenerated, and if `fibrous.engine.json` was, the PR says what changed in the model and why.
-- [ ] A parameter change was followed by `node tools/check_params_doc.mjs --write`, and a **new** tissue also has its own `docs/tissues/<key>.md` with the two `params:` markers in it.
+- [ ] A parameter change was followed by `node tools/check_params_doc.mjs --write`, and a **new** tissue has real prose around the block the scaffolder generated in its `docs/tissues/<key>.md`.
 - [ ] A change to a teaching claim is measured, not asserted: `tests/fidelity.test.mjs` says what the model actually does.
 - [ ] New biology claims carry a DOI in `docs/MODEL.md` or the tissue's spec under `docs/tissues/`.
 - [ ] Student-facing copy stays plain, second person and concrete; the app still works with the keyboard and reads correctly to a screen reader (`node tools/screenshot_app.mjs` probes both).

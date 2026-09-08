@@ -1,7 +1,9 @@
 # Changelog
 
-What changed, in plain language, for the person teaching with it. Each entry says what a class
-notices first and what moved under the hood second; nothing here assumes you read the code.
+What changed, in plain language, for the person teaching with it. Each entry starts with what a
+class notices and ends with what moved under the hood; the newest one also says what changed for
+the instructor and for anyone writing a tissue of their own. Nothing here assumes you read the
+code.
 
 Two version numbers travel together and are easy to confuse:
 
@@ -39,7 +41,11 @@ the tools fail loudly instead of quietly.
     straight climb, and the dip is the lesson.
   - *Fibrosis* quotes week-four numbers at week four (density 0.82, ≈ 37 kPa, activation 0.88,
     whole-tissue alignment 0.13); the old text quoted the day-45 values. The card also says the
-    bath drop is **yours to make** unless you switch on *Auto-apply scripted events*.
+    bath drop is **yours to make** unless you switch on *Auto-apply scripted events* — and it now
+    gives the numbers for **both** ways of running it, because they differ: drop the bath by hand
+    at week four and activation dips to about 0.73 two weeks later, leave it to the day-45 auto
+    event and the dip is later and shallower, about 0.79. Both settle near 0.80, and on both paths
+    stiffness never dips and climbs past 130 kPa by week thirteen.
   - "Alignment leads maturity" is now stated on the trace it is true of — the faint *local
     anisotropy* line (38 % of its rise by day 7) rather than the headline whole-tissue line
     (26 %, next to a mature fraction of 25 %).
@@ -52,6 +58,40 @@ the tools fail loudly instead of quietly.
 - **Cartilage runs on the same engine as the fibrous tissue** — the second tissue is no longer a
   slightly different machine — and the Blender export carries the fields and the load range, so a
   rendered animation shows what the browser showed.
+
+### For the instructor
+
+- **The offline page has a click path.** *Actions → the latest CI run → Artifacts →
+  `offline-page`*, spelled out in `README.md` with the warning that the job which builds it is
+  advisory (it downloads Three.js), so on a run where the CDN was down you take the copy from the
+  run before it.
+- **The control list now says where the shortcut switch is.** *About → **Single-key shortcuts***:
+  on by default, remembered by that browser, `Space` never gated. Worth knowing before a room of
+  laptops starts typing into the page, or before a student running dictation restarts your run by
+  saying a word beginning with R.
+- **The commands in `README.md` and `CONTRIBUTING.md` are the commands that run.** `npm run golden`
+  now re-records the fibrous engine golden instead of refusing (the v0.1 reference is still
+  untouchable — the tool exits 2 if you aim at it); the 200 % browser-zoom check is written out in
+  full as `node tools/screenshot_app.mjs --width 720 --height 450 --dsf 2`; and CI drives that same
+  configuration on every push, because it is the only one that docks the colour key into the
+  console instead of over the clock.
+
+### For whoever writes the next tissue
+
+- **Adding a tissue is six steps and no tool edit.** The scaffolder now writes
+  `docs/tissues/<key>.md` with the as-built parameter block already filled in, so a freshly
+  scaffolded tissue passes `npm test` from the first run. What is left for you is the prose around
+  that block — the sources, the ranges, the reasoning — and a
+  `node tools/check_params_doc.mjs --write` after each parameter change. `README.md`,
+  `CONTRIBUTING.md` and [`EXTENDING.md`](EXTENDING.md) §8 tell one story about this instead of
+  three, and all of them name `demotissue` and `demo-tissue` as the keys the test fixtures reserve.
+- **The old rendering rules in [`SPEC.md`](SPEC.md) §1.9 are marked historical.** They are the v0.1
+  laws and neither renderer follows them any more: the fiber layout lives in `src/recipe.js` (the
+  one the browser and the Blender importer share), the colours and layers in `src/render.js`, and
+  the contract in [`EXTENDING.md`](EXTENDING.md) §4.
+- **[`ARCHITECTURE.md`](ARCHITECTURE.md) no longer calls both Blender fixtures synthetic**: the
+  fibrous sample trajectory is a real engine export and now carries the command that reproduces it
+  byte for byte.
 
 ### Under the hood
 
@@ -71,8 +111,10 @@ the tools fail loudly instead of quietly.
   eleven runs) and checks `--blender` before the first simulated day; `check_params_doc.mjs` finds
   a tissue's parameter block by its markers, so **adding a tissue no longer means editing a tool**.
 - CI: the vendored offline page is built in its own advisory job, so a CDN outage cannot fail the
-  deterministic test job; the built page itself is now driven in a headless browser; and
-  `dist/tissue-weather.offline.html` is git-ignored so it can never be committed by accident.
+  deterministic test job — and the job that has to stay green now says so in the file, next to the
+  place someone would add the next download. The built page itself is driven in a headless browser,
+  a third browser pass runs the app at 200 % zoom, and `dist/tissue-weather.offline.html` is
+  git-ignored so it can never be committed by accident.
 
 ---
 

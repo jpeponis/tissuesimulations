@@ -196,7 +196,7 @@ export const TISSUE_FIBROUS = {
         'Wait another four weeks and compare stiffness and activation with where they started.',
       ],
       question: 'You turned the bath down to 0.2 — lower than this tissue has ever run — yet the growth-factor haze stays at about twice that. Where is it coming from, and what would you turn down to break the loop?',
-      expect: 'Dense, stiff, poorly aligned matrix by week four: density 0.82, stiffness about 37 kPa, activation 0.88, and the whole-tissue alignment only 0.13 — scar, not tendon. After you drop the bath, activation dips to about 0.73 and settles near 0.80, while stiffness does not dip at all and climbs past 130 kPa by week thirteen. The tissue does not retrace its path.',
+      expect: 'Dense, stiff, poorly aligned matrix by week four: density 0.82, stiffness about 37 kPa, activation 0.88, and the whole-tissue alignment only 0.13 — scar, not tendon. Drop the bath yourself at week four and activation dips to about 0.73 two weeks later, then settles near 0.80; leave it to the day-45 auto event instead and the dip comes later and is shallower, about 0.79, settling in the same place. On either path stiffness does not dip at all and climbs past 130 kPa by week thirteen. The tissue does not retrace its path.',
       dials: { Gext: 0.9, strain: 0.3, protease: 0.2, nCells: 160 },
       init: { species: { new: 0.15, mat: 0 }, jitter: 0.2 },
       events: [{ at: 45, dials: { Gext: 0.2 } }],

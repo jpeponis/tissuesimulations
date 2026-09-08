@@ -16,6 +16,10 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------- tests, build, dist freshness
+  # This is the job that must stay green, so nothing in it may reach the network after checkout:
+  # there are no dependencies to install, `npm test` is `node --test`, and the one build step that
+  # needs a CDN (`build_single.mjs --vendor`) lives in the advisory `offline` job below. Adding a
+  # download here is what docs/REVIEW.md D5 was about.
   node:
     name: tests and single-file build (Node 20)
     runs-on: ubuntu-latest
@@ -164,9 +168,11 @@ jobs:
       - name: Drive the built single-file page
         run: node tools/screenshot_app.mjs --page dist/tissue-weather.html --no-interact --days 5 --out dist/shots/dist-page
 
-      # 200 % browser zoom (a 1440x900 window at deviceScaleFactor 2). It is the only
-      # configuration that exercises the docked legend and the reflowed HUD, which is where the
-      # legend used to cover the clock and the live sentence (docs/REVIEW.md a11y 1).
+      # 200 % browser zoom: a 720x450 CSS viewport at deviceScaleFactor 2, i.e. a 1440x900 window
+      # zoomed to 200 %. It is the only configuration that exercises the docked legend and the
+      # reflowed HUD, which is where the legend used to cover the clock and the live sentence
+      # (docs/REVIEW.md a11y 1); the run prints `legend.docked: true` when the docking works.
+      # Advisory like the rest of this job — the whole job is continue-on-error.
       - name: Drive the app at 200 % zoom
         run: node tools/screenshot_app.mjs --width 720 --height 450 --dsf 2 --days 5 --out dist/shots/zoom200
 

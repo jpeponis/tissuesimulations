@@ -44,12 +44,13 @@ src/tissues/index.js  the registry: TISSUES + TISSUE_DEFAULT
 src/render.js         Three.js scene: fibers, gel, scaffold, cells, fields, load arrows; consumes engine state
 src/plots.js          2D canvas time-series + flux gauge (no deps)
 src/copy.js           shared student-facing copy helpers (per-tissue text lives in the definitions)
+src/recipe.js         the one fiber-layout recipe §1.9's note points at, shared with blender/import_tissue.py
 src/app.js            wires engine ↔ render ↔ UI; the panel is generated from the definition; export JSON
 tools/build_single.mjs  inlines src/*.js into dist/tissue-weather.html (single-file artifact);
                         --vendor also writes dist/tissue-weather.offline.html with Three.js inlined
 tools/check_dist.mjs    rebuilds into a temp dir and fails if dist/ is stale
 tools/check_params_doc.mjs  keeps the "as built" parameter blocks in the docs equal to the code
-tools/new_tissue.mjs    scaffolds and registers a new tissue definition
+tools/new_tissue.mjs    scaffolds and registers a new tissue definition, and writes its docs/tissues/<key>.md
 tools/run_headless.mjs  node: run scenarios, dump CSV + JSON trajectory (--help for the options)
 tools/plot_scenarios.py matplotlib check plots of the CSVs
 tools/lib/browser.mjs   the shared Playwright harness (serve, launch, CDN cache) for the two smoke tools
@@ -58,7 +59,7 @@ tests/build.test.mjs, tests/tools.test.mjs  build constraints and the developer 
 tests/export.test.mjs   the trajectory format, writer to reader (python3 --dry-run of the Blender importer)
 tests/fidelity.test.mjs the teaching claims, measured on the current engine
 blender/import_tissue.py  bpy script: JSON trajectory → animated fibers + cells (Blender 4.2 LTS)
-docs/EXTENDING.md     the v0.2 contract between the engine and a tissue definition
+docs/EXTENDING.md     the contract between the engine and a tissue definition (it carries its own version)
 docs/ARCHITECTURE.md  data flow, the single-file build, the file map
 docs/MODEL.md         equations, biology, parameter table with sources
 docs/TEACHING.md      lesson plan, guided experiments, misconception checks, where the metaphor breaks

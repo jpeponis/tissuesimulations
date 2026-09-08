@@ -204,7 +204,7 @@ it, so the import is never attempted.
 | `tools/check_dist.mjs` | rebuilds into a temp directory and fails if `dist/` is stale |
 | `tools/check_params_doc.mjs` | rewrites (`--write`) and checks the `<!-- params:<tissue> -->` as-built blocks in the docs |
 | `tools/lib/browser.mjs` | shared Playwright plumbing: find Playwright, serve a directory, launch Chromium, answer the CDNs from a cache, always clean up |
-| `tools/new_tissue.mjs` | scaffolds `src/tissues/<key>.js` from the starter and registers it |
+| `tools/new_tissue.mjs` | scaffolds `src/tissues/<key>.js` from the starter, registers it, and writes `docs/tissues/<key>.md` with the as-built parameter block already filled in |
 | `tools/run_headless.mjs` | runs a tissue's scenarios (and per-tissue variants) in Node; writes CSV stats and format-2 trajectories |
 | `tools/make_golden.mjs` | records the reference statistics of a tissue for the golden regression |
 | `tools/plot_scenarios.py` | matplotlib panels of the headless CSVs |
@@ -247,14 +247,14 @@ it, so the import is never attempted.
 | `docs/img/` | screenshots used by `README.md` |
 | `CONTRIBUTING.md` | dev setup, commands, coding constraints, when regenerating the golden is legitimate, PR checklist |
 | `package.json` | no dependencies; the npm scripts every command in the docs uses |
-| `.github/workflows/ci.yml` | CI: tests + build + dist freshness, headless run + plots, optional Playwright smoke |
+| `.github/workflows/ci.yml` | CI, four jobs: `node` (tests + build + dist freshness, deterministic and network-free), `offline` (advisory — the vendored offline page, uploaded as the `offline-page` artifact), `headless` (scenario run + matplotlib panel) and `screenshot` (advisory Playwright smoke, including the 200 % zoom pass) |
 | `LICENSE`, `CITATION.cff` | MIT for the code, CC BY 4.0 for the course text; how to cite |
 
 ## 4. Where to make a change
 
 | you want to | edit | then run |
 |---|---|---|
-| add a tissue | `node tools/new_tissue.mjs <key> "<Name>"`, then `src/tissues/<key>.js` **and** `docs/tissues/<key>.md` with the `<!-- params:<key> -->` markers | `npm run headless -- --tissue <key>`, `node tools/check_params_doc.mjs --write`, `npm test`, `npm run build` |
+| add a tissue | `node tools/new_tissue.mjs <key> "<Name>"` (it writes the definition, the registry line **and** `docs/tissues/<key>.md` with the `<!-- params:<key> -->` block), then `src/tissues/<key>.js` and the prose around that block | `npm run headless -- --tissue <key>`, `node tools/check_params_doc.mjs --write`, `npm test`, `npm run build` |
 | change what cells or matrix do | that tissue's `params` and `makeRules()` | `npm test` (the scenario `checks` are the spec) |
 | change the grid, numerics or a stat | `src/engine.js` — and `docs/EXTENDING.md`, because that is the contract | `npm test`; expect the golden to move only if you meant it |
 | change the look of the 3D scene | `src/render.js` | `node tools/render_smoke.mjs --out <dir>` |
