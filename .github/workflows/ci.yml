@@ -46,15 +46,33 @@ jobs:
           git diff --exit-code -- dist
           test -z "$(git status --porcelain -- dist)" || { git status --porcelain -- dist; exit 1; }
 
-      # The offline classroom page (docs/REVIEW.md C9): Three.js inlined, no import map, no network
-      # at run time. It is NOT committed (1.1 MB of vendored library), so it is built and checked
-      # here — after the dist check above, which would otherwise see it as an untracked file.
+  # ---------------------------------------------------------------- the offline classroom page
+  # ADVISORY (continue-on-error), and a job of its own on purpose: `--vendor` downloads Three.js
+  # from jsdelivr on a fresh runner (dist/cdn-cache/ is git-ignored and there is nothing to
+  # `npm ci`), so a CDN outage must not red the deterministic, network-free `node` job above.
+  # The page itself (docs/REVIEW.md C9) is Three.js inlined, no import map, no network at run time.
+  # It is NOT committed — 1.1 MB of vendored library — so this is where an instructor gets it:
+  # the `offline-page` artifact of the latest run.
+  offline:
+    name: vendored offline page (optional, needs the CDN)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: build the vendored offline page
         run: |
           node tools/build_single.mjs --vendor
           test -s dist/tissue-weather.offline.html
           ! grep -q '<script type="importmap">' dist/tissue-weather.offline.html
-          ! grep -qE '(src|href)="https?:' dist/tissue-weather.offline.html
+          # The builder's own `inMarkup` guard is what proves no CDN URL survives in markup; this
+          # only re-reads the <head>, where a stylesheet or a preload would have to appear. Scoping
+          # it matters: an outbound <a href="https://doi.org/…"> in the page's own copy is harmless
+          # on an offline page (nothing fetches it) and used to fail the build.
+          ! sed -n '/<head>/,/<\/head>/p' dist/tissue-weather.offline.html | grep -qE '(src|href)="https?:'
 
       - name: upload the offline page
         if: always()
@@ -135,7 +153,8 @@ jobs:
 
       # Loads index.html over a local server, drives the app (deep link, play, dial, reset,
       # injure, table toggle), probes accessibility and reports console errors.
-      # Needs the Three.js CDN; the tool serves it from dist/cdn-cache when the network is closed.
+      # Needs the Three.js CDN; tools/lib/browser.mjs serves it from a curl cache (this tool points
+      # it at dist/cdn-cache) when the network is closed, and a failed download is never cached.
       - name: Drive the app in headless Chromium
         run: node tools/screenshot_app.mjs --tissue fibrous --days 10 --out dist/shots
 
@@ -144,6 +163,12 @@ jobs:
       # (docs/REVIEW.md D8). --no-interact keeps it to "does the built bundle boot and render".
       - name: Drive the built single-file page
         run: node tools/screenshot_app.mjs --page dist/tissue-weather.html --no-interact --days 5 --out dist/shots/dist-page
+
+      # 200 % browser zoom (a 1440x900 window at deviceScaleFactor 2). It is the only
+      # configuration that exercises the docked legend and the reflowed HUD, which is where the
+      # legend used to cover the clock and the live sentence (docs/REVIEW.md a11y 1).
+      - name: Drive the app at 200 % zoom
+        run: node tools/screenshot_app.mjs --width 720 --height 450 --dsf 2 --days 5 --out dist/shots/zoom200
 
       # The renderer on its own, against the synthetic tissues of tools/render_smoke.html:
       # screenshots, the §4 API, and one second of frame-time measurement (enough to catch a

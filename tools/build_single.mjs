@@ -18,6 +18,11 @@
 //      top-level declarations that concatenating two files into one scope can produce.
 //
 // Each failure throws with the offending `src/file:line`. Nothing is written when a check fails.
+//
+// The strip itself is line-based, so before it runs each file is tokenized (`codeLineStarts`) and
+// only lines that BEGIN in code are considered: an `import` / `export` line inside a string, a
+// template literal or a comment is student-facing text, and rewriting it used to corrupt the
+// bundle silently. A file the tokenizer cannot follow to the end is an error, not a guess.
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, existsSync, renameSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -57,14 +62,99 @@ const EXTERNAL_IMPORT = /^import\s.*from\s+['"]([^'".][^'"]*)['"]/;
 // A statement the strip did not remove. `import(` / `await import(` are expressions, not statements.
 const LEFTOVER = /^\s*(?:import\s+[^(\s]|import\s*[{*'"`]|export\b)/;
 
+// ---------------------------------------------------------------- which lines are CODE
+// The three regexes above are line-based, so on their own they also rewrite an `import` / `export`
+// line that happens to sit INSIDE a string, a template literal or a comment — a teaching app whose
+// copy quotes JavaScript is exactly where such a line appears, and the result was a silently
+// corrupted bundle (the line deleted or the keyword stripped) with a green build. So each file is
+// tokenized first, and only lines that BEGIN in code are touched.
+//
+// `/` is a regular expression when the previous significant character cannot end an expression —
+// or when the word before it is one of the keywords that must be followed by one (`return /x/`).
+// That is the usual heuristic, and a mistake would leave the scan unbalanced at end of file, which
+// is a build error below rather than a silent rewrite.
+const CAN_END_EXPR = /[A-Za-z0-9_$)\]'"`]/;
+const REGEX_AFTER = /^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/;
+
+const UNCLOSED = { line: 'a comment', block: 'a block comment', sq: 'a string', dq: 'a string', tpl: 'a template literal', re: 'a regular expression', cls: 'a regular expression' };
+
+/**
+ * One boolean per line of `text`: does the line START in code — i.e. not inside a string, template
+ * literal, regular expression or comment, and not inside a `${…}` substitution? Throws when the
+ * file ends inside a literal or with unbalanced braces, because that means this scanner lost track
+ * and its answers can no longer be trusted.
+ */
+function codeLineStarts(text, where) {
+  const starts = [true];             // the first line always begins in code
+  let mode = 'code';                 // code | line | block | sq | dq | tpl | re | cls (regex class)
+  const tplDepth = [];               // brace depth of each template we are inside a ${…} of
+  let depth = 0;                     // brace depth of the current code region
+  let prev = '';                     // last significant code character (regex-or-division)
+  let word = '';                     // …and the identifier it belongs to, for `return /x/`
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], d = text[i + 1] || '';
+    if (c === '\n') {
+      // a line comment ends here; an unterminated quote or regex is a syntax error, and pretending
+      // it ended keeps the scan (and the error message) local to the line that broke
+      if (mode === 'line' || mode === 'sq' || mode === 'dq' || mode === 're' || mode === 'cls') mode = 'code';
+      starts.push(mode === 'code' && tplDepth.length === 0);
+      continue;
+    }
+    switch (mode) {
+      case 'code':
+        if (c === '/' && d === '/') { mode = 'line'; i++; }
+        else if (c === '/' && d === '*') { mode = 'block'; i++; }
+        else if (c === '/' && (!CAN_END_EXPR.test(prev) || REGEX_AFTER.test(word))) { mode = 're'; word = ''; }
+        else if (c === "'") { mode = 'sq'; word = ''; }
+        else if (c === '"') { mode = 'dq'; word = ''; }
+        else if (c === '`') { mode = 'tpl'; word = ''; }
+        else if (c === '}' && depth === 0 && tplDepth.length) { depth = tplDepth.pop(); mode = 'tpl'; word = ''; }
+        else if (/[A-Za-z0-9_$]/.test(c)) { prev = c; word += c; }
+        else if (c.trim()) {                                             // any other token character
+          if (c === '{') depth++; else if (c === '}') depth--;
+          prev = c; word = '';
+        }
+        break;                                                           // whitespace keeps `prev` and `word`
+      case 'line': break;                                              // runs to the end of the line
+      case 'block': if (c === '*' && d === '/') { mode = 'code'; i++; } break;   // `prev` is unchanged: a comment is not a token
+      case 'sq': case 'dq':
+        if (c === '\\') i++;
+        else if (c === (mode === 'sq' ? "'" : '"')) { mode = 'code'; prev = c; }
+        break;
+      case 'tpl':
+        if (c === '\\') i++;
+        else if (c === '`') { mode = 'code'; prev = c; }
+        else if (c === '$' && d === '{') { tplDepth.push(depth); depth = 0; mode = 'code'; prev = '{'; i++; }
+        break;
+      case 're':
+        if (c === '\\') i++;
+        else if (c === '[') mode = 'cls';                              // `/` inside a class does not end it
+        else if (c === '/') { mode = 'code'; prev = ')'; }             // a regex ends an expression
+        break;
+      case 'cls':
+        if (c === '\\') i++;
+        else if (c === ']') mode = 're';
+        break;
+    }
+  }
+  if (mode !== 'code' || tplDepth.length || depth !== 0) fail([
+    `src/${where}: this file could not be tokenized — it ends ${mode === 'code' ? `with ${Math.abs(depth) || tplDepth.length} unbalanced brace(s)` : `inside ${UNCLOSED[mode]}`}.`,
+    'The build has to know which lines are code before it strips `import` / `export`, so it stops',
+    'here instead of rewriting a line it may have misread. Usually this is a real syntax error; if',
+    'the file is valid, it uses something the scanner in tools/build_single.mjs does not model.']);
+  return starts;
+}
+
 // ---------------------------------------------------------------- assemble
 const externalImports = new Set();
 const unresolved = [], leftovers = [];
 let body = '';
 for (const f of order) {
   const src = readFileSync(join(root, 'src', f), 'utf8');
+  const isCode = codeLineStarts(src, f);
   const kept = [];
   src.split('\n').forEach((line, i) => {
+    if (!isCode[i]) { kept.push(line); return; }                       // inside a literal or a comment: data
     const t = line.trim();
     const local = LOCAL_IMPORT.exec(t);
     if (local) {                                                       // local import: dropped (concatenated)

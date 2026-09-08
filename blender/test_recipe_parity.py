@@ -9,6 +9,7 @@ test_recipe_parity.py -- does the Blender importer draw what the browser draws?
   * the fiber layout and the per-frame fiber laws          src/recipe.js       (docs/REVIEW.md E2)
   * the cell colour ramp (OKLab, mid colour, LUT)          src/render.js       (docs/REVIEW.md E3)
   * the cell aspect law and the load-arrow normalisation   src/render.js       (docs/REVIEW.md E5)
+  * the gel / scaffold / field haze constants and laws     src/render.js       (docs/REVIEW.md E5)
 
 Two implementations of one recipe drift. This runs `node blender/recipe_dump.mjs`, which prints
 what the REAL JS modules compute, and compares it against what this file's python computes:
@@ -26,11 +27,17 @@ what the REAL JS modules compute, and compares it against what this file's pytho
                                                                                       channel
   aspect      cell_transforms()' semi-axes r*A^0.8 / r*A^-0.2, and radiusBy       <= 1e-9
   arrows      the load dial normalised over meta.loadRange, and the fallbacks     <= 1e-9
+  haze        the gel / scaffold / field constants (read out of the renderer's own
+              opts) and the CLI defaults that mirror them, the gel jitter stream
+              element by element, and the radius / alpha / shortening those laws
+              give scaffold_struts() and gel_points()                             <= 1e-6
 
-Exit 0 = parity holds (or node is not installed: the check prints SKIP and passes, like the
-python-less skips on the JS side), exit 1 = a mismatch, with the first dozen printed. Verified
-by mutation: changing offsetSpan, radiusScale, the half-length, CELL_ASPECT_EXP, the mid colour
-or the arrow normalisation each fails the section that owns it.
+It prints one PASS or FAIL line per section, then a PASS / FAIL summary. Exit 0 = parity holds
+(or node is not installed: the check prints SKIP and passes, like the python-less skips on the
+JS side), exit 1 = a mismatch, with the first dozen printed. Verified by mutation: changing
+offsetSpan, radiusScale, the half-length, CELL_ASPECT_EXP, the mid colour, the arrow
+normalisation, the scaffold radius floor or the gel size jitter each fails the section that owns
+it. `tests/recipe.test.mjs` spawns this file with no arguments and asserts the exit code.
 """
 import json
 import math
@@ -120,11 +127,16 @@ def check_recipe(ck, js):
             ck.close(f"RECIPE_FIBER.{key}", float(got), float(want), TOL_TIGHT)
     # meta.render round trip: the recipe an export carries must rebuild the same constants
     meta = {"render": js["renderMeta"]}
-    rebuilt = IT.recipe_from_meta(meta)
+    rebuilt, src = IT.recipe_from_meta(meta)
     for key, want in js["recipe"].items():
         ck.close(f"recipe_from_meta({key})", float(rebuilt[key]), float(want), TOL_TIGHT)
-    # ... and a file without it falls back to the constants
-    ck.equal("recipe_from_meta({}) == RECIPE_FIBER", IT.recipe_from_meta({}), dict(IT.RECIPE_FIBER))
+    ck.equal("recipe_from_meta reports meta.render as the source", src, "meta.render")
+    # ... and a file without it falls back to the constants, and says so
+    ck.equal("recipe_from_meta({}) == RECIPE_FIBER", IT.recipe_from_meta({}), (dict(IT.RECIPE_FIBER), "built-in recipe"))
+    # a block this reader will not honour must not be announced as if it had been (E, finding 4)
+    ck.equal("recipe_from_meta(bogus recipe name) falls back",
+             IT.recipe_from_meta({"render": {"recipe": "fiber-v2", "seed": 1}}),
+             (dict(IT.RECIPE_FIBER), "built-in recipe"))
 
 
 def check_layout(ck, js):
@@ -201,8 +213,16 @@ def check_ramps(ck, js):
     ck.close("cellSaturation", IT.CELL_SATURATION, cell["saturation"], TOL_TIGHT)
     ck.close("cellAspectExp", IT.CELL_ASPECT_EXP, cell["aspectExp"], TOL_TIGHT)
     for pair in js["ramps"]:
-        ct = {"colors": pair["colors"]}
+        # through the real normalisation: a reader that truncates `colors` to two entries loses
+        # the third one's meaning (it is the ramp's MID, src/render.js setTissue) and this fails
+        ct = IT.normalise_cell_types([{"key": pair["key"], "colors": list(pair["colors"]),
+                                       "shape": {"by": "a"}, "radius": 0.03}])[0]
+        ck.equal(f"ramp[{pair['key']}] colours kept", ct["colors"], list(pair["colors"]))
         lut = IT.cell_ramp({}, ct)
+        if pair.get("mid"):
+            # a piecewise ramp passes exactly through its mid at t = 0.5: the sharpest statement
+            # of "which colour is the middle of this ramp" there is
+            ck.seq(f"ramp[{pair['key']}] mid colour at a=0.5", IT.ramp_sample(lut, 0.5)[:3], pair["mid"], TOL)
         flat = [c for entry in lut for c in entry]
         # the JS LUT is a Float32Array, so allow float32 rounding on top of the 8-bit criterion
         ck.seq(f"ramp[{pair['key']}]", flat, pair["lut"], 1e-6)
@@ -248,6 +268,87 @@ def check_aspect(ck, js):
         ck.close(f"cell radius by state a={a_state:g}", scale[0][0], want_r, TOL_TIGHT)
 
 
+def check_haze(ck, js):
+    """E5: the gel, scaffold and field haze. The laws live in instance methods the dump cannot
+    run (they need a WebGL context), so what crosses over is their CONSTANTS -- read out of the
+    renderer's own `opts` block and its `_buildGel` source -- plus the gel jitter STREAM, which
+    is `recipeRng` driven by the renderer's own seed arithmetic. The composition is then driven
+    through the real `scaffold_struts()` / `gel_points()` and checked against those constants,
+    so a law applied to the wrong quantity fails here even though every constant is right."""
+    hz = js["haze"]
+    d = IT.parse_args([])          # the CLI defaults are part of the contract, not decoration
+    for name, got, want in (
+        ("GEL_SIZE", IT.GEL_SIZE, hz["gelSize"]),
+        ("GEL_OPACITY / --gel-opacity", d.gel_opacity, hz["gelOpacity"]),
+        ("GEL_CELL_FADE", IT.GEL_CELL_FADE, hz["gelCellFade"]),
+        ("GEL_JITTER_SPAN", IT.GEL_JITTER_SPAN, hz["gelJitterSpan"]),
+        ("GEL_SIZE_JITTER[0]", IT.GEL_SIZE_JITTER[0], hz["gelSizeJitter"][0]),
+        ("GEL_SIZE_JITTER[1]", IT.GEL_SIZE_JITTER[1], hz["gelSizeJitter"][1]),
+        ("GEL_SEED_XOR", IT.GEL_SEED_XOR, hz["gelSeedXor"]),
+        ("--gel-min", d.gel_min, hz["gelMin"]),
+        ("SCAFFOLD_RADIUS", IT.SCAFFOLD_RADIUS, hz["scaffoldRadius"]),
+        ("SCAFFOLD_MIN_RADIUS", IT.SCAFFOLD_MIN_RADIUS, hz["scaffoldMinRadius"]),
+        ("SCAFFOLD_RADIUS_EXP", IT.SCAFFOLD_RADIUS_EXP, hz["scaffoldRadiusExp"]),
+        ("SCAFFOLD_ALPHA_EXP", IT.SCAFFOLD_ALPHA_EXP, hz["scaffoldAlphaExp"]),
+        ("SCAFFOLD_OPACITY / --scaffold-opacity", d.scaffold_opacity, hz["scaffoldOpacity"]),
+        ("SCAFFOLD_BREAK", IT.SCAFFOLD_BREAK, hz["scaffoldBreak"]),
+        ("--scaffold-min", d.scaffold_min, hz["scaffoldMin"]),
+        ("FIELD_SEED_XOR", IT.FIELD_SEED_XOR, hz["fieldSeedXor"]),
+        ("--field-scale (pointSize)", d.field_scale, hz["pointSize"]),
+        ("--field-opacity (pointOpacity)", d.field_opacity, hz["pointOpacity"]),
+        ("--field-min (pointMin)", d.field_min, hz["pointMin"]),
+    ):
+        ck.close(name, float(got), float(want), TOL_TIGHT)
+    ck.equal("field cloud seed stride", 7919, int(hz["fieldSeedStride"]))
+
+    # the gel jitter stream, draw by draw (three offsets and a size factor per voxel)
+    lay = js["layout"]
+    N, seed = lay["N"], lay["seed"]
+    got = [x for j in IT.gel_jitter(N, seed ^ IT.GEL_SEED_XOR) for x in j]
+    ck.seq("gel_jitter stream", got, js["gelJit"], TOL)
+
+    # --- the composition, through the real functions ------------------------------------------
+    h, L = 1.0 / N, 1.0
+    layout = IT.FiberLayout(N, 1, L, seed)
+    dens = [0.0, 0.01, 0.05, 0.2, 0.35, 0.5, 0.9, 1.6][:N ** 3]
+    sp = {"key": "s", "kind": "scaffold", "color": "#9ec5d8"}
+    gp = {"key": "g", "kind": "gel", "color": "#7fe0c9"}
+    meta = {"kinds": {"fiber": [], "gel": [gp], "scaffold": [sp]}, "species": [sp, gp]}
+    fr = {"species": {"s": list(dens), "g": list(dens)}, "scaffold": list(dens), "gel": list(dens),
+          "cx": [0.25, 0.25, 0.25], "n_cells": 1}
+    r_mul, r_min = hz["scaffoldRadius"] * h, hz["scaffoldMinRadius"] * h
+    verts, edges, a_d, _a_col, a_rad = IT.scaffold_struts(fr, meta, layout, hz["scaffoldMin"])
+    ck.equal("scaffold: a strut carries one density", [a_d[2 * i] == a_d[2 * i + 1] for i in range(len(edges))],
+             [True] * len(edges))
+    for i, (i0, i1) in enumerate(edges):
+        dd = min(1.0, a_d[2 * i])
+        ck.close(f"strut[{i}] radius (d={dd:g})", a_rad[2 * i],
+                 max(r_min, r_mul * dd ** hz["scaffoldRadiusExp"]), TOL)
+        # the shortening is about the midpoint, so the drawn length is `f` x h or x h/2
+        f = (0.3 + 0.7 * dd / hz["scaffoldBreak"]) if dd < hz["scaffoldBreak"] else 1.0
+        span = math.dist(verts[i0], verts[i1]) / f
+        ck.close(f"strut[{i}] length / shortening (d={dd:g})", min(abs(span - h), abs(span - 0.5 * h)), 0.0, TOL)
+    ck.equal("scaffold: struts below scaffoldMin are dropped", len(edges),
+             sum(1 for i in range(len(edges)) if a_d[2 * i] >= hz["scaffoldMin"]))
+
+    jit = IT.gel_jitter(N, seed ^ IT.GEL_SEED_XOR)
+    occ = IT.cell_occupancy(fr, N, L)
+    ck.equal("cell_occupancy: the voxel holding the cell", occ, [1 if v == 0 else 0 for v in range(N ** 3)])
+    pos, rad, _a_dens, alpha, _cols = IT.gel_points(fr, meta, layout, hz["gelMin"], 1.0, jit, occ)
+    kept = [v for v in range(N ** 3) if dens[v] >= hz["gelMin"]]
+    ck.equal("gel: voxels above gelMin", len(pos), len(kept))
+    for i, v in enumerate(kept):
+        dv = dens[v]
+        ck.close(f"gel[{v}] radius", rad[i],
+                 hz["gelSize"] * h * min(dv, 1.5) ** (1.0 / 3.0) * jit[v][3], TOL)
+        ck.close(f"gel[{v}] alpha", alpha[i],
+                 min(dv, 1.0) * ((1.0 - hz["gelCellFade"]) if occ[v] else 1.0), TOL)
+        lo = min(rad[i], 0.5 * L)
+        for k in range(3):
+            want = min(max(layout.centers[v][k] + jit[v][k] * h, lo), L - lo)
+            ck.close(f"gel[{v}] centre[{k}] (jittered, clamped)", pos[i][k], want, TOL)
+
+
 def check_load_arrows(ck):
     """E5: the load dial is normalised over meta.loadRange, so a 0-0.2 compression dial and a
     0-1 stretch dial draw the same range of arrows. No JS dump needed — src/render.js
@@ -277,23 +378,25 @@ def main():
     ck = Checker()
     for name, fn in (("recipe constants", check_recipe), ("fiber layout (N=2, K=1)", check_layout),
                      ("fiber laws", check_laws), ("one frame of rods, end to end", check_frame),
-                     ("cell colour ramp", check_ramps), ("cell aspect law", check_aspect)):
+                     ("cell colour ramp", check_ramps), ("cell aspect law", check_aspect),
+                     ("gel / scaffold / field haze", check_haze)):
         before = ck.nfail
         fn(ck, js)
-        print(f"  {'FAIL' if ck.nfail > before else 'ok  '}  {name} ({ck.nfail - before} failed)" if ck.nfail > before else f"  ok    {name}")
+        print(f"  {'FAIL' if ck.nfail > before else 'PASS'}  {name}"
+              + (f" ({ck.nfail - before} failed)" if ck.nfail > before else ""))
     before = ck.nfail
     check_load_arrows(ck)
-    print(f"  {'FAIL' if ck.nfail > before else 'ok  '}  load arrow normalisation")
+    print(f"  {'FAIL' if ck.nfail > before else 'PASS'}  load arrow normalisation")
     if VERBOSE:
         for name, (d, tol) in sorted(ck.worst.items(), key=lambda kv: -kv[1][0])[:8]:
             print(f"    worst {name}: {d:.3g} (tolerance {tol:g})")
     if ck.nfail:
-        print(f"\n{ck.nfail} mismatch(es) out of {ck.checks} comparisons"
+        print(f"\nFAIL: {ck.nfail} mismatch(es) out of {ck.checks} comparisons"
               + (f" (showing the first {len(ck.fails) - 1})" if ck.fails and ck.fails[-1] == "..." else "") + ":")
         for f in ck.fails:
             print(f"  {f}")
         return 1
-    print(f"\nparity holds: {ck.checks} comparisons, worst deviation "
+    print(f"\nPASS: parity holds -- {ck.checks} comparisons, worst deviation "
           f"{max(d for d, _ in ck.worst.values()):.3g}")
     return 0
 

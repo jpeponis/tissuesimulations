@@ -23,6 +23,8 @@ export const TISSUE_TEMPLATE = {
   name: 'Template tissue',                      // tissue picker
   short: 'Cells replace a dissolving hydrogel with their own fibrous matrix',
   version: '0.1.0',
+  domainMicrons: 300,                           // optional: how wide the cube really is. A positive
+                                                // number adds a "Cube edge ≈ 300 µm" row to the legend.
 
   // ---- matrix species: per-voxel scalar densities (0 .. ~1.5; 1 ≈ native-like content).
   //      kind 'fiber' species are oriented and share the tensor T; 'gel' is an isotropic
@@ -37,6 +39,13 @@ export const TISSUE_TEMPLATE = {
   //                                         'auto' (default: explicit while D·dt/h² ≤ 1/6, then
   //                                         sub-cycled), 'explicit' (v0.3: the number is clamped
   //                                         at 1/6, i.e. a smaller D) or 'subcycled'.
+  //        carryTensor: false               v0.4, fiber species only: move the mass without moving
+  //                                         T (a felt, not a rope). ~3× cheaper than carrying it;
+  //                                         arriving matrix takes the destination's orientation.
+  //        render: { minDensity,            v0.4 renderer hints, per KIND (see EXTENDING.md §4):
+  //          radiusScale, opacity, style }  fade-in threshold, size and alpha factors, and — for
+  //                                         kind 'gel' only — 'spheres' | 'points'.
+  //      A `sink` is gated by out.mobility too (v0.4), so a sealed mesh keeps its matrix in.
   //      Keys 'total', 'fiberTotal' and 'tissueTotal' are reserved by the stat paths.
   species: [
     { key: 'gel', label: 'Hydrogel scaffold', kind: 'scaffold', color: '#9fb7c9',
@@ -54,7 +63,14 @@ export const TISSUE_TEMPLATE = {
   //      warm-started steady solve ('quasiSteady') once a field is so fast that stepping it in
   //      time is pointless (oxygen: D/L² ~ 10³/day). 'explicit' pins the v0.3 behaviour, which
   //      CLAMPS lam at 1/6 — stable, but the field then diffuses with a smaller D than declared.
-  //      TissueEngine.validate() warns once, naming the field, its lam and the mode it chose.
+  //      TissueEngine.warnings() names the field, its lam and the mode it chose; validate() prints
+  //      it only when the engine had to work AROUND the definition (a clamped 'explicit', a capped
+  //      sub-cycle, a quasiSteady request that is not well posed).
+  //      Declare the PHYSICAL D: diffusion crosses the cube in ~L²/D days, so a field that should
+  //      equilibrate within a day needs D ≳ L² per day. Sub-cycling integrates a slow D correctly;
+  //      it does not make it fast.
+  //      Two optional renderer hints live here too: `pointScale` (× the haze blob diameter) and
+  //      `style: 'spheres' | 'points'`.
   fields: [
     { key: 'g', label: 'Growth factor', color: '#3fd6c4', D: 0.05, bath: 'Gext', kBath: 4, decay: 0 },
   ],
@@ -93,7 +109,7 @@ export const TISSUE_TEMPLATE = {
       metaphor: 'Humidity: how much vapor is available to condense.',
       biology: 'Signal in the medium that activates the cells and drives matrix synthesis.',
       watch: 'Cells turn orange, then the flux bar tips toward condensing a day or two later.' },
-    { key: 'strain', label: 'Mechanical load', min: 0, max: 1, step: 0.01, default: 0.5, format: 'percent', role: 'load',
+    { key: 'strain', label: 'Mechanical load', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2', role: 'load',
       metaphor: 'Pressure: a steady push that shapes the cloud.',
       biology: 'Static stretch along the vertical axis; fibers and cells line up with it.',
       watch: 'Fibers swing toward the arrows and the alignment trace rises.' },
@@ -110,8 +126,15 @@ export const TISSUE_TEMPLATE = {
   //      Optional `events` (dial changes / injuries at day `at`) are applied by the tests and
   //      the headless tools. `checks` are evaluated by TissueEngine.checkScenario():
   //        { at, stat, op: 'gt'|'lt'|'between', value }            absolute
-  //        { at, stat, rel: { stat, op: 'gt'|'lt', at? }, value? }  relative to another stat / day
+  //        { at, stat, rel: { stat, op: 'gt'|'lt', at?, factor? }, value? }
+  //                                                                relative: rel.stat(at)·factor + value
   //        { at: [from, to], agg: 'min'|'max'|'mean'|'first', … }   aggregated over 0.5 d samples
+  //        { at: [from, to], agg: 'cross', stat, op, threshold }    the first DAY stat op threshold
+  //                                                                holds — "how long does it take?"
+  //      Careful: an agg 'max' compared 'lt' with the SAME stat at the start of the window can
+  //      never pass (the max includes it). Use agg 'min', or a rel.at before the window.
+  //      Every per-voxel stat is a mean over ALL N³ voxels, empty ones included, so a source only
+  //      the cells' own voxels see is diluted by (cells' voxels / N³) — tune against a headless run.
   //      stat paths: species.<key> | species.<key>.fraction | species.total (with scaffold) |
   //                  species.tissueTotal (without) | fiber.total | scaffold | fa | globalFA | fz |
   //                  logE | E | cells.a | cells.b | cells.c | cells.byType.<key>[.a|.b|.c|.n] |
@@ -162,14 +185,23 @@ export const TISSUE_TEMPLATE = {
       meaning: 'Hydrogel scaffold and cell-made fibrous matrix per volume.', type: 'stack', domain: [0, 1],
       series: [{ stat: 'species.gel', label: 'hydrogel', color: '#9fb7c9' }, { stat: 'species.fib', label: 'fibrous matrix', color: '#c4822a' }] },
     { key: 'align', label: 'Alignment & activation', unit: '0–1',
-      meaning: 'How strongly fibers share one direction, and how activated the cells are.', type: 'lines', domain: [0, 1],
-      series: [{ stat: 'fa', label: 'alignment', color: '#8f7ae0' }, { stat: 'cells.a', label: 'cell activation', color: '#e0602a' }] },
+      meaning: 'How strongly the tissue as a whole shares one fiber direction, and how activated the cells are.', type: 'lines', domain: [0, 1],
+      // `globalFA` is the anisotropy of the SUMMED tensor — "does the whole cube pull one way" —
+      // and `fa` is the mean of the per-voxel anisotropies, which stays high even when neighbouring
+      // patches point different ways. Label them apart: 'alignment' alone was the F8 mislabel.
+      series: [
+        { stat: 'globalFA', label: 'alignment (whole tissue)', color: '#8f7ae0' },
+        { stat: 'fa', label: 'local anisotropy', color: '#c3b6f2' },
+        { stat: 'cells.a', label: 'cell activation', color: '#e0602a' }] },
     { key: 'stiff', label: 'Stiffness', unit: 'kPa (log scale)',
       meaning: 'Gel plus fiber stiffness; cells sense it and respond.', type: 'log', domain: [-1, 2.5],
       series: [{ stat: 'logE', label: 'stiffness', color: '#8fb8d8' }] },
     { key: 'flux', label: 'Matrix flux', unit: 'density per day',
       meaning: 'Deposition against loss right now (gel hydrolysis counts as loss).', type: 'flux' },
   ],
+  // A series may add `marker: 'circle'|'square'|'diamond'` and, in a `stack`, `pattern: 'hatch'`
+  // or `pattern: 'none'`, so a pair of series is told apart without relying on colour. Left out,
+  // the app cycles the markers and hatches the top band of a multi-band stack itself.
 
   // ---- tissue-specific copy (the app generates the About panel and legend from it)
   copy: {
@@ -191,14 +223,27 @@ export const TISSUE_TEMPLATE = {
       fields: { g: 'Teal haze: growth factor. Denser haze, stronger signal.' },
       load: 'Translucent arrows on the top and bottom faces: mechanical load along the vertical axis.',
     },
+    // Optional: the tissue's own words for the two sides of the flux gauge, its ratio caption and
+    // the third (scaffold) bar. Anything omitted keeps the weather wording.
+    // gauge: { left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation',
+    //          scaffold: 'scaffold dissolving' },
+    // `legend` is drawn key by key in ITS OWN order and only the keys that are there — a tissue
+    // without a scaffold species simply omits `scaffold`, and a field with no line gets none.
+    // `vocabulary` fills the equilibrium sentence (src/copy.js). matrix / cellsActive /
+    // cellsQuiet are required; the rest default: cellsMid, cellStateNoun, activeStiff,
+    // activeSoftening, stiffHigh, stillHint, scaffoldNoun, metaphor { still, condensing,
+    // evaporating, steady }, thresholds { quiet, active, empty, stiffKPa, condensing,
+    // evaporating, still } and equilibrium(stats, V) — a function that replaces the sentence
+    // outright. `metaphor` and `thresholds` merge key by key, so overriding one keeps the rest.
     vocabulary: { matrix: 'matrix', cellsActive: 'activated cells are laying down matrix', cellsQuiet: 'the cells are quiet' },
   },
 
-  // ---- injury: omitted → no Injure button. (See fibrous.js for the shape.)
+  // ---- injury: omitted → no Injure button. (See fibrous.js for the shape; an optional
+  //      `flash: '…'` is the line the app announces when the wound is made.)
 
-  // ---- engine numerics this tissue wants (all optional; see ENGINE_DEFAULTS in src/engine.js).
+  // ---- engine numerics this tissue wants (all optional; the defaults are listed in
+  //      docs/EXTENDING.md §1 and live in ENGINE_DEFAULTS in src/engine.js).
   //      `vox: 1..4` asks for extra per-voxel accumulators (out.vox[k] → ctx.vox[k]); 0 is aSum.
-  // ---- engine numerics this tissue wants (all optional; see ENGINE_DEFAULTS in src/engine.js).
   //      `loadMode: 'compression'` flips the passive alignment: the tensor (and any cell that
   //      writes out.loadAlign) then relaxes into the plane PERPENDICULAR to the load axis
   //      instead of onto it. Default 'tension'.

@@ -1,7 +1,12 @@
+# Working directories, never committed. dist/tissue-weather.html and
+# dist/tissue-weather.artifact.html ARE committed (they are what GitHub Pages serves); the
+# vendored offline page is not — it is 1.1 MB of inlined Three.js that anyone can rebuild with
+# `node tools/build_single.mjs --vendor`, and CI uploads it as the `offline-page` artifact.
 __pycache__/
 *.pyc
 node_modules/
-dist/shots/
 .DS_Store
-dist/cdn-cache/
 scratch/
+dist/shots/
+dist/cdn-cache/
+dist/tissue-weather.offline.html

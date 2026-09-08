@@ -35,17 +35,20 @@ function runTo(days, { scenario = 'maturation', dials = {}, seed = 7, engine = n
   return { M, s: M.stats() };
 }
 
-/** Every string in the fibrous definition's copy, dials, scenarios and readouts, as one text. */
-function fibrousCopy() {
+/** Every string in a definition's copy, dials, scenarios and readouts, as one text. */
+function tissueCopy(t) {
   const parts = [];
   const walk = (v) => {
     if (typeof v === 'string') parts.push(v);
     else if (Array.isArray(v)) v.forEach(walk);
     else if (v && typeof v === 'object') Object.values(v).forEach(walk);
   };
-  walk({ copy: FIB.copy, dials: FIB.dials, scenarios: FIB.scenarios, readouts: FIB.readouts, injury: FIB.injury });
+  walk({ copy: t.copy, dials: t.dials, scenarios: t.scenarios, readouts: t.readouts, injury: t.injury });
   return parts.join('\n');
 }
+
+/** The fibrous definition's copy (most of the tests below are about that tissue). */
+const fibrousCopy = () => tissueCopy(FIB);
 
 describe('fidelity: what the copy claims, measured (docs/REVIEW.md F1–F9)', () => {
   // ---------------------------------------------------------------- F1
@@ -236,6 +239,121 @@ describe('fidelity: what the copy claims, measured (docs/REVIEW.md F1–F9)', ()
   });
 
   // ---------------------------------------------------------------- F9
+  // ------------------------------------------------------------ round-4 pins
+  // Six more claims the copy makes in numbers. Each was wrong once (a day-45 value labelled
+  // "week four", a control measured at a dial the student never has, an instruction that throws
+  // the student's change away), so each is measured here.
+
+  test('R1: the unloading preset moves THREE dials, and the copy says so', () => {
+    const mat = FIB.scenarios.find((s) => s.key === 'maturation').dials;
+    const unl = FIB.scenarios.find((s) => s.key === 'unloading').dials;
+    const moved = Object.keys(unl).filter((k) => unl[k] !== mat[k]);
+    assert.deepEqual(moved.sort(), ['Gext', 'protease', 'strain'],
+      'the preset the card describes moves the load, the bath AND the protease dial');
+    const steps = FIB.scenarios.find((s) => s.key === 'unloading').steps.join(' ');
+    assert.match(steps, /three dials/i, 'step 1 must count them correctly');
+    assert.match(steps, /protease 0\.4 → 0\.5/, 'and name the third one, which is the easy one to miss');
+  });
+
+  test('R1: the protease dial is part of the atrophy, and the load-only control needs it back at 0.4', () => {
+    const M = new TissueEngine(FIB, { seed: 7 });                // one engine: the pre-run is cached
+    const to = (days, dials) => { M.reset('unloading', { dials }); M.step(Math.round(days / M.dt)); return M.stats(); };
+    const shipped = to(60, {});
+    const heldProtease = to(60, { protease: 0.4 });
+    assert.ok(heldProtease.species.total - shipped.species.total > 0.05,
+      `holding protease at 0.4 leaves visibly more matrix at day 60: ${shipped.species.total.toFixed(3)} → ${heldProtease.species.total.toFixed(3)}`);
+    // the control the card offers: bath back to 0.5 but protease left where the preset put it
+    const bathOnly = to(90, { Gext: 0.5 });
+    assert.ok(bathOnly.species.total < 0.85,
+      `with protease still at 0.5 the density does NOT hold (day 90: ${bathOnly.species.total.toFixed(3)}), so the copy must not promise it does`);
+    assert.ok(bathOnly.cells.a > 0.5, `though the cells do come back on (a = ${bathOnly.cells.a.toFixed(3)})`);
+  });
+
+  test('R2: the unloading card puts Reset BEFORE the dial change, because Reset restores the preset', () => {
+    const step = FIB.scenarios.find((s) => s.key === 'unloading').steps.find((s) => /reset/i.test(s));
+    assert.ok(step, 'the card has to mention Reset: it is how the student gets back to the preset');
+    assert.match(step, /Reset \([^)]*back\)|Reset[^.]*(restores|puts the preset back)/i,
+      'and say what Reset does, since a dial moved before it is discarded');
+    assert.ok(!/put the load back at 0\.6, or the bath back at 0\.5, and reset/i.test(step),
+      'the old order (change a dial, then Reset) throws the change away');
+  });
+
+  test('R3: maturation dips before it climbs, and the card says so', () => {
+    const M = new TissueEngine(FIB, { seed: 7 });
+    M.reset('maturation');
+    const start = M.stats().species.total;
+    M.step(Math.round(2.5 / M.dt));
+    const dip = M.stats();
+    assert.ok(dip.species.total < start - 0.005, `density dips first: ${start.toFixed(4)} → ${dip.species.total.toFixed(4)}`);
+    assert.ok(dip.deposition < dip.degradation, 'and the flux bar is still on evaporating at day 2.5');
+    M.step(Math.round(1 / M.dt));
+    const after = M.stats();
+    assert.ok(after.deposition > after.degradation, 'it tips over by day 3.5');
+    const expect = FIB.scenarios.find((s) => s.key === 'maturation').expect;
+    assert.match(expect, /dip/i, 'the card must warn about the dip — it is the misconception the lesson breaks');
+  });
+
+  test('R4: the fibrosis numbers quoted for week four are week-four numbers', () => {
+    const M = new TissueEngine(FIB, { seed: 7 });
+    M.reset('fibrosis');
+    M.step(Math.round(28 / M.dt));
+    const s = M.stats(), E = 10 ** s.logE;
+    assert.ok(s.species.total > 0.78 && s.species.total < 0.87, `week four density is ${s.species.total.toFixed(3)}, not the 1.07 of day 45`);
+    assert.ok(E > 33 && E < 42, `week four stiffness is ${E.toFixed(1)} kPa, not the 80 kPa of day 45`);
+    assert.ok(s.cells.a > 0.85 && s.cells.a < 0.92, `activation ${s.cells.a.toFixed(3)}`);
+    assert.ok(s.globalFA < 0.16, `and the whole-tissue alignment is low: ${s.globalFA.toFixed(3)}`);
+    const teaching = read('docs/TEACHING.md');
+    assert.ok(!/by week four: density 1\.07/.test(teaching), 'TEACHING must not label the day-45 values as week four');
+    assert.match(FIB.scenarios.find((sc) => sc.key === 'fibrosis').expect, /week four: density 0\.8/,
+      'the card quotes the week-four density the student actually sees');
+  });
+
+  test('R5: "alignment leads maturity" is true of the faint trace, not of the headline one', () => {
+    const M = new TissueEngine(FIB, { seed: 7 });
+    M.reset('maturation');
+    M.step(Math.round(7 / M.dt));
+    const d7 = M.stats();
+    M.step(Math.round(83 / M.dt));
+    const d90 = M.stats();
+    const share = (a, b) => a / b;
+    const local = share(d7.fa, d90.fa);
+    const whole = share(d7.globalFA, d90.globalFA);
+    const mature = share(d7.fraction.mat, d90.fraction.mat);          // the mature FRACTION, as the chart draws it
+    assert.ok(local - mature > 0.1, `the per-voxel trace really does lead: ${(100 * local).toFixed(0)} % vs ${(100 * mature).toFixed(0)} %`);
+    assert.ok(Math.abs(whole - mature) < 0.03,
+      `but the HEADLINE trace does not: ${(100 * whole).toFixed(0)} % vs ${(100 * mature).toFixed(0)} % — the sentence has to name the trace it means`);
+    const teaching = read('docs/TEACHING.md');
+    assert.match(teaching, /local-anisotropy line has covered 38 %/, 'TEACHING must attribute the 38 % to the local trace');
+  });
+
+  test('R6: the load-only run softens no matrix — the cell reads tension, not the dial', () => {
+    const M = new TissueEngine(FIB, { seed: 7 });
+    M.reset('unloading', { dials: { Gext: 0.5, strain: 0, protease: 0.4 } });
+    const start = M.stats();
+    M.step(Math.round(90 / M.dt));
+    const end = M.stats();
+    assert.ok(10 ** end.logE > 10 ** start.logE,
+      `the matrix keeps STIFFENING (${(10 ** start.logE).toFixed(0)} → ${(10 ** end.logE).toFixed(0)} kPa), so "the matrix loses its tension" is the wrong story`);
+    assert.ok(end.cells.a < start.cells.a - 0.1, `while activation falls ${start.cells.a.toFixed(2)} → ${end.cells.a.toFixed(2)}`);
+    assert.ok(!/no dial reaches the cells/i.test(read('docs/TEACHING.md')),
+      'misconception 1 must not claim the load dial misses the cells: it is inside the cell rule, as tension');
+  });
+
+  // Every registered tissue, not just fibrous: both shipped cubes are the same 300 µm, and the
+  // round that fixed this fixed one tissue at a time. Looping is what would have caught the
+  // second one.
+  test('R7: the cube is 300 µm everywhere, and the app can say so', () => {
+    for (const [key, t] of Object.entries(TISSUES)) {
+      assert.equal(t.domainMicrons, 300, `${key}: the definition declares its scale, so the colour key can print it`);
+      const copy = tissueCopy(t);
+      assert.ok(!/third of a millimetre/i.test(copy), `${key}: a third of a millimetre is 333 µm; the docs derive every micron figure from 300`);
+      assert.match(copy, /300 µm/, `${key}: the intro states the scale`);
+    }
+    for (const doc of ['README.md', 'docs/MODEL.md', 'docs/SPEC.md']) {
+      assert.ok(!/third of a millimetre/i.test(read(doc)), `${doc} must use the same number`);
+    }
+  });
+
   test('F9: the load dial reads as a 0–1 index, not as a percentage strain', () => {
     const dial = FIB.dials.find((d) => d.key === 'strain');
     assert.equal(dial.format, 'fixed2', 'a "60 %" reading is read as 60 % engineering strain, which no tissue survives');

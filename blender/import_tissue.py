@@ -17,10 +17,14 @@ cells.alpha). Per frame it builds:
   * gel species    -> a haze: a Volume Cube fog per gel species whose density field is the voxel
                       density (nearest voxel centre, lightly blurred), Principled Volume in the
                       species colour with emission following density; --gel-mode spheres draws
-                      instanced translucent spheres (radius 0.62*h*density^(1/3)) instead
+                      the web renderer's own cloud instead -- jittered centres, radius
+                      0.62*h*cbrt(min(d,1.5))*sizeJit, alpha 0.28*min(d,1), thinned 55 % in a
+                      voxel that holds a cell
   * scaffold species -> a lattice: struts along x, y, z between neighbouring voxel
-                      centres (half struts to the faces), radius 0.08*h*density and alpha
-                      fading with density, so the scaffold dissolves as it degrades
+                      centres (half struts to the faces), carrying the mean density of the two
+                      voxels: radius max(0.018h, 0.075h*sqrt(d)), alpha 0.9*d^0.6 and, below
+                      d 0.4, shortened about the midpoint, so the lattice both thins and breaks
+                      up as it degrades (all four laws src/render.js _updateScaffold)
   * fields         -> a haze of small emissive spheres per diffusible field (meta.fields +
                       frames[i].fields), OFF by default: --fields g,o2 (or --fields all)
   * cells          -> icospheres per cell type: colour from the type's OKLab ramp (the web
@@ -145,10 +149,6 @@ def linear_to_hex(rgb):
     return "#" + "".join(f"{max(0, min(255, round(linear_to_srgb(c) * 255))):02x}" for c in rgb[:3])
 
 
-def lerp_colour(ca, cb, t):
-    return tuple(ca[k] * (1.0 - t) + cb[k] * t for k in range(4))
-
-
 # --------------------------------------------------------------------------
 # colour ramp: the web renderer's OKLab LUT (src/render.js, docs/REVIEW.md E3)
 #
@@ -239,6 +239,28 @@ def ramp_sample(lut, t, alpha=1.0):
     return (a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w, a[2] + (b[2] - a[2]) * w, alpha)
 
 
+# --------------------------------------------------------------------------
+# gel, scaffold and field haze: the web renderer's own laws (src/render.js opts), ported so the
+# two views agree on more than the fibers and the cells. Round-3 review E asked for these to be
+# either aligned or documented as per-renderer; these are the aligned ones (blender/README.md
+# section 5 lists what still differs, and why).
+# --------------------------------------------------------------------------
+
+GEL_SIZE = 0.62               # opts.gelSize      sphere radius = GEL_SIZE*h*cbrt(min(d,1.5))*sizeJit
+GEL_OPACITY = 0.28            # opts.gelOpacity   alpha = GEL_OPACITY * min(d, 1)
+GEL_CELL_FADE = 0.55          # opts.gelCellFade  alpha x (1-this) in a voxel that holds a cell
+GEL_JITTER_SPAN = 0.5         # x h, per axis: the gel spheres do not sit on the voxel centres
+GEL_SIZE_JITTER = (0.85, 0.3)  # per-sphere size factor GEL_SIZE_JITTER[0] + [1]*u
+GEL_SEED_XOR = 0x5bd1e995     # opts.seed ^ this seeds the gel jitter stream (4 draws per voxel)
+FIELD_SEED_XOR = 0x1b873593   # (opts.seed ^ this) + 7919*declaredFieldIndex seeds a field's cloud
+SCAFFOLD_RADIUS = 0.075       # opts.scaffoldRadius     x h at density 1
+SCAFFOLD_MIN_RADIUS = 0.018   # opts.scaffoldMinRadius  x h: a degraded strut stays a hairline
+SCAFFOLD_RADIUS_EXP = 0.5     # opts.scaffoldRadiusExp  radius = max(rMin, rMul*d^exp)
+SCAFFOLD_ALPHA_EXP = 0.6      # opts.scaffoldAlphaExp   alpha  = opacity * d^exp
+SCAFFOLD_OPACITY = 0.9        # opts.scaffoldOpacity
+SCAFFOLD_BREAK = 0.4          # opts.scaffoldBreak: below this density a strut shortens about its
+                              # midpoint (the lattice fragments at the nodes); 0 = off
+
 COL_BACKGROUND = "#0b0f14"
 COL_WIRE = "#4a5a70"      # src/render.js opts.wireColor
 COL_TEXT = "#d8dee6"
@@ -302,12 +324,19 @@ def parse_args(argv):
                     help="fiber/strut tubes via Geometry Nodes (default) or pre-built hexagonal prisms")
     ap.add_argument("--cells-mode", choices=["auto", "geonodes", "objects", "baked"], default="auto",
                     help="cells via Geometry Nodes instancing (default), one object per cell (<=200), or one baked mesh")
-    ap.add_argument("--fiber-radius", type=float, default=None,
-                    help=f"multiplier on the recipe's fiber radius (default: meta.render.fiber.radiusScale, "
-                         f"else {RECIPE_FIBER['radiusScale']}; the radius is radiusScale*0.12*h*sqrt(rho))")
-    ap.add_argument("--strut-radius", type=float, default=1.0, help="multiplier on the scaffold strut radius 0.08*h*density (default 1)")
+    ap.add_argument("--fiber-radius", type=float, default=1.0,
+                    help=f"multiplier on the recipe's fiber radiusScale (default 1 = draw what the file says; "
+                         f"the scale itself comes from meta.render.fiber.radiusScale, else {RECIPE_FIBER['radiusScale']}, "
+                         f"and the radius is radiusScale*0.12*h*sqrt(rho))")
+    ap.add_argument("--strut-radius", type=float, default=1.0,
+                    help=f"multiplier on the scaffold strut radius max({SCAFFOLD_MIN_RADIUS}*h, {SCAFFOLD_RADIUS}*h*sqrt(density)) (default 1)")
     ap.add_argument("--gel-scale", type=float, default=1.0, help="spheres mode: multiplier on the sphere radius 0.62*h*density^(1/3) (default 1)")
-    ap.add_argument("--gel-opacity", type=float, default=0.22, help="spheres mode: peak opacity of one sphere seen face-on at density 1 (default 0.22)")
+    ap.add_argument("--gel-opacity", type=float, default=GEL_OPACITY,
+                    help=f"spheres mode: peak opacity of one sphere seen face-on at density 1 "
+                         f"(default {GEL_OPACITY}, the web gelOpacity)")
+    ap.add_argument("--scaffold-opacity", type=float, default=SCAFFOLD_OPACITY,
+                    help=f"peak opacity of a strut at density 1; alpha = this * density^{SCAFFOLD_ALPHA_EXP} "
+                         f"(default {SCAFFOLD_OPACITY}, the web scaffoldOpacity)")
     ap.add_argument("--gel-emission", type=float, default=0.6, help="emission strength of the gel haze (default 0.6)")
     ap.add_argument("--gel-mode", choices=["auto", "volume", "spheres"], default="auto",
                     help="gel haze as a Points-to-Volume fog (default when the node exists) or as instanced translucent spheres")
@@ -379,9 +408,17 @@ def _pos(value, dflt):
 
 
 def normalise_fields(defs, frame_keys):
-    """meta.fields -> [{key,label,color}] (v0.4, docs/EXTENDING.md section 5). Absent in older
-    exports and in any file whose frames carry no `fields`, in which case this returns []; a key
-    that appears in the frames but not in meta gets a palette colour."""
+    """meta.fields -> [{key,label,color,idx,pointScale}] (v0.4, docs/EXTENDING.md section 5).
+    Absent in older exports and in any file whose frames carry no `fields`, in which case this
+    returns []; a key that appears in the frames but not in meta gets a palette colour.
+
+    `idx` is the field's position in the DECLARED list, which is what src/render.js _buildFields
+    offsets the per-field jitter seed by. It has to be kept here because load_trajectory then
+    drops the declared fields whose frames carry no grid: index after that filter and a file
+    declaring [g, o2] but carrying only o2 would draw o2 on g's cloud (E, finding 8).
+    `pointScale` (B5) multiplies the sprite/sphere size of this field. engine.exportMeta emits it
+    (and `style`) only when the tissue definition declares one, so an absent key means "the
+    renderer default", which is 1."""
     out, seen = [], set()
     for i, d in enumerate(defs or []):
         if isinstance(d, str):
@@ -390,12 +427,14 @@ def normalise_fields(defs, frame_keys):
             continue
         key = str(d.get("key") or f"f{i}")
         color = d.get("color") if hex_ok(d.get("color")) else FIELD_PALETTE[len(out) % len(FIELD_PALETTE)]
-        out.append({"key": key, "label": str(d.get("label") or key), "color": color})
+        out.append({"key": key, "label": str(d.get("label") or key), "color": color,
+                    "idx": len(out), "pointScale": _pos(d.get("pointScale"), 1.0)})
         seen.add(key)
     for key in frame_keys:
         if key not in seen:
             log(f"WARNING field {key!r} is in the frames but not in meta.fields; giving it a palette colour")
-            out.append({"key": key, "label": key, "color": FIELD_PALETTE[len(out) % len(FIELD_PALETTE)]})
+            out.append({"key": key, "label": key, "color": FIELD_PALETTE[len(out) % len(FIELD_PALETTE)],
+                        "idx": len(out), "pointScale": 1.0})
     return out
 
 
@@ -407,7 +446,13 @@ def normalise_cell_types(defs):
         colors = list(d.get("colors") or [])
         if len(colors) < 2 or not all(hex_ok(c) for c in colors[:2]):
             log(f"WARNING cell type {d.get('key', i)!r}: needs two hex colours; using the fibroblast pair")
-            colors = FORMAT1_CELL_TYPE["colors"]
+            colors = list(FORMAT1_CELL_TYPE["colors"])
+        # A THIRD colour is not a third stop: src/render.js setTissue reads it as the ramp's
+        # explicit mid (and still takes the end colour from colors[1]). Keep it -- truncating to
+        # two here would silently draw such a type through the default mid #f1e3d3 instead (E11).
+        elif len(colors) > 2 and not hex_ok(colors[2]):
+            log(f"WARNING cell type {d.get('key', i)!r}: colors[2] is not a hex colour; ignoring it")
+            colors = colors[:2]
         shape = dict(d.get("shape") or {})
         by = shape.get("by") if shape.get("by") in ("a", "b") else "a"
         # a state-dependent radius exports the state-0 value as `radius` plus radiusBy {by,min,max}
@@ -419,7 +464,7 @@ def normalise_cell_types(defs):
             radius_by = {"by": rb.get("by") if rb.get("by") in ("a", "b") else "a", "min": r_min, "max": r_max}
             r0 = r_min
         out.append({"key": str(d.get("key") or f"type{i}"), "label": str(d.get("label") or d.get("key") or f"type{i}"),
-                    "colors": [colors[0], colors[1]],
+                    "colors": colors[:3] if len(colors) > 2 else [colors[0], colors[1]],
                     "shape": {"by": by, "aspectMin": _pos(shape.get("aspectMin"), 1.0),
                               "aspectMax": _pos(shape.get("aspectMax"), 2.5)},
                     "radius": r0, "radiusBy": radius_by})
@@ -443,6 +488,13 @@ def cell_ramp(meta, cell_type):
     cols = cell_type["colors"]
     c0 = saturate_linear(hex_to_linear(cols[0]), sat)
     c1 = saturate_linear(hex_to_linear(cols[1] if len(cols) > 1 else cols[0]), sat)
+    # src/render.js setTissue, verbatim: `mid = cols.length > 2 ? _lin(cols[1], sat) : cellColorMid`
+    # -- a third entry replaces the mid (and the END colour still comes from cols[1], so cols[2]
+    # itself is never drawn). Mirrored rather than improved on: parity is the contract, and
+    # blender/test_recipe_parity.py lifts those three lines out of src/render.js, so if the
+    # renderer's rule changes, this fails until it is copied over (E, finding 11).
+    if len(cols) > 2:
+        mid = saturate_linear(hex_to_linear(cols[1]), sat)
     return ramp_lut(c0, c1, mode, lift, mid)
 
 
@@ -641,22 +693,25 @@ RECIPE_FIBER = {
 
 
 def recipe_from_meta(meta):
-    """RECIPE_FIBER overridden by `meta.render` when the writer put the recipe it used in the
-    export (src/recipe.js recipeRenderMeta / renderer.layoutParams). Unknown recipe names and
-    missing/!finite values fall back to the constants above, so an older file still reads."""
+    """(recipe, source): RECIPE_FIBER overridden by `meta.render` when the writer put the recipe
+    it used in the export (src/recipe.js recipeRenderMeta / renderer.layoutParams). Unknown recipe
+    names and missing/!finite values fall back to the constants above, so an older file still
+    reads. `source` is 'meta.render' ONLY when the block was really used -- a rejected block used
+    to be announced as if it had been honoured, right under the warning saying it was not
+    (round-3 review E, finding 4)."""
     out = dict(RECIPE_FIBER)
     r = meta.get("render") if isinstance(meta.get("render"), dict) else None
     if not r:
-        return out
+        return out, "built-in recipe"
     name = r.get("recipe")
     if name and name != "fiber-v1":
         log(f"WARNING meta.render.recipe is {name!r}, not 'fiber-v1'; using the built-in constants")
-        return out
+        return out, "built-in recipe"
     for key, src in [("seed", r), ("K", r)] + [(k, r.get("fiber") or {}) for k in RECIPE_FIBER if k not in ("seed", "K")]:
         v = src.get(key)
         if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
             out[key] = int(v) if key in ("seed", "K") else float(v)
-    return out
+    return out, "meta.render"
 
 
 class FiberLayout:
@@ -760,6 +815,36 @@ def jitter_points(N, centers, seed, margin, L=1.0):
     return out
 
 
+def gel_jitter(N, seed):
+    """src/render.js _buildGel: per voxel three centre offsets (x h) and one size factor, from
+    ONE mulberry32 stream seeded `opts.seed ^ 0x5bd1e995`, four draws per voxel in index order.
+    The gel haze is not a grid of spheres on the voxel centres in the browser, and it should not
+    be one here either."""
+    rnd = mulberry32(seed)
+    out = []
+    for _ in range(N * N * N):
+        dx = (rnd() - 0.5) * GEL_JITTER_SPAN
+        dy = (rnd() - 0.5) * GEL_JITTER_SPAN
+        dz = (rnd() - 0.5) * GEL_JITTER_SPAN
+        out.append((dx, dy, dz, GEL_SIZE_JITTER[0] + GEL_SIZE_JITTER[1] * rnd()))
+    return out
+
+
+def cell_occupancy(fr, N, L):
+    """src/render.js _cellOccupancy: 1 for every voxel holding at least one cell. The gel alpha
+    is thinned there (GEL_CELL_FADE) so cells keep their contrast inside a dense haze."""
+    occ = [0] * (N * N * N)
+    inv = (1.0 / L if L > 0 else 1.0) * N
+    xs = fr["cx"]
+    for c in range(fr["n_cells"]):
+        idx = []
+        for d in range(3):
+            i = int(xs[3 * c + d] * inv)       # JS (x)|0 truncates toward zero, as int() does
+            idx.append(0 if i < 0 else (N - 1 if i >= N else i))
+        occ[(idx[0] * N + idx[1]) * N + idx[2]] = 1
+    return occ
+
+
 def species_colours(defs):
     """Species colours, straight from the definition hex (docs/REVIEW.md E4). The web renderer's
     fiber / gel / scaffold saturation factors are all 1.0, so there is nothing to apply here --
@@ -846,10 +931,18 @@ def fiber_segments(fr, meta, layout, rho_min=None):
     return verts, edges, attrs
 
 
-def scaffold_struts(fr, meta, layout, dens_min):
-    """One frame -> (verts, edges, density, colour per vertex) for the strut lattice:
+def scaffold_struts(fr, meta, layout, dens_min, radius_scale=1.0):
+    """One frame -> (verts, edges, density, colour, radius per vertex) for the strut lattice:
     from every voxel centre one strut along +x, +y, +z to the next centre (or to the
-    cube face on the last voxel), plus a half strut to the face on the first voxel."""
+    cube face on the last voxel), plus a half strut to the face on the first voxel.
+
+    The laws are src/render.js `_updateScaffold`, not a look-alike of it (E5): a strut carries
+    ONE density -- the mean of the two voxels it joins, the voxel's own for a strut that ends on
+    a cube face -- and from it a radius max(0.018*h, 0.075*h*sqrt(min(d,1))), an alpha
+    0.9*min(d,1)^0.6 (applied in the material) and, below density 0.4, a shortening about its
+    midpoint to 0.3+0.7*d/0.4 of its length, so the lattice fragments at the nodes as it
+    degrades instead of only thinning. `radius_scale` is --strut-radius.
+    """
     N, h, L = layout.N, layout.h, layout.L
     defs = meta["kinds"]["scaffold"]
     arrays = [fr["species"][s["key"]] for s in defs]
@@ -857,18 +950,36 @@ def scaffold_struts(fr, meta, layout, dens_min):
     fallback = cols[0] if cols else (1.0, 1.0, 1.0, 1.0)
     dens = fr["scaffold"]
     centers = layout.centers
-    verts, edges, a_d, a_col = [], [], [], []
+    r_mul = SCAFFOLD_RADIUS * h * radius_scale
+    r_min = SCAFFOLD_MIN_RADIUS * h * radius_scale
+    verts, edges, a_d, a_col, a_rad = [], [], [], [], []
 
     def add(p0, p1, v0, v1):
         d0, d1 = dens[v0], dens[v1]
-        if d0 < dens_min and d1 < dens_min:
+        d = 0.5 * (d0 + d1)                 # a face strut passes the same voxel twice -> d = d0
+        if not (d >= dens_min):
             return
+        dd = 1.0 if d > 1.0 else (d if d > 0.0 else 0.0)
+        rad = r_mul * (dd ** SCAFFOLD_RADIUS_EXP)
+        if rad < r_min:
+            rad = r_min
+        if SCAFFOLD_BREAK > 0.0 and dd < SCAFFOLD_BREAK:
+            f = 0.3 + 0.7 * dd / SCAFFOLD_BREAK
+            mid = tuple(0.5 * (p0[k] + p1[k]) for k in range(3))
+            p0 = tuple(mid[k] + (p0[k] - mid[k]) * f for k in range(3))
+            p1 = tuple(mid[k] + (p1[k] - mid[k]) * f for k in range(3))
+        # the web mixes the two voxels' colours weighted by their densities (one voxel: its own)
+        w = d0 + d1
+        c0 = mixed_colour(arrays, cols, v0, d0, fallback)
+        c1 = mixed_colour(arrays, cols, v1, d1, fallback)
+        col = c0 if w <= 1e-12 else tuple((c0[k] * d0 + c1[k] * d1) / w for k in range(3)) + (1.0,)
         i0 = len(verts)
         verts.append(p0)
         verts.append(p1)
         edges.append((i0, i0 + 1))
-        a_d.extend((d0, d1))
-        a_col.extend((mixed_colour(arrays, cols, v0, d0, fallback), mixed_colour(arrays, cols, v1, d1, fallback)))
+        a_d.extend((d, d))
+        a_rad.extend((rad, rad))
+        a_col.extend((col, col))
 
     for i in range(N):
         for j in range(N):
@@ -887,27 +998,41 @@ def scaffold_struts(fr, meta, layout, dens_min):
                         p = list(c)
                         p[axis] = 0.0
                         add(c, tuple(p), v, v)
-    return verts, edges, a_d, a_col
+    return verts, edges, a_d, a_col, a_rad
 
 
-def gel_points(fr, meta, layout, dens_min, scale):
-    """One frame -> (positions, sphere radius, density, colour) per voxel with gel."""
-    N, h = layout.N, layout.h
+def gel_points(fr, meta, layout, dens_min, scale, jitter=None, occ=None):
+    """One frame -> (positions, sphere radius, density, alpha, colour) per voxel with gel.
+
+    src/render.js `_updateGel`, spheres style: radius GEL_SIZE*h*cbrt(min(d,1.5)) times the
+    per-sphere size factor of the jitter stream, centre = the voxel centre plus that stream's
+    offset clamped so the sphere stays inside the block, and alpha min(d,1) -- thinned to
+    (1-GEL_CELL_FADE) in a voxel that holds a cell, so cells keep their contrast in a dense haze.
+    `jitter` (gel_jitter) and `occ` (cell_occupancy) are optional: without them this is the
+    un-jittered, un-faded cloud, which is all a --dry-run count needs.
+    """
+    N, h, L = layout.N, layout.h, layout.L
     defs = meta["kinds"]["gel"]
     arrays = [fr["species"][s["key"]] for s in defs]
     cols = species_colours(defs)
     fallback = cols[0] if cols else (1.0, 1.0, 1.0, 1.0)
     dens = fr["gel"]
-    pos, rad, a_d, a_col = [], [], [], []
+    keep = 1.0 - GEL_CELL_FADE
+    pos, rad, a_d, a_alpha, a_col = [], [], [], [], []
     for v in range(N * N * N):
         d = dens[v]
         if not (d >= dens_min):
             continue
-        pos.append(layout.centers[v])
-        rad.append(0.62 * h * (min(d, 1.5) ** (1.0 / 3.0)) * scale)
+        j = jitter[v] if jitter else (0.0, 0.0, 0.0, 1.0)
+        r = GEL_SIZE * h * (min(d, 1.5) ** (1.0 / 3.0)) * scale * j[3]
+        c = layout.centers[v]
+        lo = r if r < 0.5 * L else 0.5 * L
+        pos.append(tuple(clamp(c[k] + j[k] * h, lo, L - lo) for k in range(3)))
+        rad.append(r)
         a_d.append(min(d, 1.5))
+        a_alpha.append(min(d, 1.0) * (keep if occ and occ[v] else 1.0))
         a_col.append(mixed_colour(arrays, cols, v, d, fallback))
-    return pos, rad, a_d, a_col
+    return pos, rad, a_d, a_alpha, a_col
 
 
 def gel_species_points(fr, key, layout, dens_min):
@@ -1151,9 +1276,11 @@ def attribute_colour_material(name, col_attr, emission, depth_attr=None, roughne
     return mat
 
 
-def scaffold_material(name, emission):
-    """Glassy struts: colour attribute 'col', alpha = clamp(0.15 + 1.6*dens) so thin, degraded
-    struts fade out on top of shrinking (radius follows density in the node tree)."""
+def scaffold_material(name, emission, opacity=SCAFFOLD_OPACITY):
+    """Glassy struts: colour attribute 'col', alpha = opacity * min(dens,1)^0.6 -- the web
+    renderer's scaffold alpha (src/render.js `_updateScaffold`: AL = d^scaffoldAlphaExp, material
+    opacity scaffoldOpacity), so a degrading strut fades exactly as it does in the browser on top
+    of thinning and breaking up. Radius comes from the 'rad' attribute the python computed."""
     mat, nodes, links, bsdf = principled_material(name, 0.3)
     if "Specular IOR Level" in bsdf.inputs:
         bsdf.inputs["Specular IOR Level"].default_value = 0.5
@@ -1162,21 +1289,31 @@ def scaffold_material(name, emission):
     links.new(nsock(at, "Color"), bsdf.inputs["Emission Color"])
     bsdf.inputs["Emission Strength"].default_value = emission
     ad = attribute_node(nodes, "dens", (-700, -150))
-    madd = nodes.new("ShaderNodeMath")
-    madd.operation = "MULTIPLY_ADD"
-    madd.inputs[1].default_value = 1.6
-    madd.inputs[2].default_value = 0.15
-    madd.use_clamp = True
-    madd.location = (-450, -150)
-    links.new(nsock(ad, "Fac"), madd.inputs[0])
-    links.new(madd.outputs[0], bsdf.inputs["Alpha"])
+    lim = nodes.new("ShaderNodeMath")
+    lim.operation = "MINIMUM"
+    lim.inputs[1].default_value = 1.0
+    lim.location = (-500, -150)
+    links.new(nsock(ad, "Fac"), lim.inputs[0])
+    pw = nodes.new("ShaderNodeMath")
+    pw.operation = "POWER"
+    pw.inputs[1].default_value = SCAFFOLD_ALPHA_EXP
+    pw.location = (-330, -150)
+    links.new(lim.outputs[0], pw.inputs[0])
+    op = nodes.new("ShaderNodeMath")
+    op.operation = "MULTIPLY"
+    op.inputs[1].default_value = opacity
+    op.use_clamp = True
+    op.location = (-160, -150)
+    links.new(pw.outputs[0], op.inputs[0])
+    links.new(op.outputs[0], bsdf.inputs["Alpha"])
     set_blend(mat, "DITHERED")
     return mat
 
 
 def gel_material(name, emission, opacity):
     """Haze: Mix(Transparent, Emission + Diffuse) with
-    fac = opacity * (0.3 + 0.7*dens) * (1 - facing)^1.5 * (front faces only)."""
+    fac = opacity * alpha * (1 - facing)^1.5 * (front faces only), where the per-point `alpha`
+    is the web renderer's own min(density, 1) thinned under cells (see gel_points)."""
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nodes, links = mat.node_tree.nodes, mat.node_tree.links
@@ -1186,7 +1323,7 @@ def gel_material(name, emission, opacity):
     out = nodes.get("Material Output") or nodes.new("ShaderNodeOutputMaterial")
     out.location = (600, 0)
     at = attribute_node(nodes, "col", (-900, 300))
-    ad = attribute_node(nodes, "dens", (-900, 0))
+    ad = attribute_node(nodes, "alpha", (-900, 0))
     emis = nodes.new("ShaderNodeEmission"); emis.location = (-200, 300)
     emis.inputs["Strength"].default_value = emission
     diff = nodes.new("ShaderNodeBsdfDiffuse"); diff.location = (-200, 150)
@@ -1205,14 +1342,9 @@ def gel_material(name, emission, opacity):
     soft = nodes.new("ShaderNodeMath"); soft.operation = "POWER"; soft.location = (-500, -250)
     soft.inputs[1].default_value = 1.5
     links.new(inv.outputs[0], soft.inputs[0])
-    dm = nodes.new("ShaderNodeMath"); dm.operation = "MULTIPLY_ADD"; dm.location = (-700, 0)
-    dm.inputs[1].default_value = 0.7
-    dm.inputs[2].default_value = 0.3
-    dm.use_clamp = True
-    links.new(nsock(ad, "Fac"), dm.inputs[0])
     op = nodes.new("ShaderNodeMath"); op.operation = "MULTIPLY"; op.location = (-300, -100)
     links.new(soft.outputs[0], op.inputs[0])
-    links.new(dm.outputs[0], op.inputs[1])
+    links.new(nsock(ad, "Fac"), op.inputs[1])
     opk = nodes.new("ShaderNodeMath"); opk.operation = "MULTIPLY"; opk.location = (-100, -100)
     opk.inputs[1].default_value = opacity
     links.new(op.outputs[0], opk.inputs[0])
@@ -1409,7 +1541,8 @@ def make_tube_geonodes(name, radius_attr, mult, exponent, material):
     named float attribute) -> Curve to Mesh (6-vertex circle) -> Set Material.
     Fibers: attr 'rad', mult 1, exponent 1 -- fiber_segments() already applied the whole
     src/recipe.js radius law per rod, jitter and fade included, so nothing is left to do here.
-    Scaffold: attr 'dens', 0.08*h, exponent 1 (a per-renderer law, not shared with the web)."""
+    Scaffold: the same, from scaffold_struts()' 'rad' (src/render.js's max(0.018*h,
+    0.075*h*sqrt(min(d,1))), which has a floor and so is not a plain mult*attr^exponent)."""
     tree = bpy.data.node_groups.new(name, "GeometryNodeTree")
     tree.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
     tree.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
@@ -1545,12 +1678,15 @@ def baked_spheres(ico_verts, ico_faces, pos, scale, rot, per_point_attrs):
     return bv, bf, out_attrs
 
 
-def cone_pydata(radius, height, z0, up=True, segments=24):
-    """Cone with base at z0, apex at z0 +/- height, centred on the cube's z axis."""
+def cone_pydata(radius, height, z0, up=True, segments=24, cx=0.5, cy=0.5):
+    """Cone with base at z0, apex at z0 +/- height, centred on the cube's z axis (cx, cy).
+    Everything else about the arrows scales with L, so the axis has to as well: with L != 1 a
+    hard-coded 0.5 put the arrows off the cube and the camera's fit point where no geometry
+    was (round-3 review E, finding 10)."""
     apex_z = z0 + (height if up else -height)
-    verts = [(0.5 + radius * math.cos(2 * math.pi * s / segments), 0.5 + radius * math.sin(2 * math.pi * s / segments), z0)
+    verts = [(cx + radius * math.cos(2 * math.pi * s / segments), cy + radius * math.sin(2 * math.pi * s / segments), z0)
              for s in range(segments)]
-    verts.append((0.5, 0.5, apex_z))
+    verts.append((cx, cy, apex_z))
     apex = segments
     faces = [(s, (s + 1) % segments, apex) if up else ((s + 1) % segments, s, apex) for s in range(segments)]
     faces.append(tuple(reversed(range(segments))) if up else tuple(range(segments)))
@@ -1646,7 +1782,12 @@ def haze_visibility(ob):
 
 def build_scene(meta, frames, args, module_mode):
     scene = bpy.context.scene
-    N, L, K = meta["N"], meta["L"], meta["K"]
+    N, L = meta["N"], meta["L"]
+    # K is the RECIPE's K -- meta.render.K, i.e. what the browser actually drew, when the export
+    # carries one. The layout stream spends seven draws per rod in voxel order, so laying out a
+    # different number of rods per voxel does not merely change the rod count: every voxel after
+    # the first gets different offsets and vectors (round-3 review E, finding 9).
+    K = args.recipe["K"]
     layout = FiberLayout(N, K, L, args.seed, args.recipe)
     h = layout.h
     n_frames = len(frames)
@@ -1669,7 +1810,7 @@ def build_scene(meta, frames, args, module_mode):
     # ---- materials
     fiber_mat = attribute_colour_material("TW_fiber", "col", args.emission, depth_attr="rho", roughness=0.65)
     cell_mat = attribute_colour_material("TW_cell", "col", args.emission * 0.8, roughness=0.45)
-    scaffold_mat = scaffold_material("TW_scaffold", args.emission * 0.5) if draw_scaffold else None
+    scaffold_mat = scaffold_material("TW_scaffold", args.emission * 0.5, args.scaffold_opacity) if draw_scaffold else None
     gel_mat = None
     cell_obj_mat = None
     wire_mat = emissive_material("TW_wire", COL_WIRE, strength=0.8)
@@ -1688,7 +1829,7 @@ def build_scene(meta, frames, args, module_mode):
             # so the tube tree only has to read it: no power, no scale of its own
             fiber_tree = make_tube_geonodes("TW_FiberTubes", "rad", 1.0, 1.0, fiber_mat)
             if draw_scaffold:
-                strut_tree = make_tube_geonodes("TW_ScaffoldStruts", "dens", 0.08 * h * args.strut_radius, 1.0, scaffold_mat)
+                strut_tree = make_tube_geonodes("TW_ScaffoldStruts", "rad", 1.0, 1.0, scaffold_mat)
             fiber_mode = "geonodes"
         except Exception as exc:  # pragma: no cover - depends on Blender version
             if args.fiber_mode == "geonodes":
@@ -1716,21 +1857,29 @@ def build_scene(meta, frames, args, module_mode):
             except Exception as exc:  # pragma: no cover
                 log(f"WARNING gel Geometry Nodes setup failed ({exc}); baking gel spheres into one mesh")
                 gel_mode = "baked"
-    field_trees, field_pos = {}, {}
+    # the gel spheres' own jitter stream (src/render.js _buildGel): three offsets and a size
+    # factor per voxel, fixed per (N, seed) like the fiber layout, so a sphere keeps its place
+    # from frame to frame. The volume path samples the voxel grid and needs none of it.
+    gel_jit = gel_jitter(N, args.seed ^ GEL_SEED_XOR) if draw_gel and gel_mode in ("spheres", "baked") else None
+    field_trees, field_pos, field_size = {}, {}, {}
     if field_defs:
-        size = args.field_scale * h
-        for i, fd in enumerate(meta["fields"]):
+        for fd in meta["fields"]:
             if fd["key"] not in args.field_set:
                 continue
+            # the sprite's world size, src/render.js _buildFields: pointSize * h * pointScale
+            size = args.field_scale * h * fd.get("pointScale", 1.0)
             fm = field_material(f"TW_field_{fd['key']}", fd["color"], args.field_opacity)
             try:
                 field_trees[fd["key"]] = make_sphere_geonodes(f"TW_FieldSpheres_{fd['key']}", "r", fm, subdiv=1)
             except Exception as exc:  # pragma: no cover
                 log(f"WARNING field haze Geometry Nodes setup failed ({exc}); {fd['key']} is not drawn")
                 continue
+            field_size[fd["key"]] = size
             # the web renderer gives each field its own jittered, clamped cloud so two hazes
-            # interleave instead of coinciding (src/render.js _buildFields)
-            field_pos[fd["key"]] = jitter_points(N, layout.centers, (args.seed ^ 0x1b873593) + 7919 * i, 0.5 * size, L)
+            # interleave instead of coinciding (src/render.js _buildFields). The seed offset uses
+            # the field's DECLARED index, so dropping a declared field whose frames carry no grid
+            # cannot hand its cloud to the next one (E, finding 8).
+            field_pos[fd["key"]] = jitter_points(N, layout.centers, (args.seed ^ FIELD_SEED_XOR) + 7919 * fd.get("idx", 0), 0.5 * size, L)
     cells_mode = args.cells_mode
     cell_tree = None
     max_cells = max(fr["n_cells"] for fr in frames)
@@ -1785,12 +1934,12 @@ def build_scene(meta, frames, args, module_mode):
                 objs.append(tubes_object(f"TW_fibers_{i:03d}", fcol, verts, edges, attrs, "rad",
                                          1.0, 1.0, fiber_tree, fiber_mat))
         if draw_scaffold:
-            sv, se, s_d, s_col = scaffold_struts(fr, meta, layout, args.scaffold_min)
+            sv, se, s_d, s_col, s_rad = scaffold_struts(fr, meta, layout, args.scaffold_min, args.strut_radius)
             n_str = len(se)
             if se:
-                attrs = {"dens": ("FLOAT", s_d), "col": ("FLOAT_COLOR", s_col)}
-                objs.append(tubes_object(f"TW_scaffold_{i:03d}", fcol, sv, se, attrs, "dens",
-                                         0.08 * h * args.strut_radius, 1.0, strut_tree, scaffold_mat))
+                attrs = {"rad": ("FLOAT", s_rad), "dens": ("FLOAT", s_d), "col": ("FLOAT_COLOR", s_col)}
+                objs.append(tubes_object(f"TW_scaffold_{i:03d}", fcol, sv, se, attrs, "rad",
+                                         1.0, 1.0, strut_tree, scaffold_mat))
         if draw_gel and gel_mode == "volume":
             for s in gel_defs:
                 gp, g_d, n_on = gel_species_points(fr, s["key"], layout, args.gel_min)
@@ -1803,17 +1952,22 @@ def build_scene(meta, frames, args, module_mode):
                     haze_visibility(ob)
                     objs.append(ob)
         elif draw_gel:
-            gp, gr, g_d, g_col = gel_points(fr, meta, layout, args.gel_min, args.gel_scale)
+            # the haze thins in a voxel holding a cell, as in the browser (src/render.js
+            # _cellOccupancy), whether or not the cells layer itself is being drawn
+            gp, gr, g_d, g_al, g_col = gel_points(fr, meta, layout, args.gel_min, args.gel_scale,
+                                                  gel_jit, cell_occupancy(fr, N, L))
             n_gel = len(gp)
             if gp:
                 if gel_mode == "spheres":
                     ob = new_mesh_object(f"TW_gel_{i:03d}", gp, [], [], fcol,
-                                         attrs={"r": ("FLOAT", gr), "dens": ("FLOAT", g_d), "col": ("FLOAT_COLOR", g_col)})
+                                         attrs={"r": ("FLOAT", gr), "dens": ("FLOAT", g_d),
+                                                "alpha": ("FLOAT", g_al), "col": ("FLOAT_COLOR", g_col)})
                     mod = ob.modifiers.new("GelSpheres", "NODES")
                     mod.node_group = gel_tree
                 else:
                     bv, bf, battrs = baked_spheres(ico_verts, ico_faces, gp, gr, None,
-                                                   {"dens": ("FLOAT", g_d), "col": ("FLOAT_COLOR", g_col)})
+                                                   {"dens": ("FLOAT", g_d), "alpha": ("FLOAT", g_al),
+                                                    "col": ("FLOAT_COLOR", g_col)})
                     ob = new_mesh_object(f"TW_gel_{i:03d}", bv, [], bf, fcol, attrs=battrs, smooth=True)
                     ob.data.materials.append(gel_mat)
                 haze_visibility(ob)
@@ -1821,7 +1975,7 @@ def build_scene(meta, frames, args, module_mode):
 
         for key, tree in field_trees.items():
             fp, fr_rad, fv = field_points(fr, key, layout, field_pos[key], args.field_min,
-                                          args.field_scale * h, args.field_scale_of.get(key, 1.0))
+                                          field_size[key], args.field_scale_of.get(key, 1.0))
             n_fld += len(fp)
             if fp:
                 ob = new_mesh_object(f"TW_field_{key}_{i:03d}", fp, [], [], fcol,
@@ -1888,7 +2042,7 @@ def build_scene(meta, frames, args, module_mode):
     if load >= 0.02:
         height, radius = L * (0.10 + 0.22 * load), L * (0.05 + 0.07 * load)
         for name, z0, up in (("TW_load_top", 1.03 * L, True), ("TW_load_bottom", -0.03 * L, False)):
-            cv, cf = cone_pydata(radius, height, z0, up=up)
+            cv, cf = cone_pydata(radius, height, z0, up=up, cx=0.5 * L, cy=0.5 * L)
             cone = new_mesh_object(name, cv, [], cf, static, smooth=True)
             cone.data.materials.append(arrow_mat)
             fit_pts.append((0.5 * L, 0.5 * L, z0 + (height if up else -height)))   # keep the tip in frame
@@ -2124,25 +2278,27 @@ def default_input():
 def resolve_recipe(meta, args):
     """Fill the fiber-layout options the CLI left at their "ask the file" default (E2): the seed
     and the radius scale come from `meta.render` (what the web renderer actually used) when the
-    export carries it, and from the RECIPE_FIBER constants otherwise. An explicit flag wins."""
-    recipe = recipe_from_meta(meta)
-    src = "meta.render" if isinstance(meta.get("render"), dict) else "built-in recipe"
+    export carries it, and from the RECIPE_FIBER constants otherwise. `--seed` replaces the seed;
+    `--fiber-radius` MULTIPLIES the recipe's radiusScale (1 = leave the file's own value alone)."""
+    recipe, src = recipe_from_meta(meta)
     if args.seed is None:
         args.seed = recipe["seed"]
     else:
         recipe["seed"] = args.seed
-    if args.fiber_radius is not None:
-        recipe["radiusScale"] = args.fiber_radius
-    args.fiber_radius = recipe["radiusScale"]
+    if args.fiber_radius != 1.0:
+        recipe["radiusScale"] *= args.fiber_radius
     if args.rho_min is None:
         args.rho_min = recipe["minDensity"]
     args.recipe = recipe
     if recipe["K"] != meta["K"]:
-        # meta.K is what the frames were written for; meta.render.K is what the renderer drew.
-        # They can only differ if the app was run with a non-default renderer K.
-        log(f"WARNING meta.render.K is {recipe['K']} but meta.K is {meta['K']}; laying out {meta['K']} rods per voxel")
-    log(f"fiber recipe from {src}: seed {recipe['seed']}, K {meta['K']}, radiusScale {recipe['radiusScale']:g}, "
-        f"lengthScale {recipe['lengthScale']:g}, minDensity {recipe['minDensity']:g} (ramp {recipe['minDensityRamp']:g})")
+        # meta.K is what the frames were written for; meta.render.K is what the renderer DREW,
+        # and matching the browser is the whole point, so the layout follows meta.render.K. The
+        # frame arrays are per voxel, so they do not care how many rods each voxel gets.
+        log(f"WARNING meta.render.K is {recipe['K']} but meta.K is {meta['K']}; laying out "
+            f"{recipe['K']} rods per voxel (meta.render.K is what the browser drew)")
+    log(f"fiber recipe from {src}: seed {recipe['seed']}, K {recipe['K']}, radiusScale {recipe['radiusScale']:g}, "
+        f"lengthScale {recipe['lengthScale']:g}, minDensity {recipe['minDensity']:g} (ramp {recipe['minDensityRamp']:g})"
+        + (f" [x{args.fiber_radius:g} from --fiber-radius]" if args.fiber_radius != 1.0 else ""))
     return recipe
 
 
@@ -2188,7 +2344,8 @@ def resolve_fields(meta, frames, args):
 
 
 def dry_run(meta, frames, args):
-    N, K, L = meta["N"], meta["K"], meta["L"]
+    N, L = meta["N"], meta["L"]
+    K = args.recipe["K"]              # what would be drawn; resolve_recipe warns if meta.K differs
     layout = FiberLayout(N, K, L, args.seed, args.recipe)
     layers = args.layer_set
     print(f"{SCRIPT_TAG} dry run: format {meta['format']}, tissue {(meta.get('tissue') or '?')!r}"

@@ -13,6 +13,10 @@
 // TISSUES object. Both edits are idempotent-by-refusal: if the key, the file or the identifier
 // is already there, nothing is written and the tool exits 1 with a message.
 //
+// It does NOT write the as-built parameter block that `npm test` requires (docs/tissues/<key>.md
+// plus an entry in PARAMS_DOCS in tools/check_params_doc.mjs) — that file is prose about the
+// model, so it is step 5 of EXTENDING §8 and the tool only prints the recipe for it.
+//
 // The generated file obeys the build constraints of docs/EXTENDING.md §0 (ES module, named
 // exports only, unique top-level identifiers, local imports on one line), so
 // `node tools/build_single.mjs` and `node --test tests/*.test.mjs` keep working; the starter
@@ -126,5 +130,11 @@ console.log(`wrote ${rel} (${CONST}) and registered '${key}' in src/tissues/inde
 next (docs/EXTENDING.md §8):
   2. fill in species, fields, cellTypes, dials and at least two scenarios with \`checks\`
   3. write makeRules(): what the cells secrete, what the matrix does
-  4. node tools/run_headless.mjs --tissue ${key}   &&  node --test tests/*.test.mjs
-  5. node tools/build_single.mjs   &&  open index.html?tissue=${key}`);
+  4. node tools/run_headless.mjs --tissue ${key}   &&  python3 tools/plot_scenarios.py --tissue ${key}
+  5. the as-built parameter block the test suite requires:
+       create docs/tissues/${key}.md with a section wrapped in
+         <!-- params:${key} -->  …  <!-- /params:${key} -->
+       add   ${key}: 'docs/tissues/${key}.md'   to PARAMS_DOCS in tools/check_params_doc.mjs
+       run   node tools/check_params_doc.mjs --write
+  6. node --test tests/*.test.mjs   (tune until it passes)
+  7. node tools/build_single.mjs   &&  open index.html?tissue=${key}`);

@@ -10,6 +10,11 @@
 // Everything runs in a throw-away copy of the repository under os.tmpdir(): these tests must never
 // leave a generated tissue behind in src/tissues/ (the conformance suite in engine.test.mjs runs
 // every registered tissue, so a stray scaffold would quietly become part of the test surface).
+//
+// The copy carries the REAL src/tissues/, so the scaffolder refuses a key that already exists
+// there. The fixtures therefore use keys no tissue would ever want — `demotissue` and
+// `demo-tissue`, RESERVED for this file: a fixture key that reads like a real tissue (this used to
+// be `tendon`) breaks three tests for whoever adds that tissue, before they have written a line.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
@@ -45,29 +50,29 @@ describe('tools/new_tissue.mjs', () => {
   test('scaffolds a registered, valid tissue that the engine accepts and can step', async () => {
     const dir = scratchRepo(['src', 'tools/new_tissue.mjs']);
     try {
-      const r = run(dir, 'new_tissue.mjs', ['tendon', 'Tendon fascicle']);
+      const r = run(dir, 'new_tissue.mjs', ['demotissue', 'Demo tissue']);
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stdout, /wrote src\/tissues\/tendon\.js/);
+      assert.match(r.stdout, /wrote src\/tissues\/demotissue\.js/);
 
-      const gen = readFileSync(join(dir, 'src', 'tissues', 'tendon.js'), 'utf8');
-      assert.match(gen, /export const TISSUE_TENDON = \{/);
-      assert.match(gen, /key: 'tendon'/);
-      assert.match(gen, /name: 'Tendon fascicle'/);
+      const gen = readFileSync(join(dir, 'src', 'tissues', 'demotissue.js'), 'utf8');
+      assert.match(gen, /export const TISSUE_DEMOTISSUE = \{/);
+      assert.match(gen, /key: 'demotissue'/);
+      assert.match(gen, /name: 'Demo tissue'/);
       assert.ok(!/\bTISSUE_TEMPLATE\b/.test(gen), 'the template identifier must be renamed');
       assert.ok(!/^export\s+(?!const|let|var|function|class|async function)/m.test(gen), 'named exports only');
 
       const index = readFileSync(join(dir, 'src', 'tissues', 'index.js'), 'utf8');
-      assert.match(index, /^import \{ TISSUE_TENDON \} from '\.\/tendon\.js';$/m, 'one-line local import');
-      assert.match(index, /^ {2}tendon: TISSUE_TENDON,$/m, 'registry entry');
+      assert.match(index, /^import \{ TISSUE_DEMOTISSUE \} from '\.\/demotissue\.js';$/m, 'one-line local import');
+      assert.match(index, /^ {2}demotissue: TISSUE_DEMOTISSUE,$/m, 'registry entry');
       assert.match(index, /^ {2}fibrous: TISSUE_FIBROUS,$/m, 'the existing registration survives');
 
       const { TISSUES } = await import(pathToFileURL(join(dir, 'src', 'tissues', 'index.js')).href);
       const { TissueEngine } = await import(pathToFileURL(join(dir, 'src', 'engine.js')).href);
-      assert.ok(TISSUES.tendon, 'registered under its key');
-      assert.equal(TISSUES.tendon.key, 'tendon');
-      assert.deepEqual(TissueEngine.validate(TISSUES.tendon), [], 'the scaffold must validate as it is');
-      const M = new TissueEngine(TISSUES.tendon, { seed: 7 });
-      M.reset(TISSUES.tendon.scenarios[0].key);
+      assert.ok(TISSUES.demotissue, 'registered under its key');
+      assert.equal(TISSUES.demotissue.key, 'demotissue');
+      assert.deepEqual(TissueEngine.validate(TISSUES.demotissue), [], 'the scaffold must validate as it is');
+      const M = new TissueEngine(TISSUES.demotissue, { seed: 7 });
+      M.reset(TISSUES.demotissue.scenarios[0].key);
       M.step(50);
       const s = M.stats();
       assert.ok(Number.isFinite(s.species.total) && s.species.total >= 0);
@@ -77,11 +82,11 @@ describe('tools/new_tissue.mjs', () => {
   test('a hyphenated key becomes TISSUE_A_B and a quoted registry entry', () => {
     const dir = scratchRepo(['src', 'tools/new_tissue.mjs']);
     try {
-      assert.equal(run(dir, 'new_tissue.mjs', ['smooth-muscle', 'Smooth muscle']).status, 0);
-      const gen = readFileSync(join(dir, 'src', 'tissues', 'smooth-muscle.js'), 'utf8');
-      assert.match(gen, /export const TISSUE_SMOOTH_MUSCLE = \{/);
-      assert.match(gen, /key: 'smooth-muscle'/);
-      assert.match(readFileSync(join(dir, 'src', 'tissues', 'index.js'), 'utf8'), /^ {2}'smooth-muscle': TISSUE_SMOOTH_MUSCLE,$/m);
+      assert.equal(run(dir, 'new_tissue.mjs', ['demo-tissue', 'Demo tissue two']).status, 0);
+      const gen = readFileSync(join(dir, 'src', 'tissues', 'demo-tissue.js'), 'utf8');
+      assert.match(gen, /export const TISSUE_DEMO_TISSUE = \{/);
+      assert.match(gen, /key: 'demo-tissue'/);
+      assert.match(readFileSync(join(dir, 'src', 'tissues', 'index.js'), 'utf8'), /^ {2}'demo-tissue': TISSUE_DEMO_TISSUE,$/m);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -93,10 +98,10 @@ describe('tools/new_tissue.mjs', () => {
         [['fibrous', 'Again'], /already registered|already exists/],
         [['Bad Key', 'x'], /bad key/],
         [['index', 'x'], /reserved/],
-        [['tendon'], /./],                                    // no name: allowed, name defaults to the key
+        [['demotissue'], /./],                                    // no name: allowed, name defaults to the key
       ]) {
         const r = run(dir, 'new_tissue.mjs', args);
-        if (args[0] === 'tendon') { assert.equal(r.status, 0); continue; }
+        if (args[0] === 'demotissue') { assert.equal(r.status, 0); continue; }
         assert.equal(r.status, 1, `expected a refusal for ${JSON.stringify(args)}`);
         assert.match(r.stderr, pattern);
       }
@@ -111,10 +116,10 @@ describe('tools/new_tissue.mjs', () => {
     const dir = scratchRepo(['src', 'tools/new_tissue.mjs']);
     try {
       const before = readFileSync(join(dir, 'src', 'tissues', 'index.js'), 'utf8');
-      const r = run(dir, 'new_tissue.mjs', ['tendon', 'Tendon fascicle', '--dry-run']);
+      const r = run(dir, 'new_tissue.mjs', ['demotissue', 'Demo tissue', '--dry-run']);
       assert.equal(r.status, 0, r.stderr);
       assert.match(r.stdout, /--dry-run/);
-      assert.ok(!existsSync(join(dir, 'src', 'tissues', 'tendon.js')));
+      assert.ok(!existsSync(join(dir, 'src', 'tissues', 'demotissue.js')));
       assert.equal(readFileSync(join(dir, 'src', 'tissues', 'index.js'), 'utf8'), before);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -175,6 +180,18 @@ describe('tools/lib/browser.mjs', () => {
       rmSync(dir, { recursive: true, force: true });
     }
     await assert.rejects(fetch(`${server.url}/a.js`), 'the socket is really gone after close()');
+  });
+
+  // The claim four documents make (README, CONTRIBUTING, docs/SPEC.md, docs/ARCHITECTURE.md) is
+  // that the two smoke tools SHARE this module. They each used to carry their own copy, with a
+  // different bug in each; this is the check that keeps the sentence true.
+  test('both smoke tools drive the browser through it, and neither keeps its own copy', () => {
+    for (const rel of ['tools/screenshot_app.mjs', 'tools/render_smoke.mjs']) {
+      const text = readFileSync(join(root, rel), 'utf8');
+      assert.match(text, /^import \{[^}]*\} from '\.\/lib\/browser\.mjs';$/m, `${rel} must import the shared harness`);
+      assert.ok(!/http\.server/.test(text), `${rel} must not spawn its own python http.server`);
+      assert.ok(!/\bserver\.kill\(/.test(text), `${rel} must let withHarness() close the server, so a throw cannot leak it`);
+    }
   });
 
   test('fetchCached caches a download and never keeps a failed one', async () => {
@@ -257,6 +274,30 @@ describe('tools/check_params_doc.mjs', () => {
       assert.equal(w.status, 0, w.stderr);
       assert.match(w.stdout, /rewrote/);
       assert.equal(run(dir, 'check_params_doc.mjs').status, 0, 'and --write makes it green again');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  // A newcomer who scaffolds a tissue meets this checker before they meet the biology, so it has to
+  // name the file to write. It must NOT ask them to edit this tool: the document defaults to
+  // docs/tissues/<key>.md and is found by its markers (docs/EXTENDING.md §8).
+  test('a newly scaffolded tissue is told which document to write, and needs no edit to the tool', () => {
+    const dir = scratchRepo(['src', 'docs', 'tools/new_tissue.mjs', 'tools/check_params_doc.mjs']);
+    try {
+      assert.equal(run(dir, 'new_tissue.mjs', ['demotissue', 'Demo tissue']).status, 0);
+
+      const missing = run(dir, 'check_params_doc.mjs');
+      assert.equal(missing.status, 1, 'a tissue with no as-built block fails the check');
+      assert.match(missing.stderr, /no as-built block for tissue 'demotissue'/);
+      assert.match(missing.stderr, /docs\/tissues\/demotissue\.md/, 'it names the document to write');
+      assert.match(missing.stderr, /<!-- params:demotissue -->/, 'and the markers to put in it');
+
+      writeFileSync(join(dir, 'docs', 'tissues', 'demotissue.md'),
+        '# Demo tissue\n\n## Parameters\n\n<!-- params:demotissue -->\n<!-- /params:demotissue -->\n');
+      const w = run(dir, 'check_params_doc.mjs', ['--write']);
+      assert.equal(w.status, 0, `${w.stdout}${w.stderr}`);
+      assert.match(w.stdout, /docs\/tissues\/demotissue\.md/);
+      assert.match(readFileSync(join(dir, 'docs', 'tissues', 'demotissue.md'), 'utf8'), /```text[\s\S]*engine[\s\S]*params/);
+      assert.equal(run(dir, 'check_params_doc.mjs').status, 0, 'and the check is green from then on');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

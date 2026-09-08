@@ -35,6 +35,18 @@
 //              radiusBase, radiusScale, minRadius, lengthScale, lengthBase, lengthFA,
 //              minDensity, minDensityRamp, rhoMaxDraw } }
 //
+// TWO KINDS OF CONSTANT live in RECIPE_FIBER, and only one of them is overridable:
+//
+//   layout stream   seed, K, offsetSpan, lenJitterMin/Span, radJitterMin/Span — consumed by
+//                   recipeFiberLayout() at BUILD time. `seed` and `K` are arguments, the other
+//                   five are read from the frozen RECIPE_FIBER and cannot be overridden at all,
+//                   so recipeRenderMeta() reports them from RECIPE_FIBER too (never through its
+//                   `over` bag): meta.render can only ever describe the layout that was drawn.
+//   per-frame laws  radiusBase/Scale, minRadius, lengthScale/Base/FA, minDensity, minDensityRamp,
+//                   rhoMaxDraw — resolved by recipeFiberScales(h, over), so the renderer's opts
+//                   (and a tissue's `render` hints) can change them; meta.render reports the
+//                   resolved values, because those are the ones the browser used.
+//
 // Units: h = 1/N is the voxel edge in the unit cube the renderer draws in (a state in world
 // units is divided by state.L first), so every length above is a fraction of the cube edge.
 //
@@ -43,15 +55,20 @@
 // rounded the voxel centre to float32 first; `base` therefore differs from it by at most one
 // float32 ulp — 6·10⁻⁸ of the cube edge. `rvec` and `jit` are bit-identical to v0.1.)
 
+/** The RECIPE_FIBER keys recipeFiberLayout() consumes and no caller can override (see header). */
+export const RECIPE_LAYOUT_KEYS = Object.freeze(['offsetSpan', 'lenJitterMin', 'lenJitterSpan', 'radJitterMin', 'radJitterSpan']);
+
 /** Fiber layout constants — the v0.1 recipe, and the defaults of the matching renderer opts. */
 export const RECIPE_FIBER = Object.freeze({
-  seed: 90210,            // mulberry32 seed for the layout stream
-  K: 3,                   // rods drawn per voxel
+  seed: 90210,            // mulberry32 seed for the layout stream (recipeFiberLayout argument)
+  K: 3,                   // rods drawn per voxel (recipeFiberLayout argument)
+  // --- layout stream, RECIPE_LAYOUT_KEYS: build time only, NOT overridable ---
   offsetSpan: 0.9,        // rod centre jitter inside the voxel, × h, uniform in ±offsetSpan/2
   lenJitterMin: 0.78,     // per-rod length factor  = lenJitterMin + lenJitterSpan·u
   lenJitterSpan: 0.5,
   radJitterMin: 0.85,     // per-rod radius factor  = radJitterMin + radJitterSpan·u
   radJitterSpan: 0.3,
+  // --- per-frame laws: recipeFiberScales(h, over) resolves these against the caller's bag ---
   radiusBase: 0.12,       // SPEC radius 0.12·h·√ρ …
   radiusScale: 0.6,       // … × this
   minRadius: 0.025,       // × h: floor so sparse fibers stay visible hairlines
@@ -62,6 +79,20 @@ export const RECIPE_FIBER = Object.freeze({
   minDensityRamp: 0.35,   // fade in from minDensity·this (1 = the v0.1 hard cut, 0 = fade from ρ 0)
   rhoMaxDraw: 2,          // ρ used for the radius is clamped here
 });
+
+/**
+ * One RECIPE_FIBER value, overridden by `over[key]` when that is a finite number (or a string
+ * holding one — a URL parameter). Anything else, `null` and `undefined` included, falls back to
+ * the constant rather than coercing to 0. The single resolver behind recipeFiberScales() and
+ * recipeRenderMeta(), so "what the renderer used" and "what the export reports" can never be
+ * resolved two different ways.
+ */
+function recipeResolve(over, key) {
+  const raw = over ? over[key] : undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string' && raw.trim() !== '') { const v = +raw; if (Number.isFinite(v)) return v; }
+  return RECIPE_FIBER[key];
+}
 
 /** Seeded PRNG (mulberry32) — the same stream the renderer and the importer must reproduce. */
 export function recipeRng(seed) {
@@ -78,6 +109,10 @@ export function recipeRng(seed) {
  * Deterministic per-instance layout for an N³ grid with K rods per voxel.
  * Returns { N, K, count, h, base (3·count), rvec (3·count), jit (2·count: length, radius) };
  * `out` may carry arrays of the right length to fill in place (build time only — never per frame).
+ *
+ * Takes NO override bag on purpose: the five RECIPE_LAYOUT_KEYS come from the frozen
+ * RECIPE_FIBER, so seed + N + K alone determine the arrangement and recipeRenderMeta() can
+ * report it without a caller being able to make the two disagree.
  */
 export function recipeFiberLayout(N, K = RECIPE_FIBER.K, seed = RECIPE_FIBER.seed, out = null) {
   const R = RECIPE_FIBER;
@@ -110,11 +145,7 @@ export function recipeFiberLayout(N, K = RECIPE_FIBER.K, seed = RECIPE_FIBER.see
  * the grid or the tissue changes — NOT every frame (it allocates the small object it returns).
  */
 export function recipeFiberScales(h, over = null) {
-  const R = RECIPE_FIBER;
-  const g = (k) => {
-    const v = over ? +over[k] : NaN;
-    return Number.isFinite(v) ? v : R[k];
-  };
+  const g = (k) => recipeResolve(over, k);
   const minDensity = Math.max(0, g('minDensity'));
   const ramp = Math.min(1, Math.max(0, g('minDensityRamp')));
   return {
@@ -172,21 +203,24 @@ export function recipeFiberDir(out, ux, uy, uz, a, rx, ry, rz) {
 /**
  * The recipe as a plain object for `meta.render` (export → Blender). `over` is the same override
  * bag `recipeFiberScales` takes, plus `seed` and `K`; the result carries the values actually used.
+ *
+ * The five RECIPE_LAYOUT_KEYS are reported from the frozen RECIPE_FIBER, NOT through `over`:
+ * recipeFiberLayout() takes no override bag, so an `over.offsetSpan` would change what Blender
+ * lays out while the browser kept drawing the frozen value — meta.render must only ever promise
+ * a layout the browser really drew (docs/REVIEW.md E2). Everything else is resolved, because
+ * recipeFiberScales() resolves it the same way when the renderer draws the frame.
  */
 export function recipeRenderMeta(over = null) {
   const R = RECIPE_FIBER;
-  const g = (k) => {
-    const v = over ? +over[k] : NaN;
-    return Number.isFinite(v) ? v : R[k];
-  };
+  const g = (k) => recipeResolve(over, k);
   return {
     recipe: 'fiber-v1',
     seed: g('seed') >>> 0,
     K: g('K') | 0,
     fiber: {
-      offsetSpan: g('offsetSpan'),
-      lenJitterMin: g('lenJitterMin'), lenJitterSpan: g('lenJitterSpan'),
-      radJitterMin: g('radJitterMin'), radJitterSpan: g('radJitterSpan'),
+      offsetSpan: R.offsetSpan,
+      lenJitterMin: R.lenJitterMin, lenJitterSpan: R.lenJitterSpan,
+      radJitterMin: R.radJitterMin, radJitterSpan: R.radJitterSpan,
       radiusBase: g('radiusBase'), radiusScale: g('radiusScale'), minRadius: g('minRadius'),
       lengthScale: g('lengthScale'), lengthBase: g('lengthBase'), lengthFA: g('lengthFA'),
       minDensity: g('minDensity'), minDensityRamp: g('minDensityRamp'), rhoMaxDraw: g('rhoMaxDraw'),

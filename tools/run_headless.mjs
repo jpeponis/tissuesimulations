@@ -7,7 +7,9 @@
 //
 // Every option also takes the `--key=value` form. `--help` prints the usage above with this
 // tissue's runs and exits 0; an `--only` name that is not a run exits 2 and lists them, so a typo
-// cannot silently produce an empty output directory.
+// cannot silently produce an empty output directory, and a value-less `--only` exits 2 too (it
+// used to mean "no filter", i.e. run all eleven). Both `--blender` checks run before the first
+// scenario, so a missing path costs no simulated days.
 //
 // Runs every scenario of the tissue plus the tissue-specific variants listed in
 // HEADLESS_VARIANTS. `--events` (default on; `--events false` or `--no-events` turns it off)
@@ -76,7 +78,7 @@ const SNAP = +(args.snap ?? 5);
 const CSV_EVERY = +(args['csv-every'] ?? args.csv ?? 0.5);
 const EVENTS = args.events !== 'false' && args['no-events'] !== 'true';
 const SEED = +(args.seed ?? 7);
-const ONLY = args.only && args.only !== 'true' ? new Set(args.only.split(',').map((s) => s.trim()).filter(Boolean)) : null;
+const ONLY = args.only === undefined ? null : new Set(String(args.only).split(',').map((s) => s.trim()).filter(Boolean));
 
 // Extra runs per tissue: { name: { scenario, dials?, init?, events?, label? } }
 // (`events` replaces the scenario's; `label` is the plot legend, else it is derived from the
@@ -123,6 +125,12 @@ if (HELP) {
   process.exit(0);
 }
 if (ONLY) {                                            // a typo in --only used to produce nothing at all
+  // …and `--only` with no value used to mean "no filter", so a forgotten list ran everything
+  if (args.only === 'true') {
+    console.error(`--only needs a comma-separated list, e.g. --only ${Object.keys(RUNS)[0]}\n` +
+      `runs for '${TISSUE_KEY}': ${Object.keys(RUNS).join(', ')}`);
+    process.exit(2);
+  }
   const unknown = [...ONLY].filter((k) => !RUNS[k]);
   if (unknown.length) {
     console.error(`unknown run${unknown.length > 1 ? 's' : ''} in --only: ${unknown.join(', ')}\n` +
@@ -198,6 +206,18 @@ function runOne(name, cfg) {
   return { rows, traj };
 }
 
+// Both --blender checks depend only on the flags and the run list, so they run BEFORE the loop:
+// learning that the path is missing after eleven scenarios have been written is not a check.
+const firstKey = tissue.scenarios[0].key;
+if (args.blender === 'true') {
+  console.error('--blender needs a path, e.g. --blender blender/sample_trajectory.json');
+  process.exit(2);
+}
+if (args.blender && ONLY && !ONLY.has(firstKey)) {
+  console.error(`--blender copies the '${firstKey}' trajectory, and --only ${[...ONLY].join(',')} leaves it out; add it to --only or drop --blender`);
+  process.exit(2);
+}
+
 const results = {};
 for (const [name, cfg] of Object.entries(RUNS)) {
   if (ONLY && !ONLY.has(name)) continue;
@@ -206,19 +226,15 @@ for (const [name, cfg] of Object.entries(RUNS)) {
 
 // <first>_traj.json duplicates <first>.json byte for byte and is several MB, so it is written only
 // when something asks for it: --blender PATH (the Blender importer's documented input file).
-const firstKey = tissue.scenarios[0].key;
-if (args.blender && args.blender !== 'true' && results[firstKey]) {
+if (args.blender && results[firstKey]) {
   const p = join(OUT, `${firstKey}_traj.json`);
   writeFileSync(p, JSON.stringify(results[firstKey].traj));
   const mb = statSync(p).size / 1e6;
   console.log(`wrote ${p} (${mb.toFixed(2)} MB, ${results[firstKey].traj.frames.length} frames, format 2)`);
   copyFileSync(p, resolve(args.blender));
   console.log(`copied to ${resolve(args.blender)}`);
-} else if (args.blender === 'true') {
-  console.error('--blender needs a path, e.g. --blender blender/sample_trajectory.json');
-  process.exit(2);
-} else if (args.blender && !results[firstKey]) {
-  console.error(`--blender: '${firstKey}' was not run (--only ${[...(ONLY || [])].join(',')}), so there is nothing to copy`);
+} else if (args.blender) {
+  console.error(`--blender: '${firstKey}' was not run, so there is nothing to copy`);
   process.exit(2);
 }
 console.log(`outputs in ${OUT}`);

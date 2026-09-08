@@ -74,16 +74,27 @@ kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--ru
 /* HUD over the viewport */
 .hud { position: absolute; pointer-events: none; }
 .hud > * { pointer-events: auto; }
-.hud-top { left: 20px; top: 16px; right: 20px; display: grid; gap: 6px; max-width: 560px; }
-.brand { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 30px; line-height: 1; letter-spacing: -0.01em; }
+/* The HUD is the top layer of the stage: whatever else the viewport carries (the legend, the
+   layer chips) may never paint over the title, the clock or the live sentence. */
+.hud-top { left: 20px; top: 16px; right: 20px; display: grid; gap: 6px; max-width: 560px; z-index: 3; }
+/* Every HUD block sits on the rendered tissue, whose pixels run from black to pale hydrogel, so
+   a text-shadow softens the collision but cannot promise a ratio (WCAG 1.4.3). Each block gets
+   its own plate instead: at 0.88 alpha over --ground, even a WHITE pixel underneath leaves
+   --muted at 4.8:1 and --text at 11:1. tools/screenshot_app.mjs measures the real worst pixel
+   under each line against the frame the renderer drew. */
+.hud-top > * { width: fit-content; max-width: 100%; background: rgba(11,15,20,0.88); border-radius: 8px; padding: 3px 10px; margin-left: -10px; }
+.brand-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.brand { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 30px; line-height: 1.05; letter-spacing: -0.01em; }
 .brand em { font-style: italic; color: var(--amber-ink); }
-.brand small { font-family: var(--font-ui); font-size: 12px; color: var(--muted); margin-left: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+/* the tagline is a sibling, not a child, of the h1: inside it the page's only top-level heading
+   reads "Tissue Weatherdynamic reciprocity" in a screen reader's heading list */
+.brand-sub { margin: 0; font-family: var(--font-ui); font-size: 12px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
 .clock { font-family: var(--font-mono); font-size: var(--clock); color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; font-variant-numeric: tabular-nums; align-items: baseline; }
 .clock .week { color: var(--faint); }
 #fps { display: none; }                 /* written every second, shown only with ?debug=1 */
 body.debug #fps { display: inline; }
 .clock b { color: var(--text); font-weight: 500; }
-.equilibrium { margin: 4px 0 0; font-size: var(--sentence); max-width: 46ch; color: var(--text); text-wrap: pretty; text-shadow: 0 1px 8px rgba(0,0,0,0.7); min-height: 1.4em; }
+.equilibrium { margin: 4px 0 0 -10px; font-size: var(--sentence); max-width: 46ch; color: var(--text); text-wrap: pretty; text-shadow: 0 1px 8px rgba(0,0,0,0.7); min-height: 1.4em; }
 .equilibrium[data-state]::before {
   content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; background: var(--muted);
 }
@@ -92,29 +103,52 @@ body.debug #fps { display: inline; }
 .equilibrium[data-state="flash"]::before { background: var(--focus); }
 
 /* legend: a collapsible so it stays reachable on small screens */
-.hud-legend { left: 20px; bottom: 16px; font-size: 12px; color: var(--muted); max-width: min(48%, 420px); pointer-events: auto; }
-.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--text); font-size: 12px; }
+.hud-legend { left: 20px; bottom: 16px; font-size: 12px; color: var(--muted); max-width: min(48%, 420px); pointer-events: auto;
+  /* a flex column so the swatch list, not the box, is what scrolls */
+  display: flex; flex-direction: column; align-items: flex-start; z-index: 1;
+  /* NEVER taller than the room the stage leaves under the HUD: the viewport-relative cap below
+     is computed from the window, but this box lives in a stage that is only 58vh once the layout
+     stacks, so at 200 % zoom the old cap put the open legend straight through the title, the
+     clock and the live sentence (WCAG 1.4.4 Resize Text / 1.4.10 Reflow). app.js measures the
+     HUD and writes --legend-max; the calc is the before-script fallback, and when even that
+     leaves too little to read, app.js moves the whole disclosure into the console (see
+     body.legend-docked). */
+  max-height: var(--legend-max, calc(100% - 200px)); }
+.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--text); font-size: 12px; flex: none; }
 .hud-legend summary::-webkit-details-marker { display: none; }
-.hud-legend summary::before { content: "▸ "; color: var(--muted); }
-.hud-legend[open] summary::before { content: "▾ "; }
+/* the alt-text form keeps the arrow visual: without it the disclosure is NAMED "▾ Legend", and
+   the expanded/collapsed state is already announced (the first declaration is the fallback for
+   a browser that does not support alt text in `content`) */
+.hud-legend summary::before { content: "▸ "; content: "▸ " / ""; color: var(--muted); }
+.hud-legend[open] summary::before { content: "▾ "; content: "▾ " / ""; }
 /* the open legend + guide must never reach the HUD at the top, on any screen (C14) */
-#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.72); border-radius: 8px; padding: 8px 10px; max-height: min(45vh, calc(100vh - 220px)); overflow-y: auto; overscroll-behavior: contain; }
+#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.85); border-radius: 8px; padding: 8px 10px; max-height: min(45vh, calc(100vh - 220px)); flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+/* docked (app.js: too short a stage for the legend to open without covering the HUD) */
+body.legend-docked .hud-legend { position: static; max-width: none; max-height: none; }
+body.legend-docked #legend { max-height: none; background: var(--surface); }
 .legend-scale .scale-swatch { background: linear-gradient(90deg, var(--deco) 0 2px, transparent 2px calc(100% - 2px), var(--deco) calc(100% - 2px)); height: 6px; border-radius: 0; }
 .legend-swatches { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
 .legend-row { display: flex; align-items: center; gap: 8px; }
 .swatch { width: 34px; height: 8px; border-radius: 4px; flex: none; }
 .legend-guide summary { display: inline-block; min-height: 24px; line-height: 24px; border: 0; background: none; padding: 0; color: var(--muted); }
-.legend-guide summary::before { content: "▸ "; }
-.legend-guide[open] summary::before { content: "▾ "; }
+.legend-guide summary::before { content: "▸ "; content: "▸ " / ""; }
+.legend-guide[open] summary::before { content: "▾ "; content: "▾ " / ""; }
 .legend-guide ul { margin: 6px 0 0; padding-left: 16px; display: grid; gap: 4px; max-width: 46ch; }
 
-.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 48%; }
+.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 48%; z-index: 1; }
 .chips-label { flex: 0 0 100%; text-align: right; font-size: 12px; color: var(--muted); text-transform: lowercase; letter-spacing: 0.04em; text-shadow: 0 1px 6px rgba(0,0,0,0.8); margin-bottom: 1px; }
+/* the camera chips (orbit / zoom / recentre) take a row of their own under the layer chips:
+   the single-pointer alternative to dragging the view (WCAG 2.5.7) */
+.cam-group { flex: 0 0 100%; display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+.cam-group .chip { padding: 4px 9px; min-width: 34px; font-family: var(--font-mono); }
 .chip { border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--muted); border-radius: 999px; padding: 4px 11px; min-height: 28px; font-size: 12px; cursor: pointer; }
-/* a pressed chip is not distinguished by colour alone: the tick has its space reserved, so
-   turning a layer on and off never reflows the row (C7) */
-.chip[aria-pressed]::before { content: "✓"; visibility: hidden; margin-right: 5px; font-size: 11px; }
-.chip[aria-pressed="true"]::before { visibility: visible; }
+/* a pressed control is not distinguished by colour alone: the tick has its space reserved, so
+   turning a layer on and off never reflows the row (C7). `/ ""` is the alt text: without it the
+   glyph lands in the accessible NAME ("✓fibers") on top of the pressed state a screen reader
+   already announces; the plain declaration before it is the fallback for a browser without
+   alt-text support. */
+.chip[aria-pressed]::before, .tools-row button[aria-pressed]::before { content: "✓"; content: "✓" / ""; visibility: hidden; margin-right: 5px; font-size: 11px; }
+.chip[aria-pressed="true"]::before, .tools-row button[aria-pressed="true"]::before { visibility: visible; }
 .chip[aria-pressed="true"] { color: var(--text); border-color: var(--text); background: var(--surface-2); }
 .chip:hover { color: var(--text); }
 
@@ -126,7 +160,11 @@ body.debug #fps { display: inline; }
 #notice[hidden] { display: none; }
 
 /* Console */
-#panel { background: var(--panel); border-left: 1px solid var(--rule); overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 18px; padding: 16px 18px 28px; }
+/* scroll-padding-top keeps the sticky Run header out of the way of the browser's own
+   scroll-into-view: without it, Shift+Tab up the console leaves four or five controls focused
+   but entirely behind the opaque header (WCAG 2.4.11 Focus Not Obscured). The header's height
+   depends on the tissue (four dials or seven), so app.js measures it into --run-h. */
+#panel { background: var(--panel); border-left: 1px solid var(--rule); overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 18px; padding: 16px 18px 28px; scroll-padding-top: var(--run-h, 260px); scroll-padding-bottom: 12px; }
 #panel:focus { outline: none; }
 section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 /* Run rides at the top of the console (C8). Play, +1 day, +7 days, Injure, Reset and the speed
@@ -217,6 +255,9 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .readout .keys i.circle { border-radius: 50%; }
 .readout .keys i.square { border-radius: 1px; }
 .readout .keys i.diamond { border-radius: 1px; transform: rotate(45deg) scale(0.82); }
+/* five shapes, so a four- or five-series readout never gives two curves the same glyph */
+.readout .keys i.triangle { border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.readout .keys i.cross { border-radius: 0; clip-path: polygon(36% 0, 64% 0, 64% 36%, 100% 36%, 100% 64%, 64% 64%, 64% 100%, 36% 100%, 36% 64%, 0 64%, 0 36%, 36% 36%); }
 .readout .keys i.hatch { background-image: repeating-linear-gradient(45deg, rgba(22,30,40,0.85) 0 1px, transparent 1px 3px); }
 .readout canvas:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .readout .keys i.dash { width: 14px; height: 0; border-top: 2px dashed var(--muted); vertical-align: 3px; border-radius: 0; }
@@ -225,7 +266,13 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .tools-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .tools-row button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber-ink); }
 .tools-row button[hidden] { display: none; }
+/* Both tables can be wider than the console. A scroll container that is not focusable strands
+   its right-hand columns for anyone without a mouse (axe `scrollable-region-focusable`;
+   Chromium's keyboard-focusable-scrollers rescue it, Firefox and Safari do not), so app.js puts
+   tabindex="0" on these two whenever they actually overflow — and they are named regions, so
+   landing in one says what it is. */
 #stats-table { margin-top: 8px; overflow-x: auto; }
+#stats-table:focus-visible, .history .history-out:focus-visible, #legend:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 #stats-table[hidden] { display: none; }
 #stats-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
 #stats-table caption { text-align: left; color: var(--muted); padding: 0 0 6px; font-family: var(--font-mono); }
@@ -263,10 +310,13 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
    The room reads the sentence and the clock from the back; the per-dial hints and the first-run
    card are noise on a projector, and the console gets a little wider so the readouts breathe. */
 body.present { --sentence: 24px; --clock: 18px; --panel-w: 460px; }
-body.present .equilibrium { max-width: 30ch; background: rgba(11,15,20,0.72); border-radius: 10px; padding: 8px 12px; margin-left: -12px; text-shadow: none; line-height: 1.3; }
+body.present .equilibrium { max-width: 30ch; background: rgba(11,15,20,0.88); border-radius: 10px; padding: 8px 12px; margin-left: -12px; text-shadow: none; line-height: 1.3; }
 body.present .clock b { color: var(--text); }
-body.present .brand small,
-body.present .dial .hint,
+/* The dial hints are the node each slider's aria-describedby points at: display:none would take
+   them out of the layout and make the page depend on accname §4.1 keeping a directly referenced
+   node. Hide them the way the skip link is hidden instead — off screen, still described. */
+body.present .dial .hint { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+body.present .brand-sub,
 body.present .dial-more,
 body.present .hint-card,
 body.present .readout .meaning,
@@ -283,6 +333,7 @@ body.present #panel { font-size: 15px; }
 @media (pointer: coarse) {
   .chip, .scenario-btn, .transport button, .share button, .tools-row button,
   .about .tools button, .about .tools a, .hint-card button { min-height: 44px; padding-top: 8px; padding-bottom: 8px; }
+  .cam-group .chip { min-width: 44px; }
   .segmented span { min-height: 44px; padding: 12px 8px; }
   .dial input[type=range] { height: 44px; }
   .speed input { height: 44px; }
@@ -295,7 +346,9 @@ body.present #panel { font-size: 15px; }
   #panel { border-left: 0; border-top: 1px solid var(--rule); }
   .hud-top { max-width: 70%; }
   .brand { font-size: 24px; }
-  .equilibrium { font-size: 13px; }
+  /* the token, not the rule: a hard font-size here also shrank the sentence in PRESENTATION mode,
+     and a narrow viewport is exactly what 200 % browser zoom on a laptop looks like */
+  body:not(.present) { --sentence: 13px; }
   .hud-legend { max-width: calc(50% - 30px); }
   .hud-layers { max-width: calc(50% - 22px); }
 }
@@ -312,9 +365,13 @@ body.present #panel { font-size: 15px; }
 <a class="skip-link" href="#panel">Skip to the controls and readouts</a>
 <div id="app">
   <main id="stage" aria-label="3D tissue view">
-    <canvas id="view" role="img" tabindex="0" aria-label="3D tissue view, loading"></canvas>
+    <!-- The view is an image that can also be driven: role=img keeps the live description, and
+         aria-describedby + aria-keyshortcuts say so, since nothing else on the way in does. -->
+    <canvas id="view" role="img" tabindex="0" aria-label="3D tissue view, loading"
+            aria-describedby="view-keys-hint" aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Plus Minus Home"></canvas>
+    <p class="sr-only" id="view-keys-hint">Focusable 3D view: the arrow keys orbit the camera, plus and minus zoom, Home puts it back on the default framing. The same moves are on the orbit, zoom and recentre buttons under the layer chips. Dragging the view stops the automatic rotation.</p>
     <div class="hud hud-top">
-      <h1 class="brand"><em>Tissue Weather</em><small>dynamic reciprocity</small></h1>
+      <div class="brand-row"><h1 class="brand"><em>Tissue Weather</em></h1><p class="brand-sub">dynamic reciprocity</p></div>
       <div class="clock"><span>day <b id="day">0.0</b> <span class="week" id="week">(week 0.0)</span></span><span id="tissue-name"></span><span id="scenario-name"></span><span id="fps" class="note"></span></div>
       <!-- The sentence is rewritten every 0.7 s with changing rates: as a live region that is a
            screen-reader flood (C3). It stays a visual readout; #status below carries the
@@ -325,11 +382,15 @@ body.present #panel { font-size: 15px; }
       <summary>Legend</summary>
       <div id="legend"></div>
     </details>
-    <div class="hud hud-layers" id="layers" role="group" aria-label="Layers shown in the 3D view"></div>
+    <div class="hud hud-layers" id="layers" role="group" aria-label="3D view: layers and camera"></div>
     <div id="notice" role="alert" hidden></div>
     <div id="busy" hidden>preparing tissue…</div>
     <!-- Announcements for screen readers only (C3): the day and the balance at most every 15 s
-         while the clock runs, plus every trend change, pause, step, scenario load and flash. -->
+         while the clock runs, plus every trend change, pause, step, scenario load and flash, and
+         never twice inside 10 s while the clock runs. This is the page's ONLY announcing live
+         region: every <output> (each dial's value, the speed) is an implicit role=status, so
+         app.js and the markup below put aria-live="off" on them — a slider already speaks its
+         own value, and one drag would otherwise queue forty announcements on top of it. -->
     <div id="status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
   </main>
   <section id="panel" aria-label="Controls and readouts" tabindex="-1">
@@ -350,7 +411,7 @@ body.present #panel { font-size: 15px; }
       <div class="speed">
         <label for="speed">speed</label>
         <input id="speed" type="range" min="0.25" max="20" step="0.25" value="5">
-        <output id="speed-out" for="speed">5 d/s</output>
+        <output id="speed-out" for="speed" aria-live="off">5 d/s</output>
         <div class="speed-presets" id="speed-presets" role="group" aria-label="Speed presets"></div>
       </div>
       <div class="share">
@@ -360,6 +421,9 @@ body.present #panel { font-size: 15px; }
         <input class="link-out" id="link-out" type="text" readonly aria-label="Link to this view" hidden>
       </div>
     </section>
+    <!-- Where the legend goes when the stage is too short to open it over the view without
+         covering the HUD (app.js layoutLegend moves #legend-box in and out of here). -->
+    <div id="legend-dock" hidden></div>
     <div class="hint-card" id="hint" role="note">
       <div class="hint-body"><p><b>First time here?</b> Pick a scenario, press Play, then move a dial.</p></div>
       <button type="button" id="hint-dismiss" aria-label="Dismiss this hint">Got it</button>
@@ -368,7 +432,10 @@ body.present #panel { font-size: 15px; }
       <h2 id="h-scenario">Scenario</h2>
       <div class="scenarios" id="scenarios" role="group" aria-labelledby="h-scenario"></div>
     </section>
-    <section class="scenario-card" id="scenario-card" aria-label="Scenario details"></section>
+    <!-- tabindex="-1": the card is replaced whole on every scenario load, so app.js parks focus
+         on the container itself when it was inside — otherwise focus falls to <body> and the
+         next Tab restarts at the skip link (WCAG 2.4.3). -->
+    <section class="scenario-card" id="scenario-card" tabindex="-1" aria-label="Scenario details"></section>
     <section>
       <h2>Weather</h2>
       <div id="dials"></div>
@@ -381,7 +448,7 @@ body.present #panel { font-size: 15px; }
         <button type="button" id="btn-table" aria-pressed="false" aria-controls="stats-table" title="Show the latest values as a text table">Table</button>
         <button type="button" id="btn-clear-ref" hidden title="Remove the dashed previous-run lines from the charts">Clear comparison</button>
       </div>
-      <div id="stats-table" hidden></div>
+      <div id="stats-table" hidden role="region" aria-label="Latest values as a table"></div>
     </section>
     <section>
       <h2>About</h2>

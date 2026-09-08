@@ -1,8 +1,12 @@
-# Architecture (v0.3)
+# Architecture
 
 One page on how Tissue Weather is put together: what flows where, how the single-file build
 works, and what every file is for. The **contract** between the engine and a tissue is
 [`docs/EXTENDING.md`](EXTENDING.md) — this page is the map, that one is the law.
+
+This page describes the tree as it stands: the contract is at **v0.4**, while `ENGINE_VERSION` and
+`package.json` still say **0.3.0** until the release is cut ([`docs/CHANGELOG.md`](CHANGELOG.md)
+says what changed between them, in plain language).
 
 The shape of the system in one sentence: **a tissue definition is data; the engine, renderer,
 plots, app, tools and tests are written against the contract and never against a specific
@@ -189,7 +193,7 @@ it, so the import is never attempted.
 |---|---|
 | `dist/tissue-weather.html` | the single-file build; what GitHub Pages and "just open the file" serve |
 | `dist/tissue-weather.artifact.html` | the same page as a head+body fragment for hosts that supply their own document skeleton |
-| `dist/tissue-weather.offline.html` | `--vendor` output: Three.js inlined, no import map, no network at all — the classroom copy (not committed; build it when you need it) |
+| `dist/tissue-weather.offline.html` | `--vendor` output: Three.js inlined, no import map, no network at all — the classroom copy. Git-ignored, so it is never committed; CI builds it on every push and uploads it as the `offline-page` artifact |
 | `dist/shots/`, `dist/cdn-cache/` | screenshot output and the curl-fetched CDN cache used by the headless harnesses (both git-ignored) |
 
 ### Tools
@@ -213,7 +217,7 @@ it, so the import is never attempted.
 |---|---|
 | `tests/engine.test.mjs` | conformance for every registered tissue (schema, determinism, invariants, scenario checks, performance), the fibrous golden regression, the engine API and the copy helpers |
 | `tests/build.test.mjs` | the EXTENDING.md §0 source constraints and the shape of the built page |
-| `tests/tools.test.mjs` | `new_tissue.mjs`, `check_dist.mjs`, `check_params_doc.mjs` and `lib/browser.mjs`, exercised in throw-away copies of the repo |
+| `tests/tools.test.mjs` | `new_tissue.mjs`, `check_dist.mjs`, `check_params_doc.mjs` and `lib/browser.mjs`, exercised in throw-away copies of the repo. Those copies carry the real `src/tissues/`, so the scaffolding fixtures use the reserved keys `demotissue` / `demo-tissue` — a real tissue of that name would break them |
 | `tests/export.test.mjs` | the format-2 export per tissue, handed to `blender/import_tissue.py --dry-run` (skipped without python3) |
 | `tests/fidelity.test.mjs` | the teaching claims of `docs/TEACHING.md` and the tissue copy, measured on the current engine |
 | `tests/golden/fibrous.json` | reference statistics recorded from the v0.1 model (seed 7); matched within 3 % |
@@ -225,7 +229,7 @@ it, so the import is never attempted.
 |---|---|
 | `blender/import_tissue.py` | trajectory JSON → animated Blender 4.2 scene (fiber tubes, gel haze, scaffold struts, cells, load arrows) |
 | `blender/make_sample_trajectory.py` | synthetic format-2 trajectories so the Blender side can be exercised without a browser or Node |
-| `blender/sample_trajectory*.json` | the generated samples (fibrous and cartilage) |
+| `blender/sample_trajectory*.json` | the two committed fixtures. The fibrous one is a REAL engine export (reproducible byte-for-byte from `node tools/run_headless.mjs --tissue fibrous --only maturation --blender blender/sample_trajectory.json`); only the cartilage one is synthetic, from the script above |
 | `blender/README.md` | trajectory formats, CLI and GUI workflows, renderer switches, limits |
 
 ### Documentation and repository files
@@ -238,7 +242,8 @@ it, so the import is never attempted.
 | `docs/SPEC.md` | the v0.1 design record (superseded by EXTENDING.md for structure) |
 | `docs/MODEL.md` | biology, equations, parameter table with sources, known simplifications |
 | `docs/TEACHING.md` | learning objectives, 50-minute lesson, guided experiments, misconceptions, assessment |
-| `docs/tissues/cartilage-hydrogel.md` | literature specification for the cartilage-in-hydrogel tissue, with DOIs |
+| `docs/CHANGELOG.md` | what changed between releases, written for the instructor who teaches with it |
+| `docs/tissues/<key>.md` | one per tissue: the literature specification and the generated as-built parameter block (`cartilage-hydrogel.md` today; the fibrous block lives in `docs/MODEL.md`) |
 | `docs/img/` | screenshots used by `README.md` |
 | `CONTRIBUTING.md` | dev setup, commands, coding constraints, when regenerating the golden is legitimate, PR checklist |
 | `package.json` | no dependencies; the npm scripts every command in the docs uses |
@@ -249,7 +254,7 @@ it, so the import is never attempted.
 
 | you want to | edit | then run |
 |---|---|---|
-| add a tissue | `node tools/new_tissue.mjs <key> "<Name>"`, then `src/tissues/<key>.js` | `npm test`, `npm run headless -- --tissue <key>`, `npm run build` |
+| add a tissue | `node tools/new_tissue.mjs <key> "<Name>"`, then `src/tissues/<key>.js` **and** `docs/tissues/<key>.md` with the `<!-- params:<key> -->` markers | `npm run headless -- --tissue <key>`, `node tools/check_params_doc.mjs --write`, `npm test`, `npm run build` |
 | change what cells or matrix do | that tissue's `params` and `makeRules()` | `npm test` (the scenario `checks` are the spec) |
 | change the grid, numerics or a stat | `src/engine.js` — and `docs/EXTENDING.md`, because that is the contract | `npm test`; expect the golden to move only if you meant it |
 | change the look of the 3D scene | `src/render.js` | `node tools/render_smoke.mjs --out <dir>` |

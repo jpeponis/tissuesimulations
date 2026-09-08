@@ -45,12 +45,14 @@ line (see *Adding a tissue* below).
 - **Download and open.** `dist/tissue-weather.html` is the whole app in one file. Double-click
   it. It fetches Three.js from jsdelivr the first time, so it needs internet on first load;
   after that the browser cache carries it.
-- **No network in the room?** Build the offline copy once, on a machine that does have a
-  connection: `node tools/build_single.mjs --vendor` writes `dist/tissue-weather.offline.html`
-  (about 1.1 MB) with Three.js inlined and no import map. It makes **no network requests at all** —
-  put it on a USB stick or the LMS and double-click it. Use it for teaching if the room's Wi-Fi is
-  a lottery; use `tissue-weather.html` (smaller, cached library, system fonts loaded from Google)
-  everywhere else.
+- **No network in the room?** Take the offline copy: `dist/tissue-weather.offline.html` (about
+  1.1 MB) has Three.js inlined and no import map, and makes **no network requests at all** — put it
+  on a USB stick or the LMS and double-click it. It is not committed (it is a megabyte of vendored
+  library), so get it either by **downloading the `offline-page` artifact from the latest CI run**
+  on GitHub — the same file, rebuilt for every commit, no Node needed — or by running
+  `node tools/build_single.mjs --vendor` once on a machine that does have a connection. Use it for
+  teaching if the room's Wi-Fi is a lottery; use `tissue-weather.html` (smaller, cached library,
+  system fonts loaded from Google) everywhere else.
 - **GitHub Pages.** Settings → Pages → *Deploy from a branch* → your branch, folder `/ (root)`.
   The site then lives at `https://<user>.github.io/<repo>/` — for this repository,
   `https://jpeponis.github.io/tissuesimulations/`.
@@ -110,15 +112,23 @@ the interactive is built to break, an assessment worksheet and the full referenc
 | key | action |
 |---|---|
 | `Space` | play / pause |
-| `R` | reset the scenario (the previous run stays as dashed ghost traces) |
+| `R` | reset the scenario — back to day 0 **with the preset's own dials**, so change a dial *after* Reset, not before (the previous run stays as dashed ghost traces) |
 | `I` | injure — a spherical wound at a random spot (only for tissues that support it) |
+| `P` | presentation mode: bigger live sentence and clock, hints hidden |
 | `1` – `5` | load the *n*-th scenario (up to `9`; the fibrous tissue has five) |
-| `←` `→` | nudge the focused dial; `Home` / `End` jump to its extremes |
+| `←` `→` | nudge the focused dial (`Home` / `End` for its extremes); on a focused chart, walk the crosshair |
+| `←` `→` `↑` `↓`, `+` `−`, `Home` | with the 3D view focused: orbit, zoom, and put the camera back on its default framing |
 | `Tab` | move between controls; the 3D view is focusable and describes itself |
 
-Buttons: **Play**, **+1 day**, **Reset**, **Injure** (hidden for tissues without an injury
-model), **Copy link**, **Table**, **Clear comparison**, and *Export trajectory (JSON for
-Blender)* in the About panel. Mouse: drag to orbit, wheel to zoom.
+The single-character shortcuts (`R`, `I`, `P`, `1`–`9`) can be switched off in the About panel;
+`Space` always plays and pauses.
+
+Buttons: **Play**, **+1 day**, **+7 days**, **Reset**, **Injure** (hidden for tissues without an
+injury model), **Copy link**, **Presentation**, **Reset view**, **Table**, **Clear comparison**,
+and *Export trajectory (JSON for Blender)* in the About panel. Each scenario card also carries an
+**Auto-apply scripted events** chip: it is **off** by default, so the events a scenario describes
+(the fibrosis bath drop on day 45, the wound on day 5) are yours to perform with the dials unless
+you switch it on. Mouse: drag to orbit, wheel to zoom.
 
 ## What is in the box
 
@@ -138,6 +148,7 @@ Blender)* in the About panel. Mouse: drag to orbit, wheel to zoom.
 | `docs/SPEC.md` | the v0.1 design record (kept for provenance) |
 | `docs/MODEL.md` | biology, equations, parameter table with sources, known simplifications |
 | `docs/TEACHING.md` | learning objectives, 50-minute lesson, guided experiments, misconceptions, assessment |
+| `docs/CHANGELOG.md` | what changed between versions, written for the instructor rather than the compiler |
 | `docs/tissues/cartilage-hydrogel.md` | the literature specification behind the cartilage tissue, every number with a DOI |
 | `tools/` | `build_single.mjs`, `check_dist.mjs`, `check_params_doc.mjs`, `new_tissue.mjs`, `run_headless.mjs`, `make_golden.mjs`, `plot_scenarios.py`, `screenshot_app.mjs`, `render_smoke.mjs`, `lib/browser.mjs` |
 | `tests/` | `engine.test.mjs` (conformance for every tissue + the golden regressions), `build.test.mjs`, `tools.test.mjs`, `export.test.mjs` (the Blender reader on a fresh export), `fidelity.test.mjs` (the teaching claims, measured), `golden/` |
@@ -154,13 +165,13 @@ Node ≥ 20, and **no dependencies** — there is nothing to install.
 | `npm run build` | writes `dist/tissue-weather.html` and `dist/tissue-weather.artifact.html`. It refuses to write a broken bundle: an unresolved local import, a surviving `import`/`export` statement or a duplicate top-level name is an error with a `src/file:line`, not a dead page |
 | `node tools/build_single.mjs --vendor` | additionally writes `dist/tissue-weather.offline.html` — Three.js inlined, no network at all (needs the library once, from `dist/cdn-cache`, `node_modules` or curl) |
 | `npm run check-dist` | rebuilds into a temp directory and fails if the committed `dist/` is stale |
-| `npm run headless` | runs every scenario of a tissue in Node → `scratch/<tissue>/<run>.csv` (stats over time) and `<run>.json` (a format-2 trajectory). Flags after `--`, e.g. `npm run headless -- --tissue fibrous --days=40`; `--help` lists them and the runs, and an unknown `--only` name exits 2 instead of writing nothing |
-| `node tools/check_params_doc.mjs [--write]` | keeps the "as built" parameter blocks in `docs/MODEL.md` and `docs/tissues/cartilage-hydrogel.md` equal to the tissue definitions (`npm test` fails when they drift) |
-| `npm run golden` | re-records the golden reference — read `CONTRIBUTING.md` first |
+| `npm run headless` | runs every scenario of a tissue in Node → `scratch/<tissue>/<run>.csv` (stats over time) and `<run>.json` (a format-2 trajectory). Flags after `--`, e.g. `npm run headless -- --tissue fibrous --days=40`; `--help` lists them and the runs, and an `--only` that is unknown — or empty — exits 2 instead of writing the wrong thing |
+| `node tools/check_params_doc.mjs [--write]` | keeps every tissue's "as built" parameter block equal to its definition (`npm test` fails when they drift). The block lives in `docs/tissues/<key>.md` — `docs/MODEL.md` for the fibrous tissue — and is found by its `<!-- params:<key> -->` markers, so a new tissue needs no change to the tool |
+| `node tools/make_golden.mjs --tissue <key> --out tests/golden/<key>.engine.json` | re-records the *engine* golden — read `CONTRIBUTING.md` first. Bare `npm run golden` refuses and says this: its default target is `tests/golden/fibrous.json`, the v0.1 reference that must never be regenerated |
 | `npm run new-tissue -- <key> "<Name>"` | scaffolds and registers a new tissue definition |
-| `npm run screenshot` | drives the real app in headless Chromium (needs Playwright) and saves screenshots |
+| `npm run screenshot` | drives the real app in headless Chromium (needs Playwright), probes interaction and accessibility, and saves screenshots. `--width 720 --height 450 --dsf 2` is the 200 % browser-zoom case, where the legend docks into the console |
 | `npm run serve` | `python3 -m http.server 8000` from the repository root |
-| `python3 tools/plot_scenarios.py --dir scratch/fibrous` | matplotlib panels of the headless CSVs (needs matplotlib; the columns it plots have to match the CSV header, which each tissue generates from its own species and fields) |
+| `python3 tools/plot_scenarios.py --tissue fibrous` | matplotlib panels of the headless CSVs (`--dir scratch/fibrous` names the same directory; needs matplotlib; the columns it plots have to match the CSV header, which each tissue generates from its own species and fields) |
 
 Headless scenario curves, from `npm run headless` and `tools/plot_scenarios.py`:
 
@@ -168,12 +179,12 @@ Headless scenario curves, from `npm run headless` and `tools/plot_scenarios.py`:
 
 ## Adding a tissue
 
-Five steps; the contract is [`docs/EXTENDING.md`](docs/EXTENDING.md) and the details are in its
-§8.
+Six steps here; the contract is [`docs/EXTENDING.md`](docs/EXTENDING.md), whose §8 spells the
+same work out as seven.
 
-1. **Scaffold it.** `npm run new-tissue -- mytissue "My tissue"` copies
-   `src/tissues/_template.js` to `src/tissues/mytissue.js`, renames the identifiers and registers
-   it in `src/tissues/index.js`.
+1. **Scaffold it.** `npm run new-tissue -- mytissue "My tissue"` (the same thing as
+   `node tools/new_tissue.mjs mytissue "My tissue"`) copies `src/tissues/_template.js` to
+   `src/tissues/mytissue.js`, renames the identifiers and registers it in `src/tissues/index.js`.
 2. **Describe the tissue.** Fill in `species` (what the matrix is made of: `fiber`, `gel` or
    `scaffold`), `fields` (what diffuses), `cellTypes`, `dials`, and at least two `scenarios` —
    each with `checks`, the machine-checkable version of the teaching claim.
@@ -181,12 +192,18 @@ Five steps; the contract is [`docs/EXTENDING.md`](docs/EXTENDING.md) and the det
    cell secretes and how it changes, and what happens to the matrix in a voxel. Start from the
    template's rules and change one thing at a time.
 4. **Watch the curves.** `npm run headless -- --tissue mytissue`, then
-   `python3 tools/plot_scenarios.py --dir scratch/mytissue`. Tune until
-   `npm test` passes — the suite runs your scenarios' checks automatically.
-5. **Ship it.** `npm run build`, then open `index.html?tissue=mytissue`.
+   `python3 tools/plot_scenarios.py --tissue mytissue` (or `--dir scratch/mytissue`, the same
+   directory spelled out). Tune until the scenario checks pass — the suite runs them automatically.
+5. **Write its document.** `docs/tissues/mytissue.md`, carrying the two markers
+   `<!-- params:mytissue -->` and `<!-- /params:mytissue -->`; then
+   `node tools/check_params_doc.mjs --write` fills in the as-built parameter block. `npm test`
+   fails until a registered tissue has one, so this step is not optional.
+6. **Ship it.** `npm test`, `npm run build`, then open `index.html?tissue=mytissue`.
 
-Nothing else has to change: the renderer, the plots, the panel, the export format, the Blender
-importer and the test suite are all written against the contract, not against a tissue.
+No *code* outside your file has to change: the renderer, the plots, the panel, the export format,
+the Blender importer and the tests are written against the contract, not against a tissue — the
+scaffolder writes the one registry line for you, and step 5 is the only other thing a new tissue
+owes the repository.
 
 ## The model in one paragraph
 
@@ -227,8 +244,9 @@ put the two library files next to the HTML.
 - **The 3D scene needs a GPU and a CDN.** The first load fetches Three.js (build the offline copy
   above if that is a problem); a sandboxed viewer that blocks downloads also blocks
   *Export trajectory*.
-- Per-tissue caveats are listed in each tissue's About panel and in `docs/MODEL.md` §5 (fibrous)
-  and `docs/tissues/cartilage-hydrogel.md` §6 (cartilage).
+- Each tissue's About panel says where the *cloud metaphor* breaks for that tissue; the modelling
+  limitations are written up in `docs/MODEL.md` §5 (fibrous) and
+  `docs/tissues/cartilage-hydrogel.md` §6 (cartilage).
 
 ## Blender
 

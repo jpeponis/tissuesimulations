@@ -68,16 +68,27 @@ kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--ru
 /* HUD over the viewport */
 .hud { position: absolute; pointer-events: none; }
 .hud > * { pointer-events: auto; }
-.hud-top { left: 20px; top: 16px; right: 20px; display: grid; gap: 6px; max-width: 560px; }
-.brand { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 30px; line-height: 1; letter-spacing: -0.01em; }
+/* The HUD is the top layer of the stage: whatever else the viewport carries (the legend, the
+   layer chips) may never paint over the title, the clock or the live sentence. */
+.hud-top { left: 20px; top: 16px; right: 20px; display: grid; gap: 6px; max-width: 560px; z-index: 3; }
+/* Every HUD block sits on the rendered tissue, whose pixels run from black to pale hydrogel, so
+   a text-shadow softens the collision but cannot promise a ratio (WCAG 1.4.3). Each block gets
+   its own plate instead: at 0.88 alpha over --ground, even a WHITE pixel underneath leaves
+   --muted at 4.8:1 and --text at 11:1. tools/screenshot_app.mjs measures the real worst pixel
+   under each line against the frame the renderer drew. */
+.hud-top > * { width: fit-content; max-width: 100%; background: rgba(11,15,20,0.88); border-radius: 8px; padding: 3px 10px; margin-left: -10px; }
+.brand-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.brand { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 30px; line-height: 1.05; letter-spacing: -0.01em; }
 .brand em { font-style: italic; color: var(--amber-ink); }
-.brand small { font-family: var(--font-ui); font-size: 12px; color: var(--muted); margin-left: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+/* the tagline is a sibling, not a child, of the h1: inside it the page's only top-level heading
+   reads "Tissue Weatherdynamic reciprocity" in a screen reader's heading list */
+.brand-sub { margin: 0; font-family: var(--font-ui); font-size: 12px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
 .clock { font-family: var(--font-mono); font-size: var(--clock); color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; font-variant-numeric: tabular-nums; align-items: baseline; }
 .clock .week { color: var(--faint); }
 #fps { display: none; }                 /* written every second, shown only with ?debug=1 */
 body.debug #fps { display: inline; }
 .clock b { color: var(--text); font-weight: 500; }
-.equilibrium { margin: 4px 0 0; font-size: var(--sentence); max-width: 46ch; color: var(--text); text-wrap: pretty; text-shadow: 0 1px 8px rgba(0,0,0,0.7); min-height: 1.4em; }
+.equilibrium { margin: 4px 0 0 -10px; font-size: var(--sentence); max-width: 46ch; color: var(--text); text-wrap: pretty; text-shadow: 0 1px 8px rgba(0,0,0,0.7); min-height: 1.4em; }
 .equilibrium[data-state]::before {
   content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; background: var(--muted);
 }
@@ -86,29 +97,52 @@ body.debug #fps { display: inline; }
 .equilibrium[data-state="flash"]::before { background: var(--focus); }
 
 /* legend: a collapsible so it stays reachable on small screens */
-.hud-legend { left: 20px; bottom: 16px; font-size: 12px; color: var(--muted); max-width: min(48%, 420px); pointer-events: auto; }
-.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--text); font-size: 12px; }
+.hud-legend { left: 20px; bottom: 16px; font-size: 12px; color: var(--muted); max-width: min(48%, 420px); pointer-events: auto;
+  /* a flex column so the swatch list, not the box, is what scrolls */
+  display: flex; flex-direction: column; align-items: flex-start; z-index: 1;
+  /* NEVER taller than the room the stage leaves under the HUD: the viewport-relative cap below
+     is computed from the window, but this box lives in a stage that is only 58vh once the layout
+     stacks, so at 200 % zoom the old cap put the open legend straight through the title, the
+     clock and the live sentence (WCAG 1.4.4 Resize Text / 1.4.10 Reflow). app.js measures the
+     HUD and writes --legend-max; the calc is the before-script fallback, and when even that
+     leaves too little to read, app.js moves the whole disclosure into the console (see
+     body.legend-docked). */
+  max-height: var(--legend-max, calc(100% - 200px)); }
+.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--text); font-size: 12px; flex: none; }
 .hud-legend summary::-webkit-details-marker { display: none; }
-.hud-legend summary::before { content: "▸ "; color: var(--muted); }
-.hud-legend[open] summary::before { content: "▾ "; }
+/* the alt-text form keeps the arrow visual: without it the disclosure is NAMED "▾ Legend", and
+   the expanded/collapsed state is already announced (the first declaration is the fallback for
+   a browser that does not support alt text in `content`) */
+.hud-legend summary::before { content: "▸ "; content: "▸ " / ""; color: var(--muted); }
+.hud-legend[open] summary::before { content: "▾ "; content: "▾ " / ""; }
 /* the open legend + guide must never reach the HUD at the top, on any screen (C14) */
-#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.72); border-radius: 8px; padding: 8px 10px; max-height: min(45vh, calc(100vh - 220px)); overflow-y: auto; overscroll-behavior: contain; }
+#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.85); border-radius: 8px; padding: 8px 10px; max-height: min(45vh, calc(100vh - 220px)); flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+/* docked (app.js: too short a stage for the legend to open without covering the HUD) */
+body.legend-docked .hud-legend { position: static; max-width: none; max-height: none; }
+body.legend-docked #legend { max-height: none; background: var(--surface); }
 .legend-scale .scale-swatch { background: linear-gradient(90deg, var(--deco) 0 2px, transparent 2px calc(100% - 2px), var(--deco) calc(100% - 2px)); height: 6px; border-radius: 0; }
 .legend-swatches { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
 .legend-row { display: flex; align-items: center; gap: 8px; }
 .swatch { width: 34px; height: 8px; border-radius: 4px; flex: none; }
 .legend-guide summary { display: inline-block; min-height: 24px; line-height: 24px; border: 0; background: none; padding: 0; color: var(--muted); }
-.legend-guide summary::before { content: "▸ "; }
-.legend-guide[open] summary::before { content: "▾ "; }
+.legend-guide summary::before { content: "▸ "; content: "▸ " / ""; }
+.legend-guide[open] summary::before { content: "▾ "; content: "▾ " / ""; }
 .legend-guide ul { margin: 6px 0 0; padding-left: 16px; display: grid; gap: 4px; max-width: 46ch; }
 
-.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 48%; }
+.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 48%; z-index: 1; }
 .chips-label { flex: 0 0 100%; text-align: right; font-size: 12px; color: var(--muted); text-transform: lowercase; letter-spacing: 0.04em; text-shadow: 0 1px 6px rgba(0,0,0,0.8); margin-bottom: 1px; }
+/* the camera chips (orbit / zoom / recentre) take a row of their own under the layer chips:
+   the single-pointer alternative to dragging the view (WCAG 2.5.7) */
+.cam-group { flex: 0 0 100%; display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+.cam-group .chip { padding: 4px 9px; min-width: 34px; font-family: var(--font-mono); }
 .chip { border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--muted); border-radius: 999px; padding: 4px 11px; min-height: 28px; font-size: 12px; cursor: pointer; }
-/* a pressed chip is not distinguished by colour alone: the tick has its space reserved, so
-   turning a layer on and off never reflows the row (C7) */
-.chip[aria-pressed]::before { content: "✓"; visibility: hidden; margin-right: 5px; font-size: 11px; }
-.chip[aria-pressed="true"]::before { visibility: visible; }
+/* a pressed control is not distinguished by colour alone: the tick has its space reserved, so
+   turning a layer on and off never reflows the row (C7). `/ ""` is the alt text: without it the
+   glyph lands in the accessible NAME ("✓fibers") on top of the pressed state a screen reader
+   already announces; the plain declaration before it is the fallback for a browser without
+   alt-text support. */
+.chip[aria-pressed]::before, .tools-row button[aria-pressed]::before { content: "✓"; content: "✓" / ""; visibility: hidden; margin-right: 5px; font-size: 11px; }
+.chip[aria-pressed="true"]::before, .tools-row button[aria-pressed="true"]::before { visibility: visible; }
 .chip[aria-pressed="true"] { color: var(--text); border-color: var(--text); background: var(--surface-2); }
 .chip:hover { color: var(--text); }
 
@@ -120,7 +154,11 @@ body.debug #fps { display: inline; }
 #notice[hidden] { display: none; }
 
 /* Console */
-#panel { background: var(--panel); border-left: 1px solid var(--rule); overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 18px; padding: 16px 18px 28px; }
+/* scroll-padding-top keeps the sticky Run header out of the way of the browser's own
+   scroll-into-view: without it, Shift+Tab up the console leaves four or five controls focused
+   but entirely behind the opaque header (WCAG 2.4.11 Focus Not Obscured). The header's height
+   depends on the tissue (four dials or seven), so app.js measures it into --run-h. */
+#panel { background: var(--panel); border-left: 1px solid var(--rule); overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 18px; padding: 16px 18px 28px; scroll-padding-top: var(--run-h, 260px); scroll-padding-bottom: 12px; }
 #panel:focus { outline: none; }
 section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 /* Run rides at the top of the console (C8). Play, +1 day, +7 days, Injure, Reset and the speed
@@ -211,6 +249,9 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .readout .keys i.circle { border-radius: 50%; }
 .readout .keys i.square { border-radius: 1px; }
 .readout .keys i.diamond { border-radius: 1px; transform: rotate(45deg) scale(0.82); }
+/* five shapes, so a four- or five-series readout never gives two curves the same glyph */
+.readout .keys i.triangle { border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.readout .keys i.cross { border-radius: 0; clip-path: polygon(36% 0, 64% 0, 64% 36%, 100% 36%, 100% 64%, 64% 64%, 64% 100%, 36% 100%, 36% 64%, 0 64%, 0 36%, 36% 36%); }
 .readout .keys i.hatch { background-image: repeating-linear-gradient(45deg, rgba(22,30,40,0.85) 0 1px, transparent 1px 3px); }
 .readout canvas:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .readout .keys i.dash { width: 14px; height: 0; border-top: 2px dashed var(--muted); vertical-align: 3px; border-radius: 0; }
@@ -219,7 +260,13 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .tools-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .tools-row button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber-ink); }
 .tools-row button[hidden] { display: none; }
+/* Both tables can be wider than the console. A scroll container that is not focusable strands
+   its right-hand columns for anyone without a mouse (axe `scrollable-region-focusable`;
+   Chromium's keyboard-focusable-scrollers rescue it, Firefox and Safari do not), so app.js puts
+   tabindex="0" on these two whenever they actually overflow — and they are named regions, so
+   landing in one says what it is. */
 #stats-table { margin-top: 8px; overflow-x: auto; }
+#stats-table:focus-visible, .history .history-out:focus-visible, #legend:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 #stats-table[hidden] { display: none; }
 #stats-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
 #stats-table caption { text-align: left; color: var(--muted); padding: 0 0 6px; font-family: var(--font-mono); }
@@ -257,10 +304,13 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
    The room reads the sentence and the clock from the back; the per-dial hints and the first-run
    card are noise on a projector, and the console gets a little wider so the readouts breathe. */
 body.present { --sentence: 24px; --clock: 18px; --panel-w: 460px; }
-body.present .equilibrium { max-width: 30ch; background: rgba(11,15,20,0.72); border-radius: 10px; padding: 8px 12px; margin-left: -12px; text-shadow: none; line-height: 1.3; }
+body.present .equilibrium { max-width: 30ch; background: rgba(11,15,20,0.88); border-radius: 10px; padding: 8px 12px; margin-left: -12px; text-shadow: none; line-height: 1.3; }
 body.present .clock b { color: var(--text); }
-body.present .brand small,
-body.present .dial .hint,
+/* The dial hints are the node each slider's aria-describedby points at: display:none would take
+   them out of the layout and make the page depend on accname §4.1 keeping a directly referenced
+   node. Hide them the way the skip link is hidden instead — off screen, still described. */
+body.present .dial .hint { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+body.present .brand-sub,
 body.present .dial-more,
 body.present .hint-card,
 body.present .readout .meaning,
@@ -277,6 +327,7 @@ body.present #panel { font-size: 15px; }
 @media (pointer: coarse) {
   .chip, .scenario-btn, .transport button, .share button, .tools-row button,
   .about .tools button, .about .tools a, .hint-card button { min-height: 44px; padding-top: 8px; padding-bottom: 8px; }
+  .cam-group .chip { min-width: 44px; }
   .segmented span { min-height: 44px; padding: 12px 8px; }
   .dial input[type=range] { height: 44px; }
   .speed input { height: 44px; }
@@ -289,7 +340,9 @@ body.present #panel { font-size: 15px; }
   #panel { border-left: 0; border-top: 1px solid var(--rule); }
   .hud-top { max-width: 70%; }
   .brand { font-size: 24px; }
-  .equilibrium { font-size: 13px; }
+  /* the token, not the rule: a hard font-size here also shrank the sentence in PRESENTATION mode,
+     and a narrow viewport is exactly what 200 % browser zoom on a laptop looks like */
+  body:not(.present) { --sentence: 13px; }
   .hud-legend { max-width: calc(50% - 30px); }
   .hud-layers { max-width: calc(50% - 22px); }
 }
@@ -304,9 +357,13 @@ body.present #panel { font-size: 15px; }
 <a class="skip-link" href="#panel">Skip to the controls and readouts</a>
 <div id="app">
   <main id="stage" aria-label="3D tissue view">
-    <canvas id="view" role="img" tabindex="0" aria-label="3D tissue view, loading"></canvas>
+    <!-- The view is an image that can also be driven: role=img keeps the live description, and
+         aria-describedby + aria-keyshortcuts say so, since nothing else on the way in does. -->
+    <canvas id="view" role="img" tabindex="0" aria-label="3D tissue view, loading"
+            aria-describedby="view-keys-hint" aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Plus Minus Home"></canvas>
+    <p class="sr-only" id="view-keys-hint">Focusable 3D view: the arrow keys orbit the camera, plus and minus zoom, Home puts it back on the default framing. The same moves are on the orbit, zoom and recentre buttons under the layer chips. Dragging the view stops the automatic rotation.</p>
     <div class="hud hud-top">
-      <h1 class="brand"><em>Tissue Weather</em><small>dynamic reciprocity</small></h1>
+      <div class="brand-row"><h1 class="brand"><em>Tissue Weather</em></h1><p class="brand-sub">dynamic reciprocity</p></div>
       <div class="clock"><span>day <b id="day">0.0</b> <span class="week" id="week">(week 0.0)</span></span><span id="tissue-name"></span><span id="scenario-name"></span><span id="fps" class="note"></span></div>
       <!-- The sentence is rewritten every 0.7 s with changing rates: as a live region that is a
            screen-reader flood (C3). It stays a visual readout; #status below carries the
@@ -317,11 +374,15 @@ body.present #panel { font-size: 15px; }
       <summary>Legend</summary>
       <div id="legend"></div>
     </details>
-    <div class="hud hud-layers" id="layers" role="group" aria-label="Layers shown in the 3D view"></div>
+    <div class="hud hud-layers" id="layers" role="group" aria-label="3D view: layers and camera"></div>
     <div id="notice" role="alert" hidden></div>
     <div id="busy" hidden>preparing tissue…</div>
     <!-- Announcements for screen readers only (C3): the day and the balance at most every 15 s
-         while the clock runs, plus every trend change, pause, step, scenario load and flash. -->
+         while the clock runs, plus every trend change, pause, step, scenario load and flash, and
+         never twice inside 10 s while the clock runs. This is the page's ONLY announcing live
+         region: every <output> (each dial's value, the speed) is an implicit role=status, so
+         app.js and the markup below put aria-live="off" on them — a slider already speaks its
+         own value, and one drag would otherwise queue forty announcements on top of it. -->
     <div id="status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
   </main>
   <section id="panel" aria-label="Controls and readouts" tabindex="-1">
@@ -342,7 +403,7 @@ body.present #panel { font-size: 15px; }
       <div class="speed">
         <label for="speed">speed</label>
         <input id="speed" type="range" min="0.25" max="20" step="0.25" value="5">
-        <output id="speed-out" for="speed">5 d/s</output>
+        <output id="speed-out" for="speed" aria-live="off">5 d/s</output>
         <div class="speed-presets" id="speed-presets" role="group" aria-label="Speed presets"></div>
       </div>
       <div class="share">
@@ -352,6 +413,9 @@ body.present #panel { font-size: 15px; }
         <input class="link-out" id="link-out" type="text" readonly aria-label="Link to this view" hidden>
       </div>
     </section>
+    <!-- Where the legend goes when the stage is too short to open it over the view without
+         covering the HUD (app.js layoutLegend moves #legend-box in and out of here). -->
+    <div id="legend-dock" hidden></div>
     <div class="hint-card" id="hint" role="note">
       <div class="hint-body"><p><b>First time here?</b> Pick a scenario, press Play, then move a dial.</p></div>
       <button type="button" id="hint-dismiss" aria-label="Dismiss this hint">Got it</button>
@@ -360,7 +424,10 @@ body.present #panel { font-size: 15px; }
       <h2 id="h-scenario">Scenario</h2>
       <div class="scenarios" id="scenarios" role="group" aria-labelledby="h-scenario"></div>
     </section>
-    <section class="scenario-card" id="scenario-card" aria-label="Scenario details"></section>
+    <!-- tabindex="-1": the card is replaced whole on every scenario load, so app.js parks focus
+         on the container itself when it was inside — otherwise focus falls to <body> and the
+         next Tab restarts at the skip link (WCAG 2.4.3). -->
+    <section class="scenario-card" id="scenario-card" tabindex="-1" aria-label="Scenario details"></section>
     <section>
       <h2>Weather</h2>
       <div id="dials"></div>
@@ -373,7 +440,7 @@ body.present #panel { font-size: 15px; }
         <button type="button" id="btn-table" aria-pressed="false" aria-controls="stats-table" title="Show the latest values as a text table">Table</button>
         <button type="button" id="btn-clear-ref" hidden title="Remove the dashed previous-run lines from the charts">Clear comparison</button>
       </div>
-      <div id="stats-table" hidden></div>
+      <div id="stats-table" hidden role="region" aria-label="Latest values as a table"></div>
     </section>
     <section>
       <h2>About</h2>
@@ -462,7 +529,8 @@ function copyNum(v) {
  *   thresholds      { quiet, active, empty, stiffKPa, condensing, evaporating, still } — where the
  *                   sentence switches. `condensing` / `evaporating` are deposition/degradation
  *                   ratios, `stiffKPa` a stiffness in kPa, `still` the rate below which both
- *                   fluxes count as zero
+ *                   fluxes count as zero, `empty` the density below which there is no matrix yet
+ *                   (measured on species.tissueTotal, i.e. WITHOUT an undissolved scaffold)
  *   equilibrium     optional (stats, V) => string, a complete replacement for the sentence; a
  *                   falsy or non-string return falls back to the generic one
  *   scaffoldNoun    (read by the app) name of the third flux bar for a tissue whose scaffold dissolves
@@ -503,7 +571,13 @@ function copyReadStats(stats, V) {
   const dep = Math.max(0, copyNum(s.deposition));
   const deg = Math.max(0, copyNum(s.degradation));
   const alpha = copyNum(s.cells ? s.cells.a : s.meanAlpha);
-  const rho = copyNum(s.species ? s.species.total : s.meanRho);
+  // What counts as "matrix" here is what the CELLS have built. A tissue whose cube starts full of
+  // an undissolved scaffold (a hydrogel trellis) reports `species.tissueTotal` — the same total
+  // minus every scaffold species — and the sentence keys off that, so day 0 of such a tissue reads
+  // "hardly any … yet" instead of counting the trellis as matrix. A tissue with no scaffold
+  // species has tissueTotal === total, and the v0.1 shape (meanRho) is unchanged.
+  const sp = s.species || null;
+  const rho = copyNum(sp ? (Number.isFinite(sp.tissueTotal) ? sp.tissueTotal : sp.total) : s.meanRho);
   const logE = s.logE !== undefined ? s.logE : s.meanLogE;
   const E = Number.isFinite(logE) ? Math.pow(10, logE) : NaN;
   const tiny = T.still;
@@ -511,7 +585,10 @@ function copyReadStats(stats, V) {
   const ratio = deg > tiny ? dep / deg : dep > tiny ? Infinity : 1;
   const trend = still ? 'still' : ratio > T.condensing ? 'condensing' : ratio < T.evaporating ? 'evaporating' : 'steady';
   const cells = alpha < T.quiet ? 'quiet' : alpha > T.active ? 'activated' : 'partly';
-  return { dep, deg, alpha, rho, E, ratio, trend, cells, empty: rho < T.empty, stiff: Number.isFinite(E) && E >= T.stiffKPa };
+  const empty = rho < T.empty;
+  // "…and the matrix around them is already stiff" is a claim about the matrix the CELLS built, so
+  // it cannot be made while there is none: a fresh hydrogel is 30–60 kPa on the trellis alone.
+  return { dep, deg, alpha, rho, E, ratio, trend, cells, empty, stiff: Number.isFinite(E) && E >= T.stiffKPa && !empty };
 }
 
 /**
@@ -539,7 +616,7 @@ function copyTrend(stats, vocabulary) {
  * < thresholds.evaporating evaporating, otherwise holding shape ("still" below
  * thresholds.still on both mean rates). Cells: below thresholds.quiet quiet,
  * above thresholds.active working. Empty: density < thresholds.empty.
- * Stiff: E >= thresholds.stiffKPa.
+ * Stiff: E >= thresholds.stiffKPa AND there is matrix to be stiff (density >= thresholds.empty).
  */
 function copyEquilibriumSentence(stats, vocabulary) {
   const V = copyVocabulary(vocabulary);
@@ -651,12 +728,15 @@ function copyEquilibriumSentence(stats, vocabulary) {
  *                    applied by checkScenario() and the headless tools when the
  *                    clock reaches day `at` (before stepping on).  The app may
  *                    treat them as suggestions (v0.1 never auto-injured).
- *  checks            `{ at, stat, op, value }` or `{ at, stat, rel: { stat, op, at? }, value? }`:
- *                    with `rel` the check passes when stat(at) op (rel.stat at
- *                    rel.at (default: same day) + value (default 0)).  `at` may also be a
+ *  checks            `{ at, stat, op, value }` or `{ at, stat, rel: { stat, op, at?, factor? }, value? }`:
+ *                    with `rel` the check passes when stat(at) op (rel.stat at rel.at (default:
+ *                    same day) · factor (default 1) + value (default 0)).  `at` may also be a
  *                    WINDOW `[from, to]` with `agg: 'min' | 'max' | 'mean' | 'first'`, which
  *                    checkScenario evaluates on samples every 0.5 d inside the window (a
- *                    `rel` reference day then defaults to `from`).
+ *                    `rel` reference day then defaults to `from`), or with `agg: 'cross'` +
+ *                    `threshold`, which reports the first sampled DAY where `stat op threshold`
+ *                    holds and passes when there is one (result: value = the day, ref = the
+ *                    threshold, plus `crossed: { day, stat }`; no `rel`, no `value`).
  *  cell hook outputs out.a / out.b are pre-filled with the current values (so a
  *                    hook that does not write them leaves the state unchanged);
  *                    out.aSum is pre-filled with NaN and the engine substitutes
@@ -683,10 +763,15 @@ function copyEquilibriumSentence(stats, vocabulary) {
  *                    the pass T is rescaled onto the new fiber total and FA / the principal
  *                    axis are refreshed (same math as the voxel pass, same fEvery cadence).
  *                    Transport is hindered by the voxel hook's OPTIONAL out.mobility ∈ [0,1]
- *                    (default 1, e.g. a tight hydrogel mesh); a face uses the mean of its two
- *                    voxels.  Sink loss counts as degradation, or as scaffoldFlux for a
- *                    species of kind 'scaffold'.
- *  out.mobility      voxel-hook output, only read when some species has D (see above).
+ *                    (default 1, e.g. a tight hydrogel mesh); a diffusive face uses the mean of
+ *                    its two voxels and the sink uses the face voxel's own value, so a sealed
+ *                    mesh also stops the leak (v0.4).  Sink loss counts as degradation, or as
+ *                    scaffoldFlux for a species of kind 'scaffold'.
+ *  species.carryTensor  OPTIONAL `false` on a FIBER species with D (v0.4): the mass moves but T does
+ *                    not travel with it, so the arriving matrix takes the destination voxel's
+ *                    orientation (isotropic where it has none) and trace(T) is still exact.  ~3×
+ *                    cheaper than carrying the tensor; the default stays true.
+ *  out.mobility      voxel-hook output, only read when some species has D or sink (see above).
  *  out.polS/alignS   OPTIONAL per-fiber-species orientation of a cell's deposition
  *                    (Float32Array indexed by SPECIES index).  They are read only when the
  *                    hook sets out.usePolS = true (one store per cell otherwise); an entry
@@ -703,7 +788,10 @@ function copyEquilibriumSentence(stats, vocabulary) {
  *                    accumulators 1..3 default to 0.  ctx.aSum stays an alias of ctx.vox[0].
  *  out.scaffoldLoss  voxel-hook output (≥ 0): dissolution of a 'scaffold' species, which is
  *                    neither deposition nor degradation of tissue.  stats().scaffoldFlux is
- *                    its mean per-voxel rate (a third flux bar).
+ *                    its mean per-voxel rate (a third flux bar).  When the ≥ 0 clamp on dRho
+ *                    truncated a scaffold species this step, the reported rate is capped at what
+ *                    the scaffold species ACTUALLY lost / dt (v0.4), so a hook that keeps asking
+ *                    after the network has gone no longer keeps the bar lit.
  *  cellType.states   `[{ key: 'a'|'b'|'c', label, range }]` labels and ranges the cell scalars;
  *                    `stateLabels` / `cRange` remain accepted aliases (TissueEngine.cellStates
  *                    merges the two forms).  Only `c` may have a range other than [0, 1]:
@@ -732,7 +820,9 @@ function copyEquilibriumSentence(stats, vocabulary) {
  *                    likewise pulls its polarity into that plane).  Trace-preserving either way.
  *  cellType.motile   `false` is honoured: the cell keeps its polarity and position (no guidance,
  *                    load alignment, noise draws or migration) and repulsion moves only the
- *                    motile partner of a pair, so it acts as an obstacle.  Its hooks still run.
+ *                    motile partner of a pair — which then takes the WHOLE overlap correction
+ *                    (the ½ split is between the partners that can move), so it acts as an
+ *                    obstacle rather than a soft partner.  Its hooks still run.
  *  cellType.rCell    OPTIONAL per-type repulsion radius (default engine.rCell); a pair's contact
  *                    distance is rCell_i + rCell_j.  validate() warns when 2·max(rCell) ≥ h,
  *                    which is the assumption behind the 27-bin neighbour search.
@@ -751,12 +841,18 @@ function copyEquilibriumSentence(stats, vocabulary) {
  *                    fire on the same day boundaries) and _loadFrom falls back to it.
  *  stats().cells     .byType.<cellType key> = { n, a, b, c }; stat paths 'cells.byType.<key>'
  *                    (the count) and 'cells.byType.<key>.a|b|c|n'.
- *  snapshot().fields per-frame field grids (4 decimals), one per declared field; exportMeta adds
- *                    `fields` (key/label/colour), `loadRange` ([min, max] of the load dial),
- *                    `tissueName` and `scenarioTitle`.  All additive: format 2 readers are fine.
- *  validate warnings TissueEngine.warnings(t, { overrides }) returns non-fatal notes (field or
- *                    species mode, repulsion range vs h, cell seeding); validate() prints each
- *                    once per definition with console.warn and still returns only hard errors.
+ *  snapshot(o)       per-frame field grids (4 decimals), one per declared field, unless
+ *                    `o.fields === false` (then the key is absent — §5 readers tolerate that, and
+ *                    an export ring buffer is 26-38 % smaller); exportMeta adds `fields`
+ *                    (key/label/colour, plus `pointScale` / `style` when the definition declares
+ *                    them), `loadRange` ([min, max] of the load dial), `tissueName`
+ *                    and `scenarioTitle`.  All additive: format 2 readers are fine.
+ *  validate warnings TissueEngine.notes(t, { overrides }) returns non-fatal notes as
+ *                    [{ text, actionable }] (field or species mode, repulsion range vs h, cell
+ *                    seeding, a range check that cannot pass); warnings() is the same as strings.
+ *                    validate() prints the ACTIONABLE ones once per definition with console.warn —
+ *                    a correctly integrated fast field is not a warning — and still returns only
+ *                    hard errors.
  *  field.boundary    OPTIONAL 'bath' (default: relaxation toward the bath dial
  *                    everywhere at kBath) or 'face:+z' / 'face:-z' (Dirichlet:
  *                    the voxels of that z layer are held at the bath dial's value
@@ -827,16 +923,19 @@ const ENGINE_QS_THETA = 0.5;       // quasi-steady solve: how far the field move
  *   'auto'         explicit while lam ≤ 1/6, then sub-cycled, then (if the steady problem is well
  *                  posed) quasi-steady once more than ENGINE_SUB_MAX sub-steps would be needed
  * `steady` says whether a steady solve is well posed (Dirichlet face, bath relaxation or decay).
- * Returns { mode: 0 | 1 | 2 (index into ENGINE_MODES), nSub, nWant, capped, fellBack }.
+ * Returns { mode: 0 | 1 | 2 (index into ENGINE_MODES), nSub, nWant, capped, fellBack, want }.
+ * A definition that ASKED for 'subcycled' is reported as sub-cycled even where one sub-step is
+ * enough: the arithmetic is then identical to 'explicit' (one sub-step of dt IS an explicit step),
+ * but the report must not contradict the definition.
  */
 function engineDiffusionMode(lam, want = 'auto', steady = false) {
   const nWant = lam > ENGINE_LAM_STABLE ? Math.ceil(6 * lam) : 1;
-  if (want === 'explicit') return { mode: 0, nSub: 1, nWant, capped: nWant > 1, fellBack: false };
+  if (want === 'explicit') return { mode: 0, nSub: 1, nWant, capped: nWant > 1, fellBack: false, want };
   const fellBack = want === 'quasiSteady' && !steady;
-  if (want === 'quasiSteady' && steady) return { mode: 2, nSub: 1, nWant, capped: false, fellBack: false };
-  if (want === 'auto' && nWant > ENGINE_SUB_MAX && steady) return { mode: 2, nSub: 1, nWant, capped: false, fellBack: false };
+  if (want === 'quasiSteady' && steady) return { mode: 2, nSub: 1, nWant, capped: false, fellBack: false, want };
+  if (want === 'auto' && nWant > ENGINE_SUB_MAX && steady) return { mode: 2, nSub: 1, nWant, capped: false, fellBack: false, want };
   const nSub = nWant > ENGINE_SUB_MAX ? ENGINE_SUB_MAX : nWant;
-  return { mode: nSub > 1 ? 1 : 0, nSub, nWant, capped: nWant > ENGINE_SUB_MAX, fellBack };
+  return { mode: nSub > 1 || want === 'subcycled' ? 1 : 0, nSub, nWant, capped: nWant > ENGINE_SUB_MAX, fellBack, want };
 }
 
 /** mulberry32 PRNG: returns a function producing uniform floats in [0,1). */
@@ -870,6 +969,8 @@ const ENGINE_AGGS = Object.freeze({
   mean: (a) => a.reduce((x, y) => x + y, 0) / a.length,
   first: (a) => a[0],
 });
+/** `agg` values a windowed check may use: the reducers above plus 'cross' (first crossing day). */
+const ENGINE_AGG_KEYS = Object.freeze([...Object.keys(ENGINE_AGGS), 'cross']);
 /** Species keys the stat paths reserve (species.total & co. would be shadowed). */
 const ENGINE_RESERVED_SPECIES = Object.freeze(['total', 'fiberTotal', 'tissueTotal']);
 const ENGINE_FORMATS = Object.freeze(['fixed2', 'percent', 'cells', 'int', 'onoff']);
@@ -966,14 +1067,17 @@ class TissueEngine {
     this._lastFiber = fiberIdx.length ? fiberIdx[fiberIdx.length - 1] : -1;
     // OPT-IN species transport: D (L²/day) diffuses, sink (/day) drains the +z face layer
     this._isScaffold = new Uint8Array(this.nSpecies);
+    this._sCarryT = new Uint8Array(this.nSpecies).fill(1);   // fiber species: transport carries T (v0.4)
     this._sD = new Float64Array(this.nSpecies); this._sSink = new Float64Array(this.nSpecies);
-    const diffIdx = [], sinkIdx = [];
+    const diffIdx = [], sinkIdx = [], scafIdx = [];
     tissue.species.forEach((s, i) => {
-      if (s.kind === 'scaffold') this._isScaffold[i] = 1;
+      if (s.kind === 'scaffold') { this._isScaffold[i] = 1; scafIdx.push(i); }
+      if (s.carryTensor === false) this._sCarryT[i] = 0;
       if (s.D > 0) { this._sD[i] = s.D; diffIdx.push(i); }
       if (s.sink > 0) { this._sSink[i] = s.sink; sinkIdx.push(i); }
     });
     this._diffIdx = Int32Array.from(diffIdx); this._sinkIdx = Int32Array.from(sinkIdx);
+    this._scafIdx = Int32Array.from(scafIdx);
     // integration mode per diffusing species (A1): explicit while lam ≤ 1/6, then sub-cycled
     this._sMode = new Int8Array(this.nSpecies); this._sSub = new Int32Array(this.nSpecies).fill(1);
     this.speciesModes = tissue.species.map((sp, i) => {
@@ -984,10 +1088,12 @@ class TissueEngine {
     });
     this._anyTransport = diffIdx.length > 0 || sinkIdx.length > 0;
     this._anyFiberD = diffIdx.some((i) => this._isFiber[i]);
+    // a fiber species with `carryTensor: false` moves as a felt: the mass travels, T does not
+    this._anyFiberCarry = diffIdx.some((i) => this._isFiber[i] && this._sCarryT[i] === 1);
     this._anyFiberMoves = this._anyFiberD || sinkIdx.some((i) => this._isFiber[i]);
-    this._mob = diffIdx.length ? new Float64Array(NV).fill(1) : null;   // voxel hook out.mobility
+    this._mob = this._anyTransport ? new Float64Array(NV).fill(1) : null;   // voxel hook out.mobility (gates D AND sink)
     this._sDelta = diffIdx.length ? new Float64Array(NV) : null;
-    this._tDelta = this._anyFiberD ? new Float64Array(6 * NV) : null;   // 6 components per voxel, interleaved
+    this._tDelta = this._anyFiberCarry ? new Float64Array(6 * NV) : null;   // 6 components per voxel, interleaved
     this._fiberArrays = this._anyFiberMoves ? new Array(fiberIdx.length) : null;
     this._tScaf = 0;
 
@@ -1126,7 +1232,11 @@ class TissueEngine {
     this._fromCache = new Map();
     this._warm = new Map();     // resumable init.from pre-runs (warmFrom / warmScenarios)
 
-    this.reset(tissue.scenarios[0].key);
+    // `_noReset` (internal, used by _makeWarm) leaves the instance unreset: the caller MUST call
+    // reset() before anything else.  It keeps a pre-run engine from running scenarios[0] first —
+    // which, if that scenario has its own init.from, would be a full synchronous pre-run inside
+    // what the app calls as a bounded idle slice.
+    if (!opts._noReset) this.reset(tissue.scenarios[0].key);
   }
 
   // ------------------------------------------------------------------ setup
@@ -1349,7 +1459,7 @@ class TissueEngine {
   /** Fresh pre-run job for `from` (the engine plus the event cursor _preRunSlice advances). */
   _makeWarm(from) {
     if (this._depth >= 4) throw new Error(`init.from chain deeper than 4 (tissue '${this.tissue.key}')`);
-    const pre = new TissueEngine(this.tissue, { seed: (this.seed + 1) >>> 0, overrides: this._overrides, _depth: this._depth + 1 });
+    const pre = new TissueEngine(this.tissue, { seed: (this.seed + 1) >>> 0, overrides: this._overrides, _depth: this._depth + 1, _noReset: true });
     pre.reset(from.scenario, from.dials ? { dials: from.dials } : {});
     const withEvents = from.events === true;
     return {
@@ -1522,6 +1632,7 @@ class TissueEngine {
     const P = this.P, dt = this.dt, N = this.N, NV = this.NV, L = this.L;
     const invh = 1 / this.h, Nm1 = N - 1, sqrtDt = Math.sqrt(dt);
     const nS = this.nSpecies, nF = this.nFields, species = this.species, isFiber = this._isFiber, fiberIdx = this._fiberIdx;
+    const isScaf = this._isScaffold, scafIdx = this._scafIdx;
     const Txx = this.Txx, Tyy = this.Tyy, Tzz = this.Tzz, Txy = this.Txy, Txz = this.Txz, Tyz = this.Tyz;
     const fiberTotal = this.fiberTotal, fa = this.fa, fx = this.fx, fy = this.fy, fz = this.fz, E = this.E;
     const fields = this.fields, fieldSrc = this._fieldSrc, accs = this._acc, acc0 = accs[0], cellCount = this._cellCount;
@@ -1704,10 +1815,16 @@ class TissueEngine {
                   const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
                   if (d2 >= d02 || d2 === 0) continue;
                   const d = Math.sqrt(d2);
-                  const f = kRep * (d0 - d) / d * 0.5;
-                  // a non-motile cell is an obstacle: the pair force only moves the motile partner
+                  // The overlap correction is shared by the partners that can actually MOVE: two
+                  // motile cells take half each (share 2 reproduces the old ×0.5 bit-for-bit), a
+                  // motile cell against a `motile: false` anchor takes all of it, and a pair of
+                  // anchors is skipped. A non-motile cell is an obstacle, not a soft partner.
+                  const motj = allMotile || motile[tj] === 1;
+                  const share = (moti ? 1 : 0) + (motj ? 1 : 0);
+                  if (share === 0) continue;
+                  const f = kRep * (d0 - d) / d / share;
                   if (moti) { dxs[i3] -= f * ddx; dxs[i3 + 1] -= f * ddy; dxs[i3 + 2] -= f * ddz; }
-                  if (allMotile || motile[tj] === 1) { dxs[j3] += f * ddx; dxs[j3 + 1] += f * ddy; dxs[j3 + 2] += f * ddz; }
+                  if (motj) { dxs[j3] += f * ddx; dxs[j3 + 1] += f * ddy; dxs[j3 + 2] += f * ddz; }
                 }
               }
             }
@@ -1756,17 +1873,28 @@ class TissueEngine {
       rules.voxel(vctx);
 
       // --- integrate species (clamp ≥ 0); new fiber total
-      let tot1 = 0;
+      let tot1 = 0, scafCut = false;
       for (let s = 0; s < nS; s++) {
         let r = vRho[s] + dRho[s] * dt;
-        if (r < 0 || r !== r) r = 0;
+        if (r < 0 || r !== r) { r = 0; if (isScaf[s]) scafCut = true; }
         species[s][v] = r;
         if (isFiber[s]) tot1 += species[s][v];
       }
       const loss = vout.loss;
       if (loss > 0) degTotal += loss;
       const sLoss = vout.scaffoldLoss;
-      if (sLoss > 0) scafTotal += sLoss;
+      if (sLoss > 0) {
+        // report what the voxel ACTUALLY gave up: when the ≥ 0 clamp above truncated a scaffold
+        // species, the hook's rate would over-report the third flux bar (and would keep reporting
+        // dissolution after the last of the network has gone)
+        if (!scafCut) scafTotal += sLoss;
+        else {
+          let gone = 0;
+          for (let q = 0; q < scafIdx.length; q++) { const d = vRho[scafIdx[q]] - species[scafIdx[q]][v]; if (d > 0) gone += d; }
+          const cap = gone / dt;
+          scafTotal += sLoss < cap ? sLoss : cap;
+        }
+      }
       if (wantMob) { const mb = vout.mobility; mob[v] = mb > 1 ? 1 : (mb > 0 ? mb : 0); }
       for (let f = 0; f < nF; f++) fieldSrc[f][v] += vSrc[f];
 
@@ -1854,12 +1982,12 @@ class TissueEngine {
     const Txx = this.Txx, Tyy = this.Tyy, Tzz = this.Tzz, Txy = this.Txy, Txz = this.Txz, Tyz = this.Tyz;
     const ft = this.fiberTotal, fa = this.fa, fx = this.fx, fy = this.fy, fz = this.fz;
     const idx = this._diffIdx, mob = this._mob, delta = this._sDelta, dT = this._tDelta;
-    const withT = this._anyFiberD;
+    const withT = this._anyFiberCarry, carryT = this._sCarryT;
     if (withT) dT.fill(0);
     const dtH2 = dt / (this.h * this.h), lamMax = 1 / 6;
 
     for (let q = 0; q < idx.length; q++) {
-      const s = idx[q], arr = species[s], fib = withT && isFiber[s] === 1;
+      const s = idx[q], arr = species[s], fib = withT && isFiber[s] === 1 && carryT[s] === 1;
       // A1: explicit while lam = D·dt/h² ≤ 1/6, otherwise nSub explicit sub-steps of dt/nSub
       const nSub = this._sSub[s], kD = this._sD[s] * (nSub === 1 ? dtH2 : (dt / nSub) / (this.h * this.h));
       const face = (v, w) => {
@@ -1905,7 +2033,8 @@ class TissueEngine {
         for (let j = 0; j < N; j++) {
           const v = (i * N + j) * N + Nm1, r = arr[v];
           if (r <= 0) continue;
-          let l = kS * r * dt;
+          // the mesh gates the leak just as it gates diffusion: mobility 0 seals the face layer
+          let l = kS * r * dt * mob[v];
           if (l > r) l = r;
           arr[v] = r - l; sum += l;
         }
@@ -2039,8 +2168,9 @@ class TissueEngine {
     const kHold = face > 0 ? Nm1 : (face < 0 ? 0 : -1);
     if (theta < 1) prev.set(g);
     if (kHold >= 0) for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) g[(i * N + j) * N + kHold] = bath;
+    let prevWorst = 0;
     for (let sweep = 0; sweep < ENGINE_QS_SWEEPS; sweep++) {
-      let worst = 0;
+      let worst = 0, mag = kHold >= 0 ? bath : 0;
       for (let i = 0; i < N; i++) {
         const im = i > 0, ip = i < Nm1;
         for (let j = 0; j < N; j++) {
@@ -2063,11 +2193,19 @@ class TissueEngine {
             if (ng < 0) ng = 0;
             const d = ng > gv ? ng - gv : gv - ng;
             if (d > worst) worst = d;
+            if (ng > mag) mag = ng;
             g[v] = ng;
           }
         }
       }
-      if (worst < ENGINE_QS_TOL) break;
+      // One sweep's INCREMENT is not an error bound: an iteration that contracts by rho leaves
+      // ~increment·rho/(1 − rho) behind, and a diffusion-dominated problem has rho close to 1 — an
+      // absolute increment test then stops far from the solution (and its meaning changes with the
+      // size of the field).  Estimate rho from consecutive sweeps and stop on the estimated error,
+      // measured against the magnitude of the field.  The first sweep never stops (rho unknown).
+      const rho = prevWorst > 0 ? Math.max(om - 1, Math.min(0.99, worst / prevWorst)) : 1;
+      prevWorst = worst;
+      if (worst === 0 || worst * rho / (1 - rho) < ENGINE_QS_TOL * (mag > 1 ? mag : 1)) break;
     }
     // The hook's sources were computed from the field as it was at the START of the step, so a
     // source that depends on the field (Michaelis-Menten uptake, say) makes this a lagged
@@ -2277,9 +2415,13 @@ class TissueEngine {
     return { species, fraction, fields, fa: cnt ? sF / cnt : 0, nVox: cnt, cells: { n: nc, a: nc ? sA / nc : 0, b: nc ? sB / nc : 0, c: nc ? sC / nc : 0 } };
   }
 
-  /** One frame of the format-2 export (EXTENDING.md §5): plain arrays, rounded. */
-  snapshot() {
-    const NV = this.NV, n = this.nCells, nS = this.nSpecies;
+  /**
+   * One frame of the format-2 export (EXTENDING.md §5): plain arrays, rounded.
+   * `opts.fields = false` leaves the per-field grids out of the frame (they are the biggest part
+   * of it — 26-38 % of a frame's JSON — and §5 says a reader must tolerate a frame without them).
+   */
+  snapshot(opts = {}) {
+    const NV = this.NV, n = this.nCells, nS = this.nSpecies, withFields = opts.fields !== false;
     const f = new Float32Array(3 * NV);
     for (let v = 0; v < NV; v++) { f[3 * v] = this.fx[v]; f[3 * v + 1] = this.fy[v]; f[3 * v + 2] = this.fz[v]; }
     const phi = new Float32Array(NV);
@@ -2290,9 +2432,9 @@ class TissueEngine {
     const species = {};
     for (let s = 0; s < nS; s++) species[this.speciesKeys[s]] = tmRoundArray(this.species[s], 3);
     const fields = {};                                   // E1: diffusible fields travel with the frame
-    for (let f = 0; f < this.nFields; f++) fields[this.fieldKeys[f]] = tmRoundArray(this.fields[f], 4);
+    if (withFields) for (let f = 0; f < this.nFields; f++) fields[this.fieldKeys[f]] = tmRoundArray(this.fields[f], 4);
     const a = tmRoundArray(this._ca.subarray(0, n), 3);
-    return {
+    const frame = {
       t: Math.round(this.time * 1000) / 1000,
       species,
       fields,
@@ -2308,6 +2450,8 @@ class TissueEngine {
         alpha: a,                               // format-1 readers
       },
     };
+    if (!withFields) delete frame.fields;
+    return frame;
   }
 
   /**
@@ -2332,7 +2476,16 @@ class TissueEngine {
       loadRange: this._loadDial >= 0 ? [t.dials[this._loadDial].min, t.dials[this._loadDial].max] : null,
       cellCountDial: this._cellDial >= 0 ? this.dialKeys[this._cellDial] : null,
       species: t.species.map((s) => ({ key: s.key, label: s.label, kind: s.kind, color: s.color })),
-      fields: t.fields.map((f) => ({ key: f.key, label: f.label, color: f.color })),
+      // A field's render hints travel with it when the definition sets them, so an offline
+      // renderer draws the haze the browser drew (blender/import_tissue.py already reads
+      // `pointScale`).  Emitted only when declared, so an export is byte-identical for a
+      // definition that sets neither.
+      fields: t.fields.map((f) => {
+        const m = { key: f.key, label: f.label, color: f.color };
+        if (+f.pointScale > 0) m.pointScale = +f.pointScale;
+        if (typeof f.style === 'string' && f.style) m.style = f.style;
+        return m;
+      }),
       cellTypes: t.cellTypes.map((c) => {
         const meta = { key: c.key, label: c.label, colors: c.colors.slice(), shape: Object.assign({}, c.shape), radius: c.radius };
         if (c.radius && typeof c.radius === 'object') { meta.radius = c.radius.min; meta.radiusBy = Object.assign({}, c.radius); }
@@ -2417,27 +2570,40 @@ class TissueEngine {
     const at0 = (c) => (Array.isArray(c.at) ? c.at[0] : c.at);
     return checks.map((check) => {
       let value;
+      let crossed;
       if (Array.isArray(check.at)) {
-        const vals = [];
+        const vals = [], days = [];
         for (let q = g(check.at[0]); q <= g(check.at[1]); q++) {
           const s = rec.get(q);
           const x = s === undefined ? undefined : engineStatFrom(s, check.stat);
-          if (x !== undefined) vals.push(x);
+          if (x !== undefined) { vals.push(x); days.push(q / 2); }
         }
-        value = vals.length ? ENGINE_AGGS[check.agg](vals) : undefined;
+        if (check.agg === 'cross') {
+          // "when does it first happen?": the first sample in the window where stat op threshold
+          const op = ENGINE_OPS[check.op];
+          let k = -1;
+          for (let z = 0; z < vals.length; z++) if (op(vals[z], check.threshold)) { k = z; break; }
+          crossed = k < 0 ? null : { day: days[k], stat: vals[k] };
+          value = crossed ? crossed.day : undefined;                // the VALUE of a cross check is the DAY
+        } else value = vals.length ? ENGINE_AGGS[check.agg](vals) : undefined;
       } else {
         value = engineStatFrom(rec.get(g(check.at)), check.stat);
       }
       let pass, ref;
-      if (check.rel) {
+      if (check.agg === 'cross') {
+        ref = check.threshold;
+        pass = crossed !== null && crossed !== undefined;           // a crossing was found in range
+      } else if (check.rel) {
         const at = check.rel.at === undefined ? at0(check) : check.rel.at;
-        ref = engineStatFrom(rec.get(g(at)), check.rel.stat) + (check.value === undefined ? 0 : check.value);
+        const base = engineStatFrom(rec.get(g(at)), check.rel.stat);
+        // reference = rel.stat(rel.at) · factor + value  (factor defaults to 1, value to 0)
+        ref = base * (check.rel.factor === undefined ? 1 : check.rel.factor) + (check.value === undefined ? 0 : check.value);
         pass = ENGINE_OPS[check.rel.op](value, ref);
       } else {
         ref = check.value;
         pass = ENGINE_OPS[check.op](value, check.value);
       }
-      return { check, value, ref, pass: !!pass };
+      return crossed === undefined ? { check, value, ref, pass: !!pass } : { check, value, ref, pass: !!pass, crossed };
     });
   }
 
@@ -2476,6 +2642,10 @@ class TissueEngine {
       if (s.boundary !== undefined && s.boundary !== 'face:+z') err.push(`species '${s.key}' boundary must be 'face:+z' (the only species boundary)`);
       if (s.mode !== undefined && !['auto', 'explicit', 'subcycled'].includes(s.mode)) {
         err.push(`species '${s.key}' mode must be auto|explicit|subcycled (transport moves mass, so there is no quasiSteady)`);
+      }
+      if (s.carryTensor !== undefined) {
+        if (typeof s.carryTensor !== 'boolean') err.push(`species '${s.key}' carryTensor must be a boolean`);
+        else if (s.kind !== 'fiber') err.push(`species '${s.key}' carryTensor only applies to a kind:'fiber' species`);
       }
     });
     if (!Array.isArray(t.fields)) err.push('fields must be an array');
@@ -2588,16 +2758,29 @@ class TissueEngine {
           const w = `scenario '${s.key}' checks[${j}]`;
           if (Array.isArray(c.at)) {
             if (c.at.length !== 2 || !c.at.every(isNum) || c.at[0] < 0 || c.at[1] < c.at[0]) err.push(`${w}: at [from, to] needs 0 ≤ from ≤ to`);
-            if (!(c.agg in ENGINE_AGGS)) err.push(`${w}: at [from, to] needs agg min|max|mean|first`);
+            if (!ENGINE_AGG_KEYS.includes(c.agg)) err.push(`${w}: at [from, to] needs agg min|max|mean|first|cross`);
           } else {
             if (!isNum(c.at) || c.at < 0) err.push(`${w}: at must be a day ≥ 0 (or [from, to] with agg)`);
             if (c.agg !== undefined) err.push(`${w}: agg only applies to at [from, to]`);
           }
           checkPath(c.stat, w);
-          if (c.rel) {
+          if (c.threshold !== undefined && c.agg !== 'cross') err.push(`${w}: threshold only applies to agg 'cross' (a plain check compares with 'value')`);
+          if (c.agg === 'cross') {
+            // { at: [from, to], agg: 'cross', stat, op, threshold } — the first day stat op threshold
+            // holds; the check passes when that day exists inside the window, and the reported
+            // `value` IS that day (so `value` as a level would be ambiguous and is rejected).
+            if (c.rel) err.push(`${w}: agg 'cross' reports the crossing DAY, so it takes no rel reference`);
+            if (c.value !== undefined) err.push(`${w}: agg 'cross' uses 'threshold' for the level and the 'at' range as the deadline; drop 'value'`);
+            if (c.op === 'between') {
+              if (!Array.isArray(c.threshold) || c.threshold.length !== 2 || !c.threshold.every(isNum) || c.threshold[0] > c.threshold[1]) err.push(`${w}: cross with between needs threshold [lo, hi]`);
+            } else if (c.op === 'gt' || c.op === 'lt') {
+              if (!isNum(c.threshold)) err.push(`${w}: agg 'cross' needs a numeric threshold`);
+            } else err.push(`${w}: op must be gt|lt|between`);
+          } else if (c.rel) {
             checkPath(c.rel.stat, `${w}.rel`);
             if (!['gt', 'lt'].includes(c.rel.op)) err.push(`${w}.rel.op must be gt|lt`);
             if (c.rel.at !== undefined && (!isNum(c.rel.at) || c.rel.at < 0)) err.push(`${w}.rel.at must be a day ≥ 0`);
+            if (c.rel.factor !== undefined && !isNum(c.rel.factor)) err.push(`${w}.rel.factor must be a number`);
             if (c.value !== undefined && !isNum(c.value)) err.push(`${w}: value (offset) must be a number`);
           } else if (c.op === 'between') {
             if (!Array.isArray(c.value) || c.value.length !== 2 || !c.value.every(isNum) || c.value[0] > c.value[1]) err.push(`${w}: between needs value [lo, hi]`);
@@ -2649,7 +2832,8 @@ class TissueEngine {
     if (t.copy !== undefined && (typeof t.copy !== 'object' || t.copy === null)) err.push('copy must be an object');
     if (t.copy && t.copy.vocabulary) for (const k of ['matrix', 'cellsActive', 'cellsQuiet']) if (!isStr(t.copy.vocabulary[k])) err.push(`copy.vocabulary.${k} missing`);
     if (!err.length) {
-      const warn = TissueEngine.warnings(t, opts);
+      // only the ACTIONABLE notes are printed; TissueEngine.notes() has the rest (§7.1)
+      const warn = TissueEngine.notes(t, opts).filter((n) => n.actionable).map((n) => n.text);
       if (warn.length && typeof console !== 'undefined' && console.warn) {
         let seen = ENGINE_WARNED.get(t);
         if (!seen) { seen = new Set(); ENGINE_WARNED.set(t, seen); }
@@ -2660,28 +2844,29 @@ class TissueEngine {
   }
 
   /**
-   * Non-fatal notes about a VALID definition (docs/EXTENDING.md §7.1).  Each is something the
-   * engine works around silently but an author should know about:
-   *   - a field or species whose diffusion number lam = D·dt/h² is above the explicit limit 1/6,
-   *     naming the field, lam and the integration mode the engine picked (A1);
-   *   - a repulsion range 2·max(rCell) that is not smaller than a voxel, which the 27-bin
-   *     neighbour search assumes;
-   *   - cell seeding with neither a role:'cellCount' dial nor any cellTypes[].count, or with both.
-   * `opts.overrides` are the constructor's engine overrides. Pure: returns the strings, prints nothing.
+   * Non-fatal notes about a VALID definition (docs/EXTENDING.md §7.1), as
+   * `[{ text, actionable }]`.  `actionable` marks the ones that describe a WORK-AROUND — something
+   * the engine is doing differently from what the definition asks for, or a setup that will not do
+   * what it looks like.  validate() prints only those; the rest are data for a tool
+   * (`engine.fieldModes` / `speciesModes` report the same modes) and would otherwise train a
+   * reader to ignore the console on a correctly-integrated tissue.
    */
-  static warnings(t, opts = {}) {
+  static notes(t, opts = {}) {
     const out = [];
     if (!t || typeof t !== 'object' || !Array.isArray(t.fields) || !Array.isArray(t.species) || !Array.isArray(t.cellTypes) || !Array.isArray(t.dials)) return out;
     const P = Object.assign({}, ENGINE_DEFAULTS, t.engine || {}, opts.overrides || {});
     const h = P.L / (P.N | 0), h2 = h * h;
+    const note = (actionable, text) => ({ text, actionable });
     const say = (what, lam, r, steady) => {
       const head = `${what}: lam = D·dt/h² = ${engineFmt(lam)}`;
-      if (r.mode === 0) return `${head} > 1/6 but mode is 'explicit' — the diffusion number is CLAMPED at 1/6, so it integrates as if D were ${engineFmt(ENGINE_LAM_STABLE * h2 / P.dt)}`;
-      if (r.mode === 2) return `${head} → mode 'quasiSteady' (steady solve, ≤ ${ENGINE_QS_SWEEPS} sweeps to ${ENGINE_QS_TOL})`;
+      // clamped explicit: the engine is running a different D from the one the definition declares
+      if (r.mode === 0) return note(true, `${head} > 1/6 but mode is 'explicit' — the diffusion number is CLAMPED at 1/6, so it integrates as if D were ${engineFmt(ENGINE_LAM_STABLE * h2 / P.dt)}`);
+      if (r.mode === 2) return note(false, `${head} → mode 'quasiSteady' (steady solve, ≤ ${ENGINE_QS_SWEEPS} sweeps to ${ENGINE_QS_TOL})`);
+      if (r.nSub === 1) return note(false, `${head} ≤ 1/6, so the requested mode 'subcycled' runs as ONE sub-step — identical arithmetic to 'explicit'`);
       let msg = `${head} > 1/6 → mode 'subcycled' (${r.nSub} explicit sub-steps per step)`;
       if (r.capped) msg += `; ${r.nWant} would be needed, capped at ${ENGINE_SUB_MAX}${steady ? " — set mode: 'quasiSteady'" : ' — this field has no steady state (no Dirichlet face, kBath or decay), so it is integrated in time'}`;
       else if (r.fellBack) msg += " — mode 'quasiSteady' needs a Dirichlet face, kBath > 0 or decay > 0";
-      return msg;
+      return note(!!(r.capped || r.fellBack), msg);
     };
     for (const f of t.fields) {
       const lam = (f.D || 0) * P.dt / h2, steady = TissueEngine._steadySolvable(f);
@@ -2698,13 +2883,40 @@ class TissueEngine {
     let rMax = P.rCell;
     for (const c of t.cellTypes) if (typeof c.rCell === 'number' && c.rCell > rMax) rMax = c.rCell;
     if (2 * rMax >= h) {
-      out.push(`repulsion range 2·max(rCell) = ${engineFmt(2 * rMax)} is not smaller than a voxel (h = ${engineFmt(h)}): the 27-bin neighbour search can miss overlapping cells — lower rCell or raise N`);
+      out.push(note(true, `repulsion range 2·max(rCell) = ${engineFmt(2 * rMax)} is not smaller than a voxel (h = ${engineFmt(h)}): the 27-bin neighbour search can miss overlapping cells — lower rCell or raise N`));
     }
     const hasDial = t.dials.some((d) => d.role === 'cellCount'), hasCount = t.cellTypes.some((c) => Number.isInteger(c.count));
-    if (hasDial && hasCount) out.push("both a role:'cellCount' dial and cellTypes[].count: the dial sets the TOTAL, the counted types are seeded first and the rest share what is left by `fraction`");
-    if (!hasDial && !hasCount) out.push("no role:'cellCount' dial and no cellTypes[].count: the tissue starts with no cells (unless a scenario's init.from brings some)");
+    if (hasDial && hasCount) out.push(note(false, "both a role:'cellCount' dial and cellTypes[].count: the dial sets the TOTAL, the counted types are seeded first and the rest share what is left by `fraction`"));
+    if (!hasDial && !hasCount) out.push(note(true, "no role:'cellCount' dial and no cellTypes[].count: the tissue starts with no cells (unless a scenario's init.from brings some)"));
+    if (hasCount && !hasDial) {
+      const bare = t.cellTypes.filter((c) => !Number.isInteger(c.count)).map((c) => c.key);
+      if (bare.length) {
+        out.push(note(true, `cellTypes[].count without a role:'cellCount' dial: the tissue seeds Σ count cells, so the types that declare no count (${bare.join(', ')}) get a share of nothing and are NEVER seeded — give them a count too, or add a role:'cellCount' dial`));
+      }
+    }
+    // a windowed check that compares its own aggregate with its own first sample can be trivially false
+    for (const s of (Array.isArray(t.scenarios) ? t.scenarios : [])) {
+      const checks = Array.isArray(s.checks) ? s.checks : [];
+      checks.forEach((c, j) => {
+        if (!Array.isArray(c.at) || !c.rel || c.rel.stat !== c.stat) return;
+        if (c.rel.at !== undefined && c.rel.at !== c.at[0]) return;
+        if (c.rel.factor !== undefined && c.rel.factor !== 1) return;
+        const off = c.value === undefined ? 0 : c.value;
+        const dead = (c.agg === 'max' && c.rel.op === 'lt' && off <= 0) || (c.agg === 'min' && c.rel.op === 'gt' && off >= 0);
+        if (dead) {
+          out.push(note(true, `scenario '${s.key}' checks[${j}]: agg '${c.agg}' of '${c.stat}' compared '${c.rel.op}' with the SAME stat at the start of its range can never pass — the ${c.agg} includes the reference sample. Use agg '${c.agg === 'max' ? 'min' : 'max'}', put rel.at before the range, or start half a day later.`));
+        }
+      });
+    }
     return out;
   }
+
+  /**
+   * The notes of TissueEngine.notes() as plain strings (docs/EXTENDING.md §7.1).
+   * `opts.overrides` are the constructor's engine overrides, so the reported diffusion numbers are
+   * the ones this engine will really run with.  Pure: returns the strings, prints nothing.
+   */
+  static warnings(t, opts = {}) { return TissueEngine.notes(t, opts).map((n) => n.text); }
 }
 
 
@@ -2741,7 +2953,8 @@ class TissueEngine {
  *           dedifferentiated one a spindle. Both the renderer and the Blender
  *           importer compute aspect = aspectMin + (aspectMax − aspectMin)·s
  *           linearly, so aspectMin > aspectMax is legal and does the right thing
- *           (verified: src/render.js:1051, blender/import_tissue.py:583; the
+ *           (verified: src/render.js `_updateCells`, blender/import_tissue.py
+ *           `cell_transforms()`; line numbers deliberately omitted — the
  *           engine's validator only requires two numbers). radius follows a the
  *           same way: { by: 'a', min: 0.032, max: 0.0416 } = the spec's
  *           rCell·(1 + 0.3·phi).
@@ -2845,12 +3058,27 @@ class TissueEngine {
  *    pericellular islands of scenario 3 never formed).
  *  NO Da      Oxygen is an ordinary engine field with a Dirichlet medium face,
  *    integrated in time rather than solved as the spec's quasi-steady Gauss–Seidel
- *    problem, so at D = 0.06 L²/d the profile takes ~1 d to form instead of
- *    minutes. The steady profile is what matters and is tuned through
- *    the consumption kO2 instead of a Damköhler number — if the contract ever
- *    offers a quasi-steady field solve, this is the field that wants it, and kO2
- *    would have to be re-tuned against the profile it produces: 5 % in the bath gives
- *    5 % at the medium face and ≈ 1 % at the deep face, 21 % gives 21 → 12 %.
+ *    problem. The STEADY profile is the spec's and is what the phenotype rule reads:
+ *    it is set by the ratio kO2 : D — the spec's Damköhler number — and 5 % in the
+ *    bath gives 5 % at the medium face and ≈ 1 % at the deep face, 21 % gives 21 → 12 %.
+ *    What is wrong is the TIME the profile takes to get there. Measured (race, seed 7,
+ *    mean of each z-layer): the deep layer falls 0.240 → 0.194 by day 1, 0.086 by day 5,
+ *    0.054 by day 10 and settles at 0.048 by day 20. A 300 µm construct equilibrates in
+ *    ~4 minutes; here it takes a fortnight, so for the first two weeks of every run the
+ *    cube is less hypoxic than it should be. See DECLINED, below.
+ *  DECLINED (round 4): raising D toward the physiological 360 L²/d (3.8 × 10⁻¹⁰ m²/s over
+ *    300 µm) and kO2 with it — the ratio, hence the steady profile, is unchanged — makes
+ *    engine v0.4 pick mode 'quasiSteady' and the gradient forms inside one step. Verified:
+ *    the day-56 z-profile is identical to 4 decimals (deep 0.0482 vs 0.0481) and all 66
+ *    scenario checks still pass, with day-56 outcomes moving < 0.3 % on race, toodense and
+ *    inflamed. It is not in because of the step cost: the steady solve is Gauss-Seidel
+ *    sweeps, and the conformance measurement (N = 12, 160 cells, node) goes 0.584 →
+ *    0.93 ms/step on race and 0.58 → 1.53 ms/step on drift, against a suite limit of
+ *    1 ms/step. Sub-cycling instead of solving is no cheaper: D × 5 (nSub 6) is already
+ *    0.96 ms/step, because one field sweep over 12³ voxels costs ≈ 0.11 ms and the whole
+ *    baseline step is 0.58 ms. Revisit when a sweep is cheaper or the quasi-steady stopping
+ *    rule needs fewer of them; the change itself is two numbers (D 0.06 → 360, kO2 0.7 →
+ *    4200) plus a re-record of tests/golden/cartilage.engine.json.
  *  NO mesh-hindered field D   A field's D is a constant of the definition (species
  *    transport takes a mobility, fields do not), so the spec's D_m·(1 − 0.8·conf)
  *    for the protease is folded into its source (kMxl: tight gels make ~25× more
@@ -2962,11 +3190,20 @@ class TissueEngine {
  * ---------------------------------------------------------------------------
  */
 
+// The one shared helper this definition uses: the live sentence's rate formatter, so the
+// scaffold rate in `copy.vocabulary.equilibrium` below is printed exactly as src/copy.js prints
+// the other two. Single-line local import (docs/EXTENDING.md §0); copy.js is first in the bundle.
+
 const TISSUE_CARTILAGE = {
   key: 'cartilage',
   name: 'Articular cartilage in a hydrogel',
   short: 'Chondrocytes race a dissolving gel to build aggrecan and collagen II',
-  version: '0.2.0',        // 0.2: engine v0.3 contract (species transport, polS, vox, scaffold flux)
+  version: '0.2.0',        // 0.2: engine v0.3 contract (species transport, polS, vox, scaffold flux);
+                           // since taken v0.4's optional slots (domainMicrons, copy.gauge, patterns,
+                           // vocabulary.equilibrium), none of which changes a number the goldens hold
+  domainMicrons: 300,      // the cube is 300 µm on a side, the number docs/SPEC.md and the whole
+                           // conversion table in docs/MODEL.md are written against (rCell 0.03 L =
+                           // 9 µm). The app's colour key prints "Cube edge ≈ 300 µm" from this.
 
   // ---- matrix species
   species: [
@@ -3012,13 +3249,13 @@ const TISSUE_CARTILAGE = {
       watch: 'The teal haze thickens within a day; the GAG band starts climbing about a week later. Two weeks of it is usually enough.' },
     { key: 'amp', label: 'Dynamic compression', min: 0, max: 0.2, step: 0.01, default: 0, format: 'percent', role: 'load',
       metaphor: 'Pressure: a steady squeeze, on and off, three hours a day.',
-      biology: 'Peak-to-peak strain of a 1 Hz squeeze. Around 10 % it stimulates synthesis; past 15 % it injures cells; inside a still-dense gel it does harm instead of good.',
-      watch: 'Started after the gel has opened, stiffness and GAG climb faster. Started too early, or turned past 15 %, both fall.' },
+      biology: 'Peak-to-peak strain of a 1 Hz squeeze. Around 10 % it stimulates synthesis most; past 15 % the injury term grows fast, and at 20 % it wrecks the construct. Squeezing a still-dense gel does blunt the stimulus for the first days — but the squeeze also opens the mesh sooner, and here that is the bigger of the two, so this model does not punish early loading the way a real construct does (Mauck 2000).',
+      watch: 'Stiffness and GAG climb faster whenever it is on, and the earlier the better here: hold the first scenario\'s dials, turn it on at day 0, and the cube ends about 40 % stiffer than with no squeeze at all. The two effects cancel at about 16 %, and past that both fall away.' },
     { key: 'o2Ext', label: 'Oxygen tension', min: 0.05, max: 1, step: 0.01, default: 0.24,
       format: (v) => `${Math.round(v * 21)} %`,
       metaphor: 'Altitude: thin air — except that up here the cloud forms better.',
       biology: 'Oxygen in the medium, 1–21 %. Cartilage is avascular; 5 % keeps cells chondrogenic, 21 % pushes them toward collagen I and hypertrophy, and under 1 % they starve.',
-      watch: 'Switch on the oxygen layer: the medium face stays bright and the deep half goes dark. Phenotype follows the deep value, not the dial.' },
+      watch: 'Switch on the oxygen layer: the medium face stays bright and the deep half goes dark. Phenotype follows the deep value, not the dial. Give it a fortnight — a real 300 µm construct settles its gradient in minutes, this one integrates it in time and needs about two weeks.' },
     { key: 'infl', label: 'Inflammation (IL-1)', min: 0, max: 1, step: 0.01, default: 0, format: 'fixed2',
       metaphor: 'Temperature: heat turns droplets back into vapor.',
       biology: 'IL-1β in the medium (1 ≈ 10 ng/mL). It switches on aggrecanase and MMP-13 and shuts synthesis down, and the cells stay suppressed after it is gone.',
@@ -3034,7 +3271,7 @@ const TISSUE_CARTILAGE = {
     { key: 'serum', label: 'Serum', min: 0, max: 1, step: 1, default: 0, format: 'onoff',
       metaphor: 'Smog: extra stuff in the air that fouls the droplets.',
       biology: '10 % fetal bovine serum. It carries mitogens that push chondrocytes toward a fibroblast-like state and blunt the TGF-β3 response; defined serum-free medium works better.',
-      watch: 'Cells drift orange and stretch out, the amber collagen I band appears, and the teal GAG band stalls.' },
+      watch: 'Cells drift orange and stretch out, the amber collagen I band appears, and the teal GAG band climbs at about half speed (0.54 against 0.95 by week eight). Add room air and a thin growth-factor trickle — the Fibrocartilage drift preset — and it stops climbing altogether.' },
   ],
 
   // ---- scenarios
@@ -3043,7 +3280,7 @@ const TISSUE_CARTILAGE = {
       goal: 'Watch a synthetic gel dissolve on its own clock while the cells inside it try to build cartilage before the gel is gone.',
       steps: [
         'Press Play and watch the grey lattice fade while the teal haze grows.',
-        'At day 14 the TGF-β3 comes down and the squeezing starts: keep an eye on the stiffness trace.',
+        'At day 14, drop the TGF-β3 bath to 0.10 and turn dynamic compression up to 10 % — do it yourself without pausing, or switch on Auto-apply scripted events and the app does it on the day. The numbers below assume it happens.',
         'Run to eight weeks and watch where the stiffness trace goes: down through the first week, back past the fresh gel in week two, and on up from there.',
       ],
       question: 'The stiffness dips before it climbs. What is handing over to what during that first fortnight, and what would make the handover fail?',
@@ -3080,10 +3317,11 @@ const TISSUE_CARTILAGE = {
       steps: [
         'Press Play; the lattice is gone inside nine days.',
         'Watch the flux gauge: deposition is high but so is loss to the medium.',
+        'At day 14 make the same change as in the first scenario — TGF-β3 bath to 0.10, dynamic compression to 10 % — by hand, or with Auto-apply scripted events on.',
         'Run to eight weeks and compare the final GAG band and stiffness with the first scenario.',
       ],
       question: 'The cells here synthesise more than in the first scenario, not less. Where does the matrix go, and which readout shows it leaving?',
-      expect: 'The grey band is gone by day 9 with almost nothing behind it — aggrecan under a third of native and no pericellular island. It climbs a little further to day 14 and then goes backwards: with no mesh and no collagen net to catch it, new aggrecan washes out as fast as it is made, and the squeezing from day 14 makes that worse. The cube ends nearly empty at about 2 kPa, a fifth of the gel it started as, and from day 14 the flux gauge sits on evaporating.',
+      expect: 'The grey band is gone by day 9 with almost nothing behind it — aggrecan under a third of native and no pericellular island. It climbs a little further to day 14 and then goes backwards: with no mesh and no collagen net to catch it, new aggrecan washes out as fast as it is made, and the squeezing from day 14 makes that worse. The cube ends nearly empty at about 2 kPa, a fifth of the gel it started as. For the fortnight after day 14 the flux gauge sits on evaporating; by week five it is level again, because the cells are still working and everything they make washes straight back out.',
       dials: { tgfExt: 0.5, amp: 0, o2Ext: 0.24, infl: 0, xl: 0.1, nCells: 160, serum: 0 },
       init: { species: { scaf: 1 }, jitter: 0.12 },
       events: [{ at: 14, dials: { tgfExt: 0.1, amp: 0.1 } }],
@@ -3095,6 +3333,9 @@ const TISSUE_CARTILAGE = {
         { at: [9, 21], agg: 'first', stat: 'cells.c', op: 'lt', value: 0.3 },       // … and no islands either
         { at: 21, stat: 'logE', rel: { stat: 'logE', at: 9, op: 'lt' } },    // from t* the modulus goes backwards
         { at: [14, 28], agg: 'mean', stat: 'ratio', op: 'lt', value: 0.87 }, // the gauge sits on evaporating
+        // …for a fortnight, and no longer: the ratio is back inside the "holds its shape" band
+        // (≥ 0.87) from about day 30 and reaches 1.0 by day 42, which is what the card now says.
+        { at: [35, 56], agg: 'min', stat: 'ratio', op: 'gt', value: 0.87 },
         // cumulative loss > 60 % of synthesis by day 28 (offset = −0.4 × cumDeposition ≈ 1.24; see the race)
         { at: 28, stat: 'cumDegradation', rel: { stat: 'cumDeposition', op: 'gt' }, value: -0.5 },
         { at: [0, 56], agg: 'min', stat: 'logE', rel: { stat: 'logE', at: 0, op: 'lt' }, value: -0.523 },  // min E < 0.3·E(0)
@@ -3109,6 +3350,7 @@ const TISSUE_CARTILAGE = {
       goal: 'Crosslink the gel as tightly as it will go and watch the matrix get stuck around the cells that made it.',
       steps: [
         'Press Play and watch the cells, not the cube: a pale ring builds around each one.',
+        'At day 14 make the same change as in the first scenario — TGF-β3 bath to 0.10, dynamic compression to 10 % — by hand, or with Auto-apply scripted events on.',
         'Follow the pericellular trace — it fills up and stays full.',
         'Run to ten weeks: the lattice is still half there at six, and the stiffness trace slides all the way to week seven before the released islands finally lift it.',
       ],
@@ -3133,10 +3375,10 @@ const TISSUE_CARTILAGE = {
       steps: [
         'Press Play and watch the cell colour and shape rather than the matrix.',
         'By four weeks the cells are orange spindles and amber fibres are appearing.',
-        'At day 56 the medium is corrected back to 5 % oxygen, serum-free, full TGF-β3. Run four more weeks and see what comes back.',
+        'At day 56, correct the medium yourself — TGF-β3 bath 0.50, oxygen 5 %, serum Off — or switch on Auto-apply scripted events. Run four more weeks and see what comes back.',
       ],
       question: 'The phenotype recovers after you fix the medium, but the tissue does not. What does that tell you about scar in a joint?',
-      expect: 'The teal aggrecan band never gets going. Cells drift orange, stretch into spindles, start crawling, and lay down aligned amber collagen I (alignment reaches 0.4, which cartilage never does). Correcting the medium at day 56 brings the phenotype most of the way back within a month — but the collagen I they already made is still there, and there is more of it.',
+      expect: 'The teal aggrecan band never gets going. Cells drift orange, stretch into spindles, start crawling, and lay down amber collagen I that lines up inside each patch — local anisotropy reaches 0.4 by four weeks, which cartilage never does — while the cube as a whole still points nowhere: whole-tissue coherence never gets above 0.03, about a twentieth of the local number. Neither of the two has a trace on this tissue; judge it from the amber rods in the 3D view. Correcting the medium at day 56 brings the phenotype most of the way back within a month — but the collagen I they already made is still there, and there is more of it.',
       dials: { tgfExt: 0.2, amp: 0, o2Ext: 1, infl: 0, xl: 0.3, nCells: 160, serum: 1 },
       init: { species: { scaf: 1 }, jitter: 0.12 },
       events: [{ at: 56, dials: { tgfExt: 0.5, o2Ext: 0.24, serum: 0 } }],
@@ -3149,6 +3391,10 @@ const TISSUE_CARTILAGE = {
         { at: 56, stat: 'species.gag', op: 'lt', value: 0.3 },
         { at: 56, stat: 'logE', op: 'between', value: [1, 1.9] },            // 10–80 kPa: fibrocartilage
         { at: [42, 84], agg: 'min', stat: 'fa', op: 'gt', value: 0.3 },      // collagen I is aligned, and stays
+        // …LOCALLY. The card says the cube as a whole still points nowhere, and this is the pin for
+        // it: globalFA (the anisotropy of the SUMMED tensor) peaks at 0.023 on day 21. Without this
+        // the two measures could drift together and the card would be teaching a contradiction.
+        { at: [0, 84], agg: 'max', stat: 'globalFA', op: 'lt', value: 0.05 },
         { at: 84, stat: 'cells.a', op: 'gt', value: 0.6 },                   // phenotype comes back …
         { at: 84, stat: 'cells.a', rel: { stat: 'cells.a', at: 56, op: 'gt' }, value: 0.3 },
         { at: [56, 84], agg: 'min', stat: 'species.col1', rel: { stat: 'species.col1', at: 56, op: 'gt' }, value: -0.02 },
@@ -3158,7 +3404,7 @@ const TISSUE_CARTILAGE = {
       goal: 'Take the finished construct from the first scenario, drop IL-1 into the medium for two weeks, and see what breaks first and what comes back.',
       steps: [
         'Press Play: within days the teal GAG band melts while the ivory collagen II band barely moves.',
-        'At day 14 the IL-1 is washed out. Watch the protease haze clear within a week.',
+        'At day 14, wash the IL-1 out yourself — Inflammation back to 0.00 — or switch on Auto-apply scripted events. Watch the protease haze clear within a week.',
         'Run to eight weeks and compare GAG and collagen II with where they started.',
       ],
       question: 'The collagen II ends up past where it started and the aggrecan does not. Which of the two is carrying the modulus here — and which one would a real joint never get back?',
@@ -3189,8 +3435,14 @@ const TISSUE_CARTILAGE = {
     { key: 'density', label: 'Matrix composition', unit: 'relative (1 ≈ native cartilage)',
       meaning: 'What the cube is made of: the hydrogel scaffold draining away, and the aggrecan, collagen II and collagen I the cells put in its place.',
       type: 'stack', domain: [0, 1.5],
+      // The hydrogel and collagen II swatches are luminance twins — 187 and 191 on a 0–255 grey
+      // scale — and they are the two bands a student most needs to tell apart (one is the trellis
+      // going, the other is the tissue arriving). Hatching the hydrogel separates them without
+      // colour and carries the meaning too: the hatched band is the one that is NOT tissue, the one
+      // species.tissueTotal leaves out. Declaring `pattern` here turns off the app's default, which
+      // would have hatched the top band (collagen I) — already the most distinct of the four.
       series: [
-        { stat: 'species.scaf', label: 'hydrogel', color: '#9ec5d8' },
+        { stat: 'species.scaf', label: 'hydrogel', color: '#9ec5d8', pattern: 'hatch' },
         { stat: 'species.gag', label: 'aggrecan', color: '#4cc4ae' },
         { stat: 'species.col2', label: 'collagen II', color: '#c9bfa8' },
         { stat: 'species.col1', label: 'collagen I', color: '#e0a24a' },
@@ -3198,14 +3450,18 @@ const TISSUE_CARTILAGE = {
     { key: 'state', label: 'Phenotype, oxygen and the pericellular pool', unit: '0–1',
       meaning: 'Phenotype is 1 for a round chondrocyte and 0 for a fibroblast-like cell. Oxygen is the mean through the cube, 1 ≡ 21 %. The pericellular pool is how full the halo around each cell is.',
       type: 'lines', domain: [0, 1],
+      // Phenotype (#3fb8b0) and catabolic memory (#e05bd0) are luminance twins — 147 and 144 on a
+      // 0–255 grey scale — and they are the pair the inflammation scenario asks a student to read
+      // against each other. The app's default marker cycle happens to separate them today; pinning
+      // the two ends of the cycle keeps them separated if a series is ever added or reordered.
       series: [
-        { stat: 'cells.a', label: 'phenotype', color: '#3fb8b0', unit: '0–1 (mean over cells)',
+        { stat: 'cells.a', label: 'phenotype', color: '#3fb8b0', unit: '0–1 (mean over cells)', marker: 'circle',
           meaning: '1 = chondrogenic (aggrecan and collagen II), 0 = fibroblastic (collagen I).' },
         { stat: 'fields.o2', label: 'oxygen', color: '#6f9ce8', unit: '0–1 (1 ≡ 21 %)',
           meaning: 'Mean oxygen. The medium face is held at the dial; the deep half is whatever is left after the cells have breathed.' },
         { stat: 'cells.c', label: 'pericellular pool', color: '#b9a4e0', unit: '0–1 (1 = full)',
           meaning: 'Matrix made but trapped by the mesh around the cell. It empties into the cube as the gel clears.' },
-        { stat: 'cells.b', label: 'catabolic memory', color: '#e05bd0', unit: '0–1 (mean over cells)',
+        { stat: 'cells.b', label: 'catabolic memory', color: '#e05bd0', unit: '0–1 (mean over cells)', marker: 'triangle',
           meaning: 'How far the cells are into an IL-1 programme. It outlasts the IL-1 itself.' },
       ] },
     { key: 'stiff', label: 'Stiffness', unit: 'kPa (log scale)',
@@ -3222,7 +3478,7 @@ const TISSUE_CARTILAGE = {
     intro: {
       tagline: 'A gel that has to disappear, and cells racing to replace it.',
       paragraphs: [
-        'You are looking at a cube of synthetic hydrogel about a third of a millimetre across, with chondrocytes photo-encapsulated in it. The grey lattice is the gel. The teal haze is aggrecan: sugar-coated protein that pulls water in and holds the swelling pressure. The pale ivory felt is collagen II, the net that stops the aggrecan from simply swelling away. Amber fibres are collagen I, and they are bad news here.',
+        'You are looking at a cube of synthetic hydrogel about 300 µm across, with chondrocytes photo-encapsulated in it. The grey lattice is the gel. The teal haze is aggrecan: sugar-coated protein that pulls water in and holds the swelling pressure. The pale ivory felt is collagen II, the net that stops the aggrecan from simply swelling away. Amber fibres are collagen I, and they are bad news here.',
         'Unlike fibroblasts, these cells do not crawl and do not pull. A chondrocyte sits in the hole it was cast into, round and teal, and secretes. Everything it makes has to fit through the mesh of the gel; while the mesh is tight, the matrix stays pinned around the cell as a pericellular island. That is why the crosslink dial matters as much as the growth factor: it sets how long the trellis takes to rot, and nothing becomes bulk tissue until it does.',
         'The lesson is a race, not a balance. Dissolve the gel too fast and there is nothing to hold the new matrix, so it washes into the medium. Dissolve it too slowly and the matrix never leaves the cells that made it. In between, the construct hands stiffness over from gel to tissue, dips in the middle, and comes out stiffer than it started.',
       ],
@@ -3251,11 +3507,66 @@ const TISSUE_CARTILAGE = {
       },
       load: 'Translucent arrows on the top and bottom faces: dynamic compression, three hours a day. Longer arrows, bigger squeeze.',
     },
+    // The flux gauge in this tissue's own words (docs/EXTENDING.md §1 `copy.gauge`). `left` and
+    // `right` stay the weather words, because the live sentence beside the gauge uses them too and
+    // this tissue's metaphorBreaks already say that here evaporation is literal. What is worth
+    // renaming is the ratio caption (three long words on a narrow canvas) and the third bar.
+    gauge: { ratio: 'made / lost', scaffold: 'hydrogel dissolving' },
     vocabulary: {
       matrix: 'proteoglycan and collagen',
       cellsActive: 'the chondrocytes are pumping out aggrecan',
       cellsQuiet: 'the chondrocytes have stopped making cartilage matrix',
+      cellsMid: 'the chondrocytes are turning into fibroblasts',  // `a` is a phenotype axis, not a switch
+      // The generic continuations are written for a tissue whose only stiffness is the matrix its
+      // cells built. Here the cube STARTS at 5–65 kPa of hydrogel and the modulus FALLS through the
+      // first week while aggrecan piles up, so the default 30 kPa fires on day 14 of the race — at
+      // 36.8 kPa, 1.4 kPa above the 35.4 the cube was cast as and a fifth of it still trellis — and
+      // calls that "already stiff" on a readout whose own caption says a fresh gel is 5–65 kPa and a
+      // good construct a few hundred.
+      activeStiff: 'and their matrix is stiffening the cube',
+      stiffHigh: 'past anything the gel could have done',
+      activeSoftening: 'and what they make is not holding the cube up yet',
+      stillHint: 'the cube is all hydrogel so far — give the chondrocytes a day and the first aggrecan appears.',
+      // stiffKPa 90: the stiffest fresh gel this tissue can be cast as is 65 kPa (xl 1), so past 90
+      //   the two clauses above are literally true; in the race the switch lands on day 22 (94 kPa),
+      //   the day the equilibrium() override below hands back, so the two never leave a gap.
+      // quiet 0.12: a low phenotype here does not mean an idle cell, it means a fibroblast-like one
+      //   that is making collagen I hard. The generic "quiet" tail ("slow basal deposition") is only
+      //   true at the very bottom of the axis, which is where the drift scenario finally lands.
+      // still 5e-4: the rate at which copyFormatRate() itself starts printing "0/d", so neither the
+      //   sentence nor the trend dot says a cube is condensing while both of its numbers read zero.
+      thresholds: { stiffKPa: 90, quiet: 0.12, still: 5e-4 },
       scaffoldNoun: 'hydrogel dissolving',            // the third flux bar (stats().scaffoldFlux)
+      /**
+       * The one thing the shared sentence cannot say about this cube: the trellis. deposition and
+       * degradation are matrix rates and the scaffold is neither (it is the gauge's third bar), so
+       * for the first three weeks of every run the generic sentence reports a cube that is
+       * condensing while the student watches the stiffness trace go DOWN — the handover the race
+       * scenario is entirely about. While the hydrogel is still there and still draining, say all
+       * three rates and which way the race is going; everywhere else return null and let
+       * src/copy.js build the sentence, so the two can never disagree about the rest.
+       *
+       * Pure: same stats in, same string out. Thresholds and metaphor words come from V, so the
+       * dot beside the sentence (copyTrend) and this text always name the same trend.
+       */
+      equilibrium(stats, V) {
+        const s = stats || {};
+        const scaf = Number.isFinite(s.scaffold) ? s.scaffold : 0;
+        const drain = Number.isFinite(s.scaffoldFlux) ? s.scaffoldFlux : 0;
+        if (!(scaf > 0.05 && drain > 1e-4)) return null;          // no trellis, or it is not moving
+        const T = V.thresholds, m = V.metaphor;
+        const dep = s.deposition > 0 ? s.deposition : 0, deg = s.degradation > 0 ? s.degradation : 0;
+        const ratio = deg > T.still ? dep / deg : dep > T.still ? Infinity : 1;
+        const trend = dep < T.still && deg < T.still ? m.still
+          : ratio > T.condensing ? m.condensing : ratio < T.evaporating ? m.evaporating : m.steady;
+        const a = Number.isFinite(s.cells ? s.cells.a : s.meanAlpha) ? (s.cells ? s.cells.a : s.meanAlpha) : 0;
+        const who = a > T.active ? V.cellsActive : a < T.quiet ? V.cellsQuiet : V.cellsMid;
+        const race = drain > dep
+          ? 'and the trellis is going faster than they can fill in'
+          : 'and they are filling in faster than the trellis goes';
+        return `Deposition ${copyFormatRate(dep)}, degradation ${copyFormatRate(deg)}, hydrogel draining `
+          + `${copyFormatRate(drain)} — ${trend}; ${who}, ${race}.`;
+      },
     },
   },
 
@@ -3586,6 +3897,8 @@ const TISSUE_FIBROUS = {
   name: 'Fibrous connective tissue',
   short: 'Fibroblasts build, align and mature collagen under load',
   version: '0.2.0',
+  domainMicrons: 300,        // the cube edge in real units: docs/MODEL.md converts every rate at L ≈ 300 µm,
+                             // and the app prints "Cube edge ≈ 300 µm" in the colour key
 
   // ---- matrix species
   species: [
@@ -3641,7 +3954,7 @@ const TISSUE_FIBROUS = {
         'Pause and note which changed first: density, alignment, or maturity.',
       ],
       question: 'Stiffness and activation both rise. Which one is driving the other, and how would you test that with the dials?',
-      expect: 'Density climbs, fibers swing toward the load arrows and turn amber over four to eight weeks, the stiffness trace climbs steadily, and cells shift from blue toward orange.',
+      expect: 'The first two days evaporate: the cells start quiescent, so density dips from 0.15 to 0.13 and the flux bar only tips toward condensing on about day 3. After that density climbs, fibers swing toward the load arrows and turn amber over four to eight weeks, the stiffness trace climbs steadily, and cells shift from blue toward orange.',
       dials: { Gext: 0.5, strain: 0.6, protease: 0.4, nCells: 160 },
       init: { species: { new: 0.15, mat: 0 }, jitter: 0.2 },
       checks: [
@@ -3660,12 +3973,12 @@ const TISSUE_FIBROUS = {
     { key: 'unloading', title: 'Unloading',
       goal: 'Take a mature tissue off load and out of its growth-factor bath, and watch a matrix that took weeks to build come apart.',
       steps: [
-        'Note that two dials moved at once: load is at 0 and the bath has dropped from 0.5 to 0.2. Press Play.',
+        'Note that three dials moved at once: load 0.6 → 0, the bath 0.5 → 0.2 and protease 0.4 → 0.5. Press Play.',
         'Watch the flux bar and the cell colour during the first few days.',
-        'Run for six weeks, then test the dials one at a time: put the load back at 0.6, or the bath back at 0.5, and reset.',
+        'Run for six weeks. Then press Reset (it puts the preset back), change ONE thing, and press Play again: the load to 0.6, or the chemistry the matured tissue had — bath 0.5 and protease 0.4.',
       ],
-      question: 'Two things were taken away at once. Which one causes the atrophy — try each alone and watch the density trace, not just the colour.',
-      expect: 'Cells fade back toward blue within days, the flux bar tips to evaporating, density and alignment fall over weeks, and amber mature fibers outlast the pale new ones. Take away only the load and the story is different: alignment decays, but the density holds and the cells stay mostly switched on.',
+      question: 'Three things were taken away at once. Which of them causes the atrophy — put each back on its own and watch the density trace, not just the colour.',
+      expect: 'Cells fade back toward blue within days, the flux bar tips to evaporating, density and alignment fall over weeks, and amber mature fibers outlast the pale new ones. Give the cells their chemistry back but no load (bath 0.5, protease 0.4) and the story is different: alignment collapses, but the density holds near 1.0 and the cells settle around 0.7. Put the bath back and leave the protease at 0.5 and the density still slides — about a quarter in three months — so the protease dial is part of the atrophy too.',
       dials: { Gext: 0.2, strain: 0.0, protease: 0.5, nCells: 160 },
       init: { from: { scenario: 'maturation', days: 60 } },
       checks: [
@@ -3682,11 +3995,11 @@ const TISSUE_FIBROUS = {
       goal: 'Push the growth-factor bath high and find out whether turning it back down undoes what it started.',
       steps: [
         'Press Play with the bath at 0.9 and run for four weeks.',
-        'Drop the bath to 0.2 without pausing and keep running.',
+        'Drop the bath to 0.2 yourself, without pausing, and keep running (or switch on Auto-apply scripted events, which does it for you on day 45).',
         'Wait another four weeks and compare stiffness and activation with where they started.',
       ],
-      question: 'You returned the bath to its starting value, yet the growth-factor haze stays thick. Where is that growth factor coming from, and what would you turn down to break the loop?',
-      expect: 'Dense, stiff, poorly aligned matrix by week four. After you lower the bath, activation dips a little and settles back; stiffness does not dip at all but keeps climbing. The tissue does not retrace its path.',
+      question: 'You turned the bath down to 0.2 — lower than this tissue has ever run — yet the growth-factor haze stays at about twice that. Where is it coming from, and what would you turn down to break the loop?',
+      expect: 'Dense, stiff, poorly aligned matrix by week four: density 0.82, stiffness about 37 kPa, activation 0.88, and the whole-tissue alignment only 0.13 — scar, not tendon. After you drop the bath, activation dips to about 0.73 and settles near 0.80, while stiffness does not dip at all and climbs past 130 kPa by week thirteen. The tissue does not retrace its path.',
       dials: { Gext: 0.9, strain: 0.3, protease: 0.2, nCells: 160 },
       init: { species: { new: 0.15, mat: 0 }, jitter: 0.2 },
       events: [{ at: 45, dials: { Gext: 0.2 } }],
@@ -3769,7 +4082,7 @@ const TISSUE_FIBROUS = {
     intro: {
       tagline: 'A cloud of matrix and the cells that make it, in dynamic equilibrium.',
       paragraphs: [
-        'You are looking at a cube of tissue about a third of a millimetre across. The rods are bundles of extracellular matrix fibers: pale blue when freshly laid down, amber once crosslinked and mature. The small bodies among them are fibroblasts. Blue ones are resting; orange ones have activated into contractile, collagen-producing myofibroblasts and stretch into spindles.',
+        'You are looking at a cube of tissue about 300 µm across (the colour key repeats the scale). The rods are bundles of extracellular matrix fibers: pale blue when freshly laid down, amber once crosslinked and mature. The small bodies among them are fibroblasts. Blue ones are resting; orange ones have activated into contractile, collagen-producing myofibroblasts and stretch into spindles.',
         'The four dials are the weather. Growth-factor bath is humidity: the signal available to drive cells. Load is pressure: a steady stretch along the arrows. Protease is temperature: how fast matrix breaks back down. Cell number is the supply of condensation nuclei. Three act only through the cells; load also pulls on the fibers directly.',
         'Dynamic reciprocity, a phrase from Bissell, Hall and Parry in 1982, means the conversation runs both ways. Cells build and digest the matrix; the matrix, through its stiffness, alignment and stored growth factor, tells the cells what to become. Turn a dial and you nudge that loop. Sometimes it settles back; sometimes, as in fibrosis, it locks in.',
       ],
@@ -3802,6 +4115,10 @@ const TISSUE_FIBROUS = {
       cellsActive: 'activated cells are pumping out collagen',
       cellsQuiet: 'the cells are quiet',
     },
+    // The two sides of the flux gauge and its caption, in this tissue's own words
+    // (docs/EXTENDING.md §1 `copy.gauge`). They are the weather words the gauge falls back to
+    // anyway; stating them here keeps the wording with the tissue that means it.
+    gauge: { left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation' },
   },
 
   // ---- injury
@@ -3968,7 +4285,8 @@ const TISSUE_DEFAULT = 'fibrous';
 // to one redraw per animation frame.
 //
 // Not by colour alone (docs/REVIEW.md B5): a series may carry `marker`
-// ('circle' | 'square' | 'diamond', drawn at the endpoint and mirrored in the app's key row)
+// ('circle' | 'square' | 'diamond' | 'triangle' | 'cross', drawn at the endpoint and mirrored in
+// the app's key row)
 // and a stacked band may carry `pattern: 'hatch'`, so two series that are luminance twins are
 // still told apart in greyscale. Live series are never dashed — dashes mean "previous run".
 //
@@ -4018,11 +4336,18 @@ function plotSetupCanvas(canvas, size) {
   return { ctx, w, h };
 }
 
-/** One marker glyph, centred on (x, y): the shape a series is identified by without colour. */
+/**
+ * One marker glyph, centred on (x, y): the shape a series is identified by without colour.
+ * Five shapes, so a readout with five series never repeats one (a repeat would leave two curves
+ * differing by hue alone — the cartilage phenotype/memory pair are luminance twins).
+ * The app mirrors every shape in its key row (index.html `.readout .keys i`).
+ */
 function plotMarker(ctx, shape, x, y, r) {
   ctx.beginPath();
   if (shape === 'square') ctx.rect(x - r, y - r, 2 * r, 2 * r);
   else if (shape === 'diamond') { const d = r * 1.35; ctx.moveTo(x, y - d); ctx.lineTo(x + d, y); ctx.lineTo(x, y + d); ctx.lineTo(x - d, y); ctx.closePath(); }
+  else if (shape === 'triangle') { const d = r * 1.45; ctx.moveTo(x, y - d); ctx.lineTo(x + d * 0.92, y + d * 0.72); ctx.lineTo(x - d * 0.92, y + d * 0.72); ctx.closePath(); }
+  else if (shape === 'cross') { const d = r * 1.35, w = r * 0.46; ctx.rect(x - d, y - w, 2 * d, 2 * w); ctx.rect(x - w, y - d, 2 * w, 2 * d); }
   else ctx.arc(x, y, r, 0, Math.PI * 2);
 }
 
@@ -4030,7 +4355,7 @@ function plotMarker(ctx, shape, x, y, r) {
  * Rolling time-series strip.
  * spec = {
  *   series: [{ key, label, color, stack: bool,
- *              marker: 'circle'|'square'|'diamond',   // endpoint glyph (default circle)
+ *              marker: 'circle'|'square'|'diamond'|'triangle'|'cross',  // endpoint glyph (default circle)
  *              pattern: 'hatch' }],                   // stacked band overlaid with diagonals
  *   yDomain: [0, 1] | 'auto',
  *   yFormat: fn(v) -> string,
@@ -4132,7 +4457,6 @@ class TimeSeriesPlot {
     if (this.marks.length > 64) this.marks.shift();
     return m;
   }
-  clearMarks() { this.marks.length = 0; }
 
   /** Latest value of a series (NaN if none). */
   last(key) { const a = this.data[key]; return a && a.length ? a[a.length - 1] : NaN; }
@@ -4188,7 +4512,6 @@ class TimeSeriesPlot {
     }
     return changed;
   }
-  hasHover() { return this.hoverI != null; }
 
   /** The tooltip, as text: day, every series, the marks near it, and the ghost when it lines up. */
   hoverLines(i) {
@@ -4425,8 +4748,8 @@ class TimeSeriesPlot {
  *
  * `labels` are the tissue's own words (docs/EXTENDING.md §1 `copy.gauge`): { left, right,
  * ratio (or caption), scaffold }, defaulting to the weather ones. `labels.fontPx` scales the
- * text for presentation mode. describe() is the same reading as text, for the DOM value beside
- * the title and for a screen-reader announcement (C4).
+ * text for presentation mode. describe() is the same reading as text; the app writes it into the
+ * DOM beside the readout title, which is what a screen reader gets instead of the picture (C4).
  */
 class FluxGauge {
   constructor(canvas, theme, labels = {}) {
@@ -4434,6 +4757,9 @@ class FluxGauge {
     const L = Object.assign({ left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation', scaffold: 'scaffold dissolving' }, labels || {});
     if (L.caption && !(labels && labels.ratio)) L.ratio = L.caption;   // `caption` is the EXTENDING §1 name for it
     this.labels = L;
+    // a tissue that RENAMED the ratio gets its own words in the one-line reading too; the default
+    // name is three words long, so the default reading keeps the compact "2.50 ×"
+    this.ratioNamed = !!(labels && (labels.ratio || labels.caption));
     this.fontPx = Number.isFinite(L.fontPx) ? L.fontPx : PLOT_FONT_PX;
     this.size = { w: canvas.clientWidth || 0, h: canvas.clientHeight || 0 };
     this._tall = false;
@@ -4446,12 +4772,17 @@ class FluxGauge {
   dispose() { this._unwatch(); }
   /** Text scale (presentation mode). */
   setFontPx(px) { if (Number.isFinite(px) && px !== this.fontPx) { this.fontPx = px; this.draw(); } }
-  /** The gauge as one line of text: "deposition 0.05/d vs degradation 0.02/d — ratio 2.50". */
+  /**
+   * The gauge as one compact line for the value beside the readout title (the app's only reader
+   * of it): "0.05/d vs 0.02/d · 2.50 ×", plus "· hydrogel dissolving 0.01/d" when a scaffold is
+   * dissolving — in the tissue's own words for both (`copy.gauge.scaffold`, `copy.gauge.ratio`),
+   * so the DOM value says what the canvas says.
+   */
   describe() {
     const ratio = (this.dep + 1e-9) / (this.deg + 1e-9);
     const r = ratio > 99 ? '>99' : ratio.toFixed(2);
-    let s = `deposition ${copyFormatRate(Math.max(0, this.dep))} vs degradation ${copyFormatRate(Math.max(0, this.deg))} — ${this.labels.ratio} = ${r}`;
-    if (this.scaf > 0) s += `; ${this.labels.scaffold} ${copyFormatRate(this.scaf)}`;
+    let s = `${copyFormatRate(Math.max(0, this.dep))} vs ${copyFormatRate(Math.max(0, this.deg))} · ${this.ratioNamed ? `${this.labels.ratio} ${r}` : `${r} ×`}`;
+    if (this.scaf > 0) s += ` · ${this.labels.scaffold} ${copyFormatRate(this.scaf)}`;
     return s;
   }
   update(dep, deg, scaffold) {
@@ -4537,6 +4868,18 @@ class FluxGauge {
 //              radiusBase, radiusScale, minRadius, lengthScale, lengthBase, lengthFA,
 //              minDensity, minDensityRamp, rhoMaxDraw } }
 //
+// TWO KINDS OF CONSTANT live in RECIPE_FIBER, and only one of them is overridable:
+//
+//   layout stream   seed, K, offsetSpan, lenJitterMin/Span, radJitterMin/Span — consumed by
+//                   recipeFiberLayout() at BUILD time. `seed` and `K` are arguments, the other
+//                   five are read from the frozen RECIPE_FIBER and cannot be overridden at all,
+//                   so recipeRenderMeta() reports them from RECIPE_FIBER too (never through its
+//                   `over` bag): meta.render can only ever describe the layout that was drawn.
+//   per-frame laws  radiusBase/Scale, minRadius, lengthScale/Base/FA, minDensity, minDensityRamp,
+//                   rhoMaxDraw — resolved by recipeFiberScales(h, over), so the renderer's opts
+//                   (and a tissue's `render` hints) can change them; meta.render reports the
+//                   resolved values, because those are the ones the browser used.
+//
 // Units: h = 1/N is the voxel edge in the unit cube the renderer draws in (a state in world
 // units is divided by state.L first), so every length above is a fraction of the cube edge.
 //
@@ -4545,15 +4888,20 @@ class FluxGauge {
 // rounded the voxel centre to float32 first; `base` therefore differs from it by at most one
 // float32 ulp — 6·10⁻⁸ of the cube edge. `rvec` and `jit` are bit-identical to v0.1.)
 
+/** The RECIPE_FIBER keys recipeFiberLayout() consumes and no caller can override (see header). */
+const RECIPE_LAYOUT_KEYS = Object.freeze(['offsetSpan', 'lenJitterMin', 'lenJitterSpan', 'radJitterMin', 'radJitterSpan']);
+
 /** Fiber layout constants — the v0.1 recipe, and the defaults of the matching renderer opts. */
 const RECIPE_FIBER = Object.freeze({
-  seed: 90210,            // mulberry32 seed for the layout stream
-  K: 3,                   // rods drawn per voxel
+  seed: 90210,            // mulberry32 seed for the layout stream (recipeFiberLayout argument)
+  K: 3,                   // rods drawn per voxel (recipeFiberLayout argument)
+  // --- layout stream, RECIPE_LAYOUT_KEYS: build time only, NOT overridable ---
   offsetSpan: 0.9,        // rod centre jitter inside the voxel, × h, uniform in ±offsetSpan/2
   lenJitterMin: 0.78,     // per-rod length factor  = lenJitterMin + lenJitterSpan·u
   lenJitterSpan: 0.5,
   radJitterMin: 0.85,     // per-rod radius factor  = radJitterMin + radJitterSpan·u
   radJitterSpan: 0.3,
+  // --- per-frame laws: recipeFiberScales(h, over) resolves these against the caller's bag ---
   radiusBase: 0.12,       // SPEC radius 0.12·h·√ρ …
   radiusScale: 0.6,       // … × this
   minRadius: 0.025,       // × h: floor so sparse fibers stay visible hairlines
@@ -4564,6 +4912,20 @@ const RECIPE_FIBER = Object.freeze({
   minDensityRamp: 0.35,   // fade in from minDensity·this (1 = the v0.1 hard cut, 0 = fade from ρ 0)
   rhoMaxDraw: 2,          // ρ used for the radius is clamped here
 });
+
+/**
+ * One RECIPE_FIBER value, overridden by `over[key]` when that is a finite number (or a string
+ * holding one — a URL parameter). Anything else, `null` and `undefined` included, falls back to
+ * the constant rather than coercing to 0. The single resolver behind recipeFiberScales() and
+ * recipeRenderMeta(), so "what the renderer used" and "what the export reports" can never be
+ * resolved two different ways.
+ */
+function recipeResolve(over, key) {
+  const raw = over ? over[key] : undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string' && raw.trim() !== '') { const v = +raw; if (Number.isFinite(v)) return v; }
+  return RECIPE_FIBER[key];
+}
 
 /** Seeded PRNG (mulberry32) — the same stream the renderer and the importer must reproduce. */
 function recipeRng(seed) {
@@ -4580,6 +4942,10 @@ function recipeRng(seed) {
  * Deterministic per-instance layout for an N³ grid with K rods per voxel.
  * Returns { N, K, count, h, base (3·count), rvec (3·count), jit (2·count: length, radius) };
  * `out` may carry arrays of the right length to fill in place (build time only — never per frame).
+ *
+ * Takes NO override bag on purpose: the five RECIPE_LAYOUT_KEYS come from the frozen
+ * RECIPE_FIBER, so seed + N + K alone determine the arrangement and recipeRenderMeta() can
+ * report it without a caller being able to make the two disagree.
  */
 function recipeFiberLayout(N, K = RECIPE_FIBER.K, seed = RECIPE_FIBER.seed, out = null) {
   const R = RECIPE_FIBER;
@@ -4612,11 +4978,7 @@ function recipeFiberLayout(N, K = RECIPE_FIBER.K, seed = RECIPE_FIBER.seed, out 
  * the grid or the tissue changes — NOT every frame (it allocates the small object it returns).
  */
 function recipeFiberScales(h, over = null) {
-  const R = RECIPE_FIBER;
-  const g = (k) => {
-    const v = over ? +over[k] : NaN;
-    return Number.isFinite(v) ? v : R[k];
-  };
+  const g = (k) => recipeResolve(over, k);
   const minDensity = Math.max(0, g('minDensity'));
   const ramp = Math.min(1, Math.max(0, g('minDensityRamp')));
   return {
@@ -4674,21 +5036,24 @@ function recipeFiberDir(out, ux, uy, uz, a, rx, ry, rz) {
 /**
  * The recipe as a plain object for `meta.render` (export → Blender). `over` is the same override
  * bag `recipeFiberScales` takes, plus `seed` and `K`; the result carries the values actually used.
+ *
+ * The five RECIPE_LAYOUT_KEYS are reported from the frozen RECIPE_FIBER, NOT through `over`:
+ * recipeFiberLayout() takes no override bag, so an `over.offsetSpan` would change what Blender
+ * lays out while the browser kept drawing the frozen value — meta.render must only ever promise
+ * a layout the browser really drew (docs/REVIEW.md E2). Everything else is resolved, because
+ * recipeFiberScales() resolves it the same way when the renderer draws the frame.
  */
 function recipeRenderMeta(over = null) {
   const R = RECIPE_FIBER;
-  const g = (k) => {
-    const v = over ? +over[k] : NaN;
-    return Number.isFinite(v) ? v : R[k];
-  };
+  const g = (k) => recipeResolve(over, k);
   return {
     recipe: 'fiber-v1',
     seed: g('seed') >>> 0,
     K: g('K') | 0,
     fiber: {
-      offsetSpan: g('offsetSpan'),
-      lenJitterMin: g('lenJitterMin'), lenJitterSpan: g('lenJitterSpan'),
-      radJitterMin: g('radJitterMin'), radJitterSpan: g('radJitterSpan'),
+      offsetSpan: R.offsetSpan,
+      lenJitterMin: R.lenJitterMin, lenJitterSpan: R.lenJitterSpan,
+      radJitterMin: R.radJitterMin, radJitterSpan: R.radJitterSpan,
       radiusBase: g('radiusBase'), radiusScale: g('radiusScale'), minRadius: g('minRadius'),
       lengthScale: g('lengthScale'), lengthBase: g('lengthBase'), lengthFA: g('lengthFA'),
       minDensity: g('minDensity'), minDensityRamp: g('minDensityRamp'), rhoMaxDraw: g('rhoMaxDraw'),
@@ -4701,8 +5066,9 @@ function recipeRenderMeta(over = null) {
 // Tissue Weather — 3D renderer (EXTENDING.md §4). ES module, named exports only.
 // Draws whatever a tissue definition describes: fiber species (oriented rods),
 // gel species (translucent haze), scaffold species (dissolving lattice), cell
-// types (ellipsoids), diffusible fields (point clouds), load arrows (only when
-// the tissue has a dial with role 'load') and the domain cube — three.js r160.
+// types (ellipsoids), diffusible fields (instanced haze blobs or point sprites),
+// load arrows (only when the tissue has a dial with role 'load') and the domain
+// cube — three.js r160.
 //
 // Public API:
 //   new TissueRenderer(canvasEl, opts)   opts: see the defaults in the constructor
@@ -4716,12 +5082,18 @@ function recipeRenderMeta(over = null) {
 //   .resize()                            fit canvas to its parent, keep the cube framed (aspect 0.6 … 2.4)
 //   .setAutoRotate(bool)                 fires opts.onAutoRotate(bool) when the value changes
 //   .resetView()                         camera back to the default framing (Home key, "Reset view" button)
+//   .orbit(dTheta, dPhi)                 orbit by radians (opts.keyOrbitStep is the arrow-key step)
+//   .dolly(factor)                       distance × factor (opts.keyDollyStep is the +/− step)
+//   Those three are the whole camera API: an on-screen orbit/zoom control (the single-pointer
+//   alternative to dragging, WCAG 2.5.7) needs no other renderer internals.
 //   .layoutParams()                      the fiber recipe actually in use → export meta.render (src/recipe.js)
 //   .markDirty()                         force the next update() to rebuild (see the dirty check below)
 //   .screenshot()                        → PNG data URL of the current frame
 //   .legendSwatches()                    → [{ key, kind, label, css }] for the app legend
 //   .dispose()
 //   .stats                               read-only { updateMs, updates, skipped, fibersVisible, cells, gelVisible, strutsVisible }
+//   .hintWarnings                        read-only [string] — `render` hint keys the last setTissue
+//                                        ignored because the species' kind does not honour them
 //   TissueRenderer.tissueFromState(state) fallback definition when no tissue was set (all species as grey fibers)
 //
 // Dirty check (docs/REVIEW.md B1). update() rebuilds instance buffers only when something it
@@ -4737,6 +5109,24 @@ function recipeRenderMeta(over = null) {
 // rotateLeft/dollyIn are closure-private in r160. Everything else (Space, R, I, digits) is left
 // alone so the app's shortcuts still reach it; any key on the canvas stops auto-rotate, like a
 // pointerdown (WCAG 2.2.2), through setAutoRotate → opts.onAutoRotate.
+//
+// Field haze (docs/REVIEW.md §5). A diffusible field is drawn as one blob per voxel, and there
+// are two ways to draw it. `fieldStyle: 'spheres'` (the default) puts an INSTANCED SPHERE at
+// each voxel, through the same haze shader the gel uses; `'points'` is the v0.1 gl_PointSize
+// sprite cloud. The sprite is one vertex per blob and cheaper to draw, but its size is a POINT
+// SIZE, which every driver clamps at its own limit (ANGLE/SwiftShader allow 220 px, some mobile
+// GL drivers stop at 64) — the same scene then reads differently on different machines, which
+// is the §5 complaint. A sphere has a world size and no such ceiling.
+//
+// The sphere is tuned to REPLACE the sprite, not to look new: same law for the size
+// (0.35 + 0.65·value) and the alpha (0.2 + 0.8·value), flat unlit colour, no fog and no depth
+// cue (fieldFog / fieldDepthCue, both off, are what the sprite cloud does), and a diameter of
+// `fieldSphereDiameter` × the sprite's. That factor is 1.1 because the sprite's gaussian fills
+// a SQUARE quad and the sphere only a disc; measured on one field (cartilage IL-1, N = 12,
+// 1280×800) the two then agree to a rounding error: mean luminance 40.3 vs 40.3, lit fraction
+// 0.265 vs 0.264, hue fraction 0.226 vs 0.225. Cost, same scene on SwiftShader: about 30 % of
+// the frame — `fieldDetail: 0` (20 triangles instead of 80) or `fieldStyle: 'points'` buys it
+// back on a machine that needs it.
 //
 // Colour (docs/REVIEW.md E4). The definition's hex IS the colour: fiber/cell/gel saturation
 // factors default to 1.0, and legendSwatches() puts each hex through the same exposure and tone
@@ -4917,7 +5307,26 @@ class TissueRenderer {
       keyIntensity: 1.6, fillIntensity: 0.3, hemiIntensity: 0.55,
       keyColor: 0xfff1dc, fillColor: 0x8fb0ff, hemiSky: 0xc9d6ea, hemiGround: 0x3a2a1c,
       pointBlending: 'normal', // 'normal' | 'additive'
-      pointOpacity: 0.45, pointSize: 1.8, // field point clouds (size × h)
+      pointOpacity: 0.45, pointSize: 1.8, // diffusible field haze: blob diameter = pointSize × h
+      pointMin: 0.02,         // hide a field voxel below this value (both styles)
+      // --- field haze style (docs/REVIEW.md §5: gl_PointSize is device-dependent) ------------
+      // 'spheres' draws one instanced sphere per voxel, sized and faded like the sprite it
+      // replaces; 'points' is the v0.1 gl_PointSize sprite cloud, which a driver may clamp to
+      // its own point-size limit (SwiftShader and most desktop GL allow 220+, some mobile
+      // drivers stop at 64) and which cannot be shadowed, fogged or depth-cued. A field may ask
+      // for a style of its own with `fields[i].style`; an explicit `fieldStyle` opt wins.
+      fieldStyle: 'spheres',  // 'spheres' | 'points'
+      // The sphere is tuned to LOOK like the sprite it replaces, so switching styles is not a
+      // change of visual language: same diameter, and alpha ∝ (1 − (d/R)²)^(edgeFade/2) across
+      // the disc, which at edgeFade 3.5 tracks the sprite's exp(−8·d²) gaussian to a few percent.
+      fieldSphereDiameter: 1.1, // × the sprite diameter (pointSize · h · pointScale): the sprite's
+                              // square quad covers its corners too, so the disc needs 10 % more
+                              // width to lay down the same haze (measured, see the header)
+      fieldEdgeFade: 3.5,     // alpha ∝ |n·v|^fade — the soft, gaussian-like falloff
+      fieldAmbient: 1.0, fieldDiffuse: 0.0, fieldRim: 0.0,  // flat, like the sprite: a field is not lit
+      fieldDepthCue: 0,       // the sprite cloud takes no depth cue; 0 keeps the haze even
+      fieldFog: false,        // …and no fog, for the same reason
+      fieldDetail: 1,         // IcosahedronGeometry detail (0 = 20 triangles, 1 = 80)
       wireColor: 0x4a5a70,
       loadColor: '#d9c9a3',
       // --- wound marker (state.wound; hidden when the state has none) ---
@@ -4927,6 +5336,9 @@ class TissueRenderer {
       woundFadeDays: 7,       // … decaying with this time constant (opacity = 0.15 + 0.55·e^(−age/7))
       woundGhost: 0.35,       // × that opacity, drawn again without depth test so the outline reads
                               // through the matrix in front of it (0 = only the occluded version)
+      woundGhostMin: 0.12,    // …but never fainter than this: at woundOpacity 0.15 the decayed
+                              // ghost is 0.05, which is below the visibility floor in a dense
+                              // tangle (round-3 review B, finding 7). 0 = pure decay, as in v0.4.
       woundMeridians: 6, woundRings: 3, woundSegments: 48,
     }, opts);
     if (this.opts.autoRotate === undefined) this.opts.autoRotate = !reduced;
@@ -5032,6 +5444,17 @@ class TissueRenderer {
       opacity: this.opts.scaffoldOpacity, edgeFade: this.opts.scaffoldEdgeFade,
       ambient: this.opts.scaffoldAmbient, diffuse: this.opts.scaffoldDiffuse, rim: this.opts.scaffoldRim,
     });
+    // one material for every field of the sphere style (the colour is per instance, the rest is
+    // shared); built even when the points style is selected, so a later setTissue can switch
+    this.fieldMat = this._makeHazeMaterial({
+      opacity: this.opts.pointOpacity, edgeFade: this.opts.fieldEdgeFade,
+      ambient: this.opts.fieldAmbient, diffuse: this.opts.fieldDiffuse, rim: this.opts.fieldRim,
+    });
+    // its own depth-cue uniform (not the shared one) and no fog: a diffusible field is a glow,
+    // not a surface, and the sprite cloud it replaces was subject to neither
+    this.fieldMat.uniforms.uDepthCue = { value: +this.opts.fieldDepthCue || 0 };
+    this.fieldMat.fog = !!this.opts.fieldFog;
+    if (this.opts.pointBlending === 'additive') { this.fieldMat.blending = THREE.AdditiveBlending; this.fieldMat.depthWrite = false; }
 
     // --- static scenery: wire cube, load arrows ------------------------------
     const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
@@ -5061,6 +5484,7 @@ class TissueRenderer {
     this._gelFade = 0;
     // optional per-species `render` hints (EXTENDING §1, B5), collapsed to one set per kind
     this._fiberHint = TissueRenderer._noHint(); this._gelHint = TissueRenderer._noHint(); this._scafHint = TissueRenderer._noHint();
+    this.hintWarnings = [];   // filled by setTissue: `render` keys a species' kind ignores
     this._gelStyle = this.opts.gelStyle;
     this._fiberSc = recipeFiberScales(1, null);   // replaced per grid in _buildFibers
     this._dir3 = new Float64Array(3);             // scratch for recipeFiberDir (no per-instance allocation)
@@ -5081,17 +5505,6 @@ class TissueRenderer {
 
   // ---------------------------------------------------------------------------
   // helpers
-
-  // Seeded PRNG (mulberry32) so per-instance jitter is reproducible.
-  static _rng(seed) {
-    let a = seed >>> 0;
-    return function () {
-      a = (a + 0x6D2B79F5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
 
   // Scale saturation of a linear-RGB triple around its luminance (1 = unchanged).
   static _saturate(rgb, sat) {
@@ -5117,7 +5530,6 @@ class TissueRenderer {
     const sat = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
     // NoToneMapping drops the whole tonemapping_fragment include, exposure and all
     if (mode === 'none') return [sat(rgb[0]), sat(rgb[1]), sat(rgb[2])];
-    let r = rgb[0] * exposure, g = rgb[1] * exposure, b = rgb[2] * exposure;
     if (mode === 'agx') {
       // LINEAR_SRGB_TO_LINEAR_REC2020 is applied BEFORE the exposure in three r160
       let x = 0.6274 * rgb[0] + 0.3293 * rgb[1] + 0.0433 * rgb[2];
@@ -5146,8 +5558,8 @@ class TissueRenderer {
         sat(-0.1246 * pr + 1.1329 * pg - 0.0083 * pb),
         sat(-0.0182 * pr - 0.1006 * pg + 1.1187 * pb)];
     }
-    // ACESFilmicToneMapping
-    r /= 0.6; g /= 0.6; b /= 0.6;
+    // ACESFilmicToneMapping: exposure, then three's own /0.6 pre-scale
+    const r = rgb[0] * exposure / 0.6, g = rgb[1] * exposure / 0.6, b = rgb[2] * exposure / 0.6;
     const ir = 0.59719 * r + 0.35458 * g + 0.04823 * b;
     const ig = 0.07600 * r + 0.90834 * g + 0.01566 * b;
     const ib = 0.02840 * r + 0.13383 * g + 0.83777 * b;
@@ -5169,18 +5581,44 @@ class TissueRenderer {
   }
 
   /**
+   * Which `render` hint keys each species kind actually honours (EXTENDING §1, B5). A key that a
+   * kind does not honour is a DEAD OPTION — the renderer says so through hintWarnings and
+   * console.warn rather than silently dropping it (docs/REVIEW.md round-3 review B, finding 4).
+   *
+   *   kind       minDensity            radiusScale               opacity                 style
+   *   fiber      fade-in threshold     × opts.fiberRadiusScale   fiber material alpha    —
+   *   gel        hide below            × opts.gelSize/PointSize  × opts.gelOpacity       'spheres' | 'points'
+   *   scaffold   hide struts below     × opts.scaffoldRadius     × opts.scaffoldOpacity  —
+   *
+   * `style` is gel-only: fibers are rods and scaffold struts are cylinders, neither has a second
+   * representation to switch to. Fields carry their own `pointScale` / `style` (fields[], not
+   * species[]), which _buildFields reads.
+   */
+  static _hintKeys(kind) {
+    return kind === 'gel' ? ['minDensity', 'radiusScale', 'opacity', 'style'] : ['minDensity', 'radiusScale', 'opacity'];
+  }
+
+  /**
    * Collapse the optional `render` hints of one species group into one set (EXTENDING §1, B5).
    * A kind is drawn by ONE instanced layer whose instances mix every species of that kind, so a
    * hint cannot be per species on screen: `minDensity` takes the LOWEST value declared (the
    * layer must appear as soon as any of its species should), `radiusScale` and `opacity` the
    * MEAN of the declared ones, `style` the first declared. Undeclared → the renderer opt.
+   * `warn` (an array) collects one message per hint key this kind ignores, so a typo or a
+   * gel-only key on a fiber species is loud instead of inert.
    */
-  static _hintOf(defs) {
+  static _hintOf(defs, kind = 'fiber', warn = null) {
     const h = TissueRenderer._noHint();
+    const honoured = TissueRenderer._hintKeys(kind);
     let rs = 0, rsN = 0, op = 0, opN = 0;
     for (const s of defs) {
       const r = s && s.render;
       if (!r || typeof r !== 'object') continue;
+      if (warn) {
+        for (const k of Object.keys(r)) {
+          if (!honoured.includes(k)) warn.push(`species '${s.key}' (kind ${kind}): render.${k} is ignored for this kind (honoured: ${honoured.join(', ')})`);
+        }
+      }
       const md = +r.minDensity;
       if (Number.isFinite(md) && md >= 0) h.minDensity = h.minDensity === null ? md : Math.min(h.minDensity, md);
       const sc = +r.radiusScale;
@@ -5437,7 +5875,8 @@ class TissueRenderer {
     const fade = this.opts.woundFadeDays > 0 ? Math.exp(-age / this.opts.woundFadeDays) : 0;
     const op = this.opts.woundOpacity + this.opts.woundOpacityPeak * fade;
     W.mat.opacity = op;
-    if (W.ghostMat) W.ghostMat.opacity = op * this.opts.woundGhost;
+    // the ghost pass keeps a floor: the healed outline is the thing a student is asked to find
+    if (W.ghostMat) W.ghostMat.opacity = Math.max(+this.opts.woundGhostMin || 0, op * this.opts.woundGhost);
     W.obj.visible = true;
   }
 
@@ -5452,14 +5891,25 @@ class TissueRenderer {
     const rawFiber = species.filter((s) => (s.kind || 'fiber') === 'fiber');
     const rawGel = species.filter((s) => s.kind === 'gel');
     const rawScaf = species.filter((s) => s.kind === 'scaffold');
-    this._fiberHint = TissueRenderer._hintOf(rawFiber);
-    this._gelHint = TissueRenderer._hintOf(rawGel);
-    this._scafHint = TissueRenderer._hintOf(rawScaf);
+    const warn = [];
+    this._fiberHint = TissueRenderer._hintOf(rawFiber, 'fiber', warn);
+    this._gelHint = TissueRenderer._hintOf(rawGel, 'gel', warn);
+    this._scafHint = TissueRenderer._hintOf(rawScaf, 'scaffold', warn);
+    this.hintWarnings = warn;   // dead `render` keys, also reported once through console.warn
+    if (warn.length && typeof console !== 'undefined' && console.warn) for (const w of warn) console.warn('TissueRenderer: ' + w);
     // an explicit gelStyle opt wins over a species hint; otherwise the definition may ask for points
     this._gelStyle = (!this._optSet.has('gelStyle') && (this._gelHint.style === 'points' || this._gelHint.style === 'spheres'))
       ? this._gelHint.style : this.opts.gelStyle;
     this.gelMat.uniforms.uOpacity.value = this.opts.gelOpacity * this._gelHint.opacity;
     this.scaffoldMat.uniforms.uOpacity.value = this.opts.scaffoldOpacity * this._scafHint.opacity;
+    // fiber `opacity`: the rods are a lit MeshStandardMaterial, so the hint is the material's own
+    // alpha (depthWrite stays on — instanced rods are not sorted, and a see-through tangle without
+    // depth writes reads as noise). 1 (the default) leaves the material opaque, as before.
+    const fOp = this._fiberHint.opacity;
+    const fTrans = fOp < 1;
+    if (this.fiberMat.transparent !== fTrans) this.fiberMat.needsUpdate = true;   // blending is a recompile
+    this.fiberMat.transparent = fTrans;
+    this.fiberMat.opacity = fTrans ? Math.max(0, fOp) : 1;
     this._fiberSp = rawFiber.map((s) => mk(s, this.opts.fiberSaturation));
     this._gelSp = rawGel.map((s) => mk(s, this.opts.gelSaturation));
     this._scafSp = rawScaf.map((s) => mk(s, this.opts.scaffoldSaturation));
@@ -5491,11 +5941,16 @@ class TissueRenderer {
     this._uRimCell.value = hasGel ? this.opts.cellRimGel : this.opts.cellRim;
     this._uTintCell.value = hasGel ? this.opts.cellRimTint : 0;
     this._gelFade = hasGel && +this.opts.gelCellFade > 0 ? Math.min(0.95, +this.opts.gelCellFade) : 0;
-    // fields: optional `pointScale` (B5) scales this field's sprites (1 = the renderer default)
+    // fields: optional `pointScale` (B5) scales this field's blobs (1 = the renderer default) and
+    // optional `style` ('spheres' | 'points') picks how they are drawn — an explicit `fieldStyle`
+    // opt wins over the definition, exactly like `gelStyle` does for the gel haze.
+    const fStyleOpt = this._optSet.has('fieldStyle');
     this._fieldDefs = (T.fields || []).map((f) => ({
       key: f.key, label: f.label || f.key, color: f.color || '#3fd6c4',
       col: TissueRenderer._lin(f.color || '#3fd6c4', 1),
       pointScale: +f.pointScale > 0 ? +f.pointScale : 1, idx: -1,
+      style: (!fStyleOpt && (f.style === 'points' || f.style === 'spheres')) ? f.style
+        : (this.opts.fieldStyle === 'points' ? 'points' : 'spheres'),
     }));
     // load dial: any range (fibrous strain 0–1, cartilage compression 0–0.2) → normalise for the arrows
     const loadDial = (T.dials || []).find((d) => d.role === 'load');
@@ -5549,7 +6004,7 @@ class TissueRenderer {
     }
     if (this.scaffold) { this.scene.remove(this.scaffold.mesh); this.scaffold.geo.dispose(); this.scaffold.mesh.dispose(); this.scaffold = null; }
     if (this.fields) {
-      for (const L of this.fields) { this.scene.remove(L.points); L.geo.dispose(); L.mat.dispose(); }
+      for (const L of this.fields) { this.scene.remove(L.obj); L.geo.dispose(); if (L.style === 'points') L.mat.dispose(); else L.mesh.dispose(); }
       this.fields = null;
     }
     this._gridN = 0;
@@ -5564,7 +6019,7 @@ class TissueRenderer {
       centers[3 * v] = (i + 0.5) * h; centers[3 * v + 1] = (j + 0.5) * h; centers[3 * v + 2] = (k + 0.5) * h;
     }
     this._gridN = N;
-    this._buildFibers(N, centers);
+    this._buildFibers(N);
     if (this._gelSp.length) this._buildGel(N, centers);
     if (this._scafSp.length) this._buildScaffold(N, centers);
     this._buildFields(N, centers);
@@ -5577,7 +6032,7 @@ class TissueRenderer {
    * bleed past the faces of the cube). `margin` is the sprite's world half-size.
    */
   static _jitterPoints(N, centers, seed, margin) {
-    const V = N * N * N, h = 1 / N, rand = TissueRenderer._rng(seed);
+    const V = N * N * N, h = 1 / N, rand = recipeRng(seed);
     const out = new Float32Array(V * 3);
     const lo = margin > 0.5 ? 0.5 : (margin > 0 ? margin : 0), hi = 1 - lo;
     for (let v = 0; v < V; v++) {
@@ -5613,8 +6068,8 @@ class TissueRenderer {
 
   // Per-instance layout (offset inside the voxel, random unit vector r_j, length/radius jitter)
   // and the density/FA laws both come from src/recipe.js, so the Blender importer can reproduce
-  // this exact arrangement. `centers` is unused here — the recipe derives voxel centres itself.
-  _buildFibers(N, centers) {   // eslint-disable-line no-unused-vars
+  // this exact arrangement. No `centers` argument: the recipe derives the voxel centres itself.
+  _buildFibers(N) {
     const K = this.opts.K, V = N * N * N, count = V * K, h = 1 / N;
     const { base, rvec, jit } = recipeFiberLayout(N, K, this.opts.seed);
     this._fiberSc = this._fiberScales(h);
@@ -5648,7 +6103,7 @@ class TissueRenderer {
       this.gel = { points, geo: g, mat, valAttr, colAttr, occ: new Uint8Array(V), V, h };
       return;
     }
-    const rand = TissueRenderer._rng(this.opts.seed ^ 0x5bd1e995);
+    const rand = recipeRng(this.opts.seed ^ 0x5bd1e995);
     const jit = new Float32Array(V * 4);   // dx, dy, dz (× h), size factor
     for (let v = 0; v < V; v++) {
       jit[4 * v] = (rand() - 0.5) * 0.5; jit[4 * v + 1] = (rand() - 0.5) * 0.5; jit[4 * v + 2] = (rand() - 0.5) * 0.5;
@@ -5712,10 +6167,10 @@ class TissueRenderer {
     this.scaffold = { mesh, geo, alpha, mid, len, axis, va, vb, count: s, V, h, vd: new Float32Array(V), vc: new Float32Array(3 * V) };
   }
 
-  _makePointMaterial(opacity, size, soft, sizePow) {
+  _makePointMaterial(opacity, size, soft, sizePow, minVal = 0.02) {
     return new THREE.ShaderMaterial({
       uniforms: {
-        uOpacity: { value: opacity }, uSize: { value: size }, uMinVal: { value: 0.02 },
+        uOpacity: { value: opacity }, uSize: { value: size }, uMinVal: { value: minVal },
         uScale: { value: 400 }, uSoft: { value: soft }, uSizePow: { value: sizePow },
       },
       vertexShader: RENDER_POINT_VERT, fragmentShader: RENDER_POINT_FRAG,
@@ -5724,31 +6179,77 @@ class TissueRenderer {
     });
   }
 
-  // A field's sprite size is `pointSize · h · (fields[i].pointScale ?? 1)` (B5): a field whose
-  // haze should read as a coarse cloud rather than a fine mist says so in the definition.
+  /**
+   * One layer per diffusible field. The blob size starts from one number in both styles — the
+   * sprite diameter `pointSize · h · (fields[i].pointScale ?? 1)` (B5), in world units, which the
+   * sphere style then widens by `fieldSphereDiameter` (see the header) — so the two are directly
+   * comparable. Each field gets its own jittered, clamped cloud, so two hazes interleave instead
+   * of coinciding. `fields[i].style` / `opts.fieldStyle` picks the style.
+   *
+   * Every layer answers the same four things: `obj` (the Object3D to show/hide), `key`, `def`
+   * and `style`; the points style adds `attr`/`mat`, the sphere style `mesh`/`alpha`/`radius`.
+   */
   _buildFields(N, centers) {
     const V = N * N * N, h = 1 / N;
     this.fields = this._fieldDefs.map((f, i) => {
       const size = this.opts.pointSize * h * f.pointScale;
-      const margin = 0.5 * size;
-      const g = new THREE.BufferGeometry();
-      // own jittered, clamped cloud per field: two hazes interleave instead of coinciding,
-      // and no sprite hangs outside the cube
-      g.setAttribute('position', new THREE.BufferAttribute(TissueRenderer._jitterPoints(N, centers, (this.opts.seed ^ 0x1b873593) + 7919 * i, margin), 3));
-      const attr = new THREE.BufferAttribute(new Float32Array(V), 1);
-      attr.setUsage(THREE.DynamicDrawUsage);
-      g.setAttribute('aVal', attr);
-      const colArr = new Float32Array(V * 3);
-      const c = new THREE.Color(f.color);
-      for (let v = 0; v < V; v++) { colArr[3 * v] = c.r; colArr[3 * v + 1] = c.g; colArr[3 * v + 2] = c.b; }
-      g.setAttribute('aCol', new THREE.BufferAttribute(colArr, 3));
-      g.boundingSphere = new THREE.Sphere(this.center.clone(), 1);
-      const mat = this._makePointMaterial(this.opts.pointOpacity, size, 8.0, 1.0);
-      const points = new THREE.Points(g, mat);
-      points.frustumCulled = false; points.renderOrder = 3; points.visible = false;
-      this.scene.add(points);
-      return { key: f.key, def: f, points, geo: g, mat, attr };
+      // one cloud, whichever style draws it: the same seed and the same clamp margin (half the
+      // sprite size), so switching styles moves nothing. A sphere is `fieldSphereDiameter` wider
+      // than that margin and may reach 5 % of a blob past the face — invisible, since a blob's
+      // alpha is already zero at its rim, and worth less than making the two styles disagree.
+      const pos = TissueRenderer._jitterPoints(N, centers, (this.opts.seed ^ 0x1b873593) + 7919 * i, 0.5 * size);
+      return f.style === 'points' ? this._buildFieldPoints(f, pos, V, size) : this._buildFieldSpheres(f, pos, V, size);
     });
+  }
+
+  // gl_PointSize sprites: one draw call per field, but the size is clamped by the driver's
+  // point-size limit and the sprites take no part in fog, depth cue or depth sorting.
+  _buildFieldPoints(f, pos, V, size) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const attr = new THREE.BufferAttribute(new Float32Array(V), 1);
+    attr.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('aVal', attr);
+    const colArr = new Float32Array(V * 3);
+    const c = new THREE.Color(f.color);
+    for (let v = 0; v < V; v++) { colArr[3 * v] = c.r; colArr[3 * v + 1] = c.g; colArr[3 * v + 2] = c.b; }
+    g.setAttribute('aCol', new THREE.BufferAttribute(colArr, 3));
+    g.boundingSphere = new THREE.Sphere(this.center.clone(), 1);
+    const mat = this._makePointMaterial(this.opts.pointOpacity, size, 8.0, 1.0, this.opts.pointMin);
+    const points = new THREE.Points(g, mat);
+    points.frustumCulled = false; points.renderOrder = 3; points.visible = false;
+    this.scene.add(points);
+    return { key: f.key, def: f, style: 'points', obj: points, points, geo: g, mat, attr, V };
+  }
+
+  // Instanced spheres through the same haze shader the gel uses: real geometry, so the blob keeps
+  // its world size on every driver and sits in the depth buffer (and could take the fog and the
+  // depth cue, which fieldFog / fieldDepthCue leave off so it matches the sprite). `radius` is
+  // the value-1 radius; _updateFieldSpheres scales each instance by 0.35 + 0.65·value, the law
+  // the sprite shader applies to gl_PointSize.
+  _buildFieldSpheres(f, pos, V, size) {
+    const geo = new THREE.IcosahedronGeometry(1, Math.max(0, this.opts.fieldDetail | 0));
+    // A polyhedron geometry carries FLAT (per-face) normals, and the haze shader fades alpha by
+    // |n·v| — flat normals would step the alpha face by face and the blob would read as a shard
+    // of glass instead of a soft ball. On a unit sphere at the origin the smooth normal IS the
+    // position, so this is the exact smooth normal, not an approximation.
+    geo.setAttribute('normal', new THREE.BufferAttribute(geo.getAttribute('position').array.slice(), 3));
+    const alpha = new THREE.InstancedBufferAttribute(new Float32Array(V), 1);
+    alpha.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aAlpha', alpha);
+    const mesh = new THREE.InstancedMesh(geo, this.fieldMat, V);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    const colArr = new Float32Array(V * 3);
+    const c = new THREE.Color(f.color);
+    for (let v = 0; v < V; v++) { colArr[3 * v] = c.r; colArr[3 * v + 1] = c.g; colArr[3 * v + 2] = c.b; }
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(colArr, 3);   // constant per field: uploaded once
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 3;
+    mesh.visible = false;
+    TissueRenderer._hideRange(mesh.instanceMatrix.array, 0, V);
+    this.scene.add(mesh);
+    return { key: f.key, def: f, style: 'spheres', obj: mesh, mesh, geo, alpha, pos, V,
+      radius: 0.5 * size * (+this.opts.fieldSphereDiameter > 0 ? +this.opts.fieldSphereDiameter : 1) };
   }
 
   _buildCells(capacity) {
@@ -5773,7 +6274,7 @@ class TissueRenderer {
   _updatePointScale() {
     const hPx = this.renderer.domElement.height;  // drawing-buffer pixels
     const s = hPx / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) * 0.5));
-    if (this.fields) for (const L of this.fields) L.mat.uniforms.uScale.value = s;
+    if (this.fields) for (const L of this.fields) if (L.style === 'points') L.mat.uniforms.uScale.value = s;
     if (this.gel && this.gel.points) this.gel.mat.uniforms.uScale.value = s;
   }
 
@@ -5882,7 +6383,7 @@ class TissueRenderer {
         const on = !!fl[L.key] || (!layers.fields && !!layers[L.key]);
         const ix = L.def.idx;
         const src = F && ix >= 0 && ix < F.length ? F[ix] : (state[L.key] && state[L.key].length ? state[L.key] : null);
-        L.points.visible = on && !!src;
+        L.obj.visible = on && !!src;
         if (on && src) this._updateField(L, src);
       }
     }
@@ -6134,10 +6635,34 @@ class TissueRenderer {
   }
 
   _updateField(layer, field) {
+    if (layer.style === 'spheres') return this._updateFieldSpheres(layer, field);
     const a = layer.attr.array;
     if (field.length === a.length) a.set(field);
     else { const n = Math.min(a.length, field.length); for (let i = 0; i < n; i++) a[i] = field[i]; }
     layer.attr.needsUpdate = true;
+  }
+
+  // The sphere style's per-frame work: scale each blob by 0.35 + 0.65·value and set its alpha to
+  // 0.2 + 0.8·value — the two laws RENDER_POINT_VERT/FRAG apply to a sprite, so switching styles
+  // changes how the haze is drawn, not how strongly a value shows. Below `pointMin` the instance
+  // is collapsed to nothing (the sprite shader's `gl_PointSize = 0` branch).
+  _updateFieldSpheres(L, field) {
+    const V = L.V, M = L.mesh.instanceMatrix.array, AL = L.alpha.array, pos = L.pos;
+    const r0 = L.radius, minV = this.opts.pointMin, n = field.length < V ? field.length : V;
+    for (let v = 0; v < V; v++) {
+      let x = v < n ? field[v] : 0;
+      if (!(x > 0)) x = 0; else if (x > 1) x = 1;
+      const o = v * 16;
+      if (x < minV) { M[o] = M[o + 5] = M[o + 10] = 0; AL[v] = 0; continue; }
+      const r = r0 * (0.35 + 0.65 * x);
+      M[o] = r; M[o + 1] = 0; M[o + 2] = 0; M[o + 3] = 0;
+      M[o + 4] = 0; M[o + 5] = r; M[o + 6] = 0; M[o + 7] = 0;
+      M[o + 8] = 0; M[o + 9] = 0; M[o + 10] = r; M[o + 11] = 0;
+      M[o + 12] = pos[3 * v]; M[o + 13] = pos[3 * v + 1]; M[o + 14] = pos[3 * v + 2]; M[o + 15] = 1;
+      AL[v] = 0.2 + 0.8 * x;
+    }
+    L.mesh.instanceMatrix.needsUpdate = true;
+    L.alpha.needsUpdate = true;
   }
 
   // `load` is the raw dial value; the arrows show it normalised over the dial's own
@@ -6234,11 +6759,16 @@ class TissueRenderer {
   }
 
   /**
-   * Orbit the camera around controls.target by (dTheta, dPhi) radians, in the same y-up spherical
-   * frame OrbitControls uses (so "up" is camera.up = +z here). No allocation, no private
-   * OrbitControls state: move camera.position, then let controls.update() re-derive its own.
+   * PUBLIC camera step, the single-pointer alternative to dragging (WCAG 2.2 AA 2.5.7): orbit the
+   * camera around controls.target by (dTheta, dPhi) RADIANS, in the same y-up spherical frame
+   * OrbitControls uses (so "up" is camera.up = +z here). No allocation, no private OrbitControls
+   * state: move camera.position, then let controls.update() re-derive its own. Positive dTheta
+   * swings the camera the way ArrowRight does, positive dPhi lowers it (ArrowDown), and
+   * `opts.keyOrbitStep` (π/24) is the step the arrow keys take — and the one an on-screen
+   * orbit button should take, so the two agree.
+   * Does NOT stop auto-rotate — a UI button should call setAutoRotate(false) itself if it means to.
    */
-  _orbit(dTheta, dPhi) {
+  orbit(dTheta, dPhi) {
     const t = this.controls.target;
     const off = this._tmpV.copy(this.camera.position).sub(t).applyQuaternion(this._upQuat);
     const sp = this._sph.setFromVector3(off);
@@ -6252,8 +6782,11 @@ class TissueRenderer {
     this.controls.update();
   }
 
-  /** Dolly by a distance factor (>1 = further away), clamped to the controls' min/max distance. */
-  _dolly(factor) {
+  /**
+   * PUBLIC: dolly by a distance factor (> 1 = further away, < 1 = closer), clamped to the
+   * controls' min/max distance. `opts.keyDollyStep` (1.12) is the step +/− uses.
+   */
+  dolly(factor) {
     const t = this.controls.target;
     const off = this._tmpV.copy(this.camera.position).sub(t);
     const d = off.length() * factor;
@@ -6278,12 +6811,12 @@ class TissueRenderer {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     this.setAutoRotate(false);
     const rot = +this.opts.keyOrbitStep || 0, dolly = +this.opts.keyDollyStep || 1;
-    if (k === 'ArrowLeft') this._orbit(-rot, 0);
-    else if (k === 'ArrowRight') this._orbit(rot, 0);
-    else if (k === 'ArrowUp') this._orbit(0, -rot);
-    else if (k === 'ArrowDown') this._orbit(0, rot);
-    else if (k === '+' || k === '=' || k === 'Add') this._dolly(1 / dolly);
-    else if (k === '-' || k === '_' || k === 'Subtract') this._dolly(dolly);
+    if (k === 'ArrowLeft') this.orbit(-rot, 0);
+    else if (k === 'ArrowRight') this.orbit(rot, 0);
+    else if (k === 'ArrowUp') this.orbit(0, -rot);
+    else if (k === 'ArrowDown') this.orbit(0, rot);
+    else if (k === '+' || k === '=' || k === 'Add') this.dolly(1 / dolly);
+    else if (k === '-' || k === '_' || k === 'Subtract') this.dolly(dolly);
     else if (k === 'Home') this.resetView();
     else return;               // not ours: no preventDefault, the app still gets it
     e.preventDefault();
@@ -6309,6 +6842,7 @@ class TissueRenderer {
     this.cellMat.dispose();
     this.gelMat.dispose();
     this.scaffoldMat.dispose();
+    this.fieldMat.dispose();
     this._wire.geo.dispose(); this._wire.mat.dispose();
     if (this.woundMarker) {
       this.scene.remove(this.woundMarker.obj);
@@ -6352,6 +6886,8 @@ const APP_FLASH_MS = 3200;
 const APP_STATUS_MS = 15000;    // screen-reader status: at most one routine announcement per 15 s
 const APP_TREND_MS = 5000;      // …and at most one "the balance turned" announcement per 5 s
 const APP_TREND_HOLD_MS = 1000; // a new trend must hold this long before it is worth saying
+const APP_STATUS_FLOOR_MS = 10000;  // …and nothing the CLOCK causes ever lands within 10 s of the last
+const APP_HOVER_SAY_MS = 220;   // the keyboard crosshair speaks once the arrow key comes to rest
 const APP_STEP_BUDGET_MS = 8;   // wall-clock stepping budget per frame (A3); always ≥ 1 step
 const APP_SLOW_MS = 1500;       // how long "sim slowed" stays in #fps after a dropped backlog
 const APP_WARM_MS = 5;          // idle-frame budget for engine.warmScenarios (A2)
@@ -6360,15 +6896,36 @@ const APP_GHOST_MIN_DAYS = 0.5; // a run shorter than this is not worth keeping 
 const APP_SPEED_DEFAULT = 5;    // days per second — the number the teaching copy quotes
 const APP_SPEEDS = [['Watch', 1], ['Weeks', 5], ['Months', 20]];  // labelled presets next to the speed slider
 const APP_WEEK_JUMP = 7;        // the "+7 days" button, run (not stepped) to a stopAt
-const APP_MARKERS = ['circle', 'square', 'diamond'];  // endpoint glyphs: identity never by colour alone (B5)
+// endpoint glyphs: identity never by colour alone (B5). Five of them, so a readout with four or
+// five series never repeats one — the cartilage phenotype/memory pair are luminance twins, and a
+// repeated circle left them differing by hue alone.
+const APP_MARKERS = ['circle', 'square', 'diamond', 'triangle', 'cross'];
 const APP_PRESENT_FONT = 14;    // readout font in presentation mode (11 px normally)
 const APP_EVENTS_KEY = 'tw.autoEvents';
+const APP_HINT_KEY = 'tw.hintDismissed';    // the first-run card, dismissed for this session
+const APP_SHORTCUT_KEY = 'tw.shortcuts';    // single-key shortcuts on/off, remembered between visits
+const APP_LEGEND_MIN_H = 132;   // px of stage left under the HUD before the legend moves into the console
 const APP_KEYS = [
   ['Space', 'play / pause'], ['R', 'reset the scenario (previous run stays dashed)'], ['I', 'injure (when the tissue supports it)'],
   ['1 – 9', 'pick a scenario'], ['P', 'presentation mode (bigger sentence and clock)'],
   ['← →', 'nudge the focused dial (Home / End for the extremes); on a focused chart, move the crosshair (Esc drops it)'],
   ['Tab', 'move between controls; the 3D view and every chart are focusable and describe themselves'],
 ];
+/**
+ * The camera chips under the layer chips: [id, glyph, accessible name, renderer method, args].
+ * Each is checked against the renderer before it is built, so a renderer without the camera API
+ * (or none at all, when WebGL failed) simply has no camera row.
+ */
+const APP_CAMERA = [
+  ['cam-left', '◀', 'Orbit the view left', 'orbit', (s) => [-s.rot, 0]],
+  ['cam-right', '▶', 'Orbit the view right', 'orbit', (s) => [s.rot, 0]],
+  ['cam-up', '▲', 'Orbit the view up', 'orbit', (s) => [0, -s.rot]],
+  ['cam-down', '▼', 'Orbit the view down', 'orbit', (s) => [0, s.rot]],
+  ['cam-in', '+', 'Zoom in', 'dolly', (s) => [1 / s.dolly]],
+  ['cam-out', '−', 'Zoom out', 'dolly', (s) => [s.dolly]],
+  ['cam-home', '⌂', 'Recentre the camera on the default framing', 'resetView', () => []],
+];
+const APP_CAMERA_STEP = { rot: 0.26, dolly: 1.15 };   // one chip press ≈ one arrow-key press (render.js)
 /** The one line of orientation under the intro paragraph in the first-run hint (C13). */
 const APP_HINT_CONTROLS = 'Press Play to start the clock, drag a dial to change the weather, and drag the 3D view to look around. Everything works from the keyboard too — Space plays, 1–9 pick a scenario.';
 const APP_OFFLINE_HTML = 'To use this page offline: reload once with an internet connection so the browser caches the library, or download <code>three@0.160.0</code> (<code>build/three.module.min.js</code> and <code>examples/jsm/controls/OrbitControls.js</code>) next to this page and point the import map in the HTML at those files.';
@@ -6464,6 +7021,21 @@ function appSession(key, value) {
     return value;
   } catch (e) { return null; }
 }
+/** localStorage, same treatment: for the one preference worth keeping between visits. */
+function appLocal(key, value) {
+  try {
+    if (value === undefined) return window.localStorage.getItem(key);
+    window.localStorage.setItem(key, value);
+    return value;
+  } catch (e) { return null; }
+}
+/** Give a scroll container a tab stop only while it actually overflows (axe scrollable-region-focusable). */
+function appScrollable(el, axis) {
+  if (!el) return false;
+  const over = axis === 'y' ? el.scrollHeight > el.clientHeight + 2 : el.scrollWidth > el.clientWidth + 2;
+  el.tabIndex = over ? 0 : -1;
+  return over;
+}
 function appHasWebGL() {
   try { const c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); } catch (e) { return false; }
 }
@@ -6495,12 +7067,20 @@ class TissueApp {
     // screen-reader status region (C3): routine announcements at most every APP_STATUS_MS,
     // plus one whenever the trend changes, the clock stops or a scenario loads
     this.statusText = ''; this.lastStatusAt = -1e9; this.lastTrend = null; this.statusFlip = false;
+    this.lastSaidSentence = '';            // the last equilibrium sentence announced (not re-said)
     this.lastRevision = undefined;         // engine.revision at the last stats sample (B1/A3)
     this.pendingTrend = null; this.pendingTrendAt = 0; this.lastTrendSaidAt = -1e9;
     this.stopAt = null;                    // "+7 days": pause when the clock reaches this day
     this.slowUntil = 0;                    // "sim slowed" in #fps while a backlog is being dropped
     this.warmDone = false; this.warmChunk = 16;   // idle-frame scenario warm-up (A2)
     this.present = false; this.autoRotate = true;
+    this.hoverTimer = null;                // the keyboard crosshair speaks once, after the key rests
+    this.legendDocked = false;             // the legend has moved into the console (short stage)
+    this.hintDismissed = appSession(APP_HINT_KEY) === '1';
+    // Single-character shortcuts need a way OFF (WCAG 2.1.4 Character Key Shortcuts): a speech-input
+    // user dictating anything with an "r" in it would otherwise destroy the run. Default on — they
+    // are what the classroom uses — remembered between visits, and Space is never gated.
+    this.shortcuts = appLocal(APP_SHORTCUT_KEY) !== '0';
     // scripted scenario events: off by default (the student does the protocol by hand),
     // remembered for the session so an instructor can leave hands-free mode on
     this.autoEvents = appSession(APP_EVENTS_KEY) === '1';
@@ -6540,7 +7120,12 @@ class TissueApp {
     appEl('btn-copy-link').addEventListener('click', () => this.copyLink());
     appEl('btn-table').addEventListener('click', () => this.toggleTable());
     appEl('btn-clear-ref').addEventListener('click', () => this.clearReference(true));
-    appEl('hint-dismiss').addEventListener('click', () => { appEl('hint').hidden = true; appEl('btn-play').focus(); });
+    // dismissing the card means dismissed: buildHint re-derives visibility on every tissue switch,
+    // so without the flag the second tissue brought the card back
+    appEl('hint-dismiss').addEventListener('click', () => {
+      this.hintDismissed = true; appSession(APP_HINT_KEY, '1');
+      appEl('hint').hidden = true; appEl('btn-play').focus();
+    });
     appEl('btn-present').addEventListener('click', () => this.setPresent(!this.present, true));
     const speed = appEl('speed');
     speed.addEventListener('input', () => this.setSpeed(parseFloat(speed.value), true));
@@ -6568,9 +7153,21 @@ class TissueApp {
     });
     // legend: open on wide screens, collapsed (but reachable) on narrow ones
     const legendBox = appEl('legend-box');
-    const applyLegend = () => { legendBox.open = !(this.narrowQuery && this.narrowQuery.matches); };
+    const applyLegend = () => { legendBox.open = !(this.narrowQuery && this.narrowQuery.matches); this.layoutLegend(); };
     applyLegend();
     if (this.narrowQuery && this.narrowQuery.addEventListener) this.narrowQuery.addEventListener('change', applyLegend);
+    legendBox.addEventListener('toggle', () => this.syncLegendScroll());
+    // Two measurements the layout cannot make on its own, both of which move with the tissue, the
+    // window and presentation mode: the sticky Run header's height (it becomes #panel's
+    // scroll-padding, so Shift+Tab never parks focus behind it) and the room the stage leaves
+    // under the HUD (the legend's cap).
+    const measure = () => { this.measureRun(); this.layoutLegend(); };
+    if (typeof ResizeObserver === 'function') {
+      this.sizeObserver = new ResizeObserver(measure);
+      for (const sel of ['.run', '#stage', '.hud-top']) { const el = document.querySelector(sel); if (el) this.sizeObserver.observe(el); }
+    }
+    window.addEventListener('resize', measure);
+    measure();
     if (this.motionQuery && this.motionQuery.addEventListener) {
       this.motionQuery.addEventListener('change', (e) => {
         this.reducedMotion = e.matches;
@@ -6579,6 +7176,48 @@ class TissueApp {
     }
     window.addEventListener('keydown', (e) => this.onKey(e));
   }
+
+  /**
+   * The sticky Run header's height, as the console's scroll-padding. Chrome scrolls a focused
+   * element into view only when it is OUTSIDE the scrollport; one that is inside it but under the
+   * opaque sticky header is left where it is, so Shift+Tab up the console used to leave four or
+   * five controls focused and invisible (WCAG 2.4.11). The header is 241 px with four dials and
+   * 197 px with seven, so it is measured rather than guessed.
+   */
+  measureRun() {
+    const run = document.querySelector('.run'), panel = appEl('panel');
+    if (!run || !panel) return;
+    const h = Math.round(run.getBoundingClientRect().height);
+    if (h > 0) panel.style.setProperty('--run-h', `${h + 8}px`);
+  }
+
+  /**
+   * Where the legend may live (WCAG 1.4.4 Resize Text / 1.4.10 Reflow). The box is absolutely
+   * positioned in the stage and opens UPWARD, while its old cap was computed from the VIEWPORT —
+   * so at 200 % zoom, where the stage is 58vh of a 450 px-tall viewport, an open legend printed
+   * itself over the title, the clock and the live sentence. Cap it against what the stage
+   * actually leaves under the HUD; when that is less than can be read, move the whole disclosure
+   * into the console, where it is an ordinary block and covers nothing.
+   */
+  layoutLegend() {
+    const stage = appEl('stage'), hud = document.querySelector('.hud-top'), box = appEl('legend-box'), dock = appEl('legend-dock'), layers = appEl('layers');
+    if (!stage || !hud || !box || !dock) return;
+    const sr = stage.getBoundingClientRect(), hr = hud.getBoundingClientRect();
+    const room = Math.round(sr.bottom - hr.bottom - 26);   // 16 px bottom offset + 10 px clear of the HUD
+    const dockIt = !(room >= APP_LEGEND_MIN_H);
+    if (dockIt !== this.legendDocked) {
+      this.legendDocked = dockIt;
+      document.body.classList.toggle('legend-docked', dockIt);
+      dock.hidden = !dockIt;
+      if (dockIt) dock.append(box);
+      else if (layers) stage.insertBefore(box, layers); else stage.append(box);
+    }
+    if (dockIt) box.style.removeProperty('--legend-max');
+    else box.style.setProperty('--legend-max', `${Math.max(0, room)}px`);
+    this.syncLegendScroll();
+  }
+  /** A capped legend scrolls: give it a tab stop while it does, and none while it does not. */
+  syncLegendScroll() { appScrollable(appEl('legend'), 'y'); }
 
   onKey(e) {
     if (e.defaultPrevented || e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -6591,6 +7230,10 @@ class TissueApp {
       if (interactive) return; // native activation (buttons, summary, checkbox) wins
       e.preventDefault(); this.togglePlay(); return;
     }
+    // WCAG 2.1.4 Character Key Shortcuts: everything below is a single printable character, so it
+    // is switchable (About → "Single-key shortcuts"). Space is not — it is the one key WCAG
+    // exempts as a standard activation key, and it stays whatever the switch says.
+    if (!this.shortcuts) return;
     const k = e.key.toLowerCase();
     if (k === 'p') { e.preventDefault(); this.setPresent(!this.present, true); return; }
     if (k === 'r') { e.preventDefault(); this.reset(); return; }
@@ -6598,6 +7241,34 @@ class TissueApp {
     if (/^[1-9]$/.test(e.key) && this.tissue) {
       const sc = this.tissue.scenarios[parseInt(e.key, 10) - 1];
       if (sc) { e.preventDefault(); this.loadScenario(sc.key); }
+    }
+  }
+
+  /**
+   * The single-key shortcuts on or off (WCAG 2.1.4), from the About toggle, remembered between
+   * visits. Off, the page stops advertising them too: no aria-keyshortcuts, no kbd hints on the
+   * scenario chips — a promise the page is no longer keeping is worse than no promise.
+   */
+  setShortcuts(on, fromUi) {
+    this.shortcuts = !!on;
+    if (fromUi) appLocal(APP_SHORTCUT_KEY, this.shortcuts ? '1' : '0');   // …else this is only a re-sync
+    const b = appEl('opt-shortcuts');
+    if (b) b.setAttribute('aria-pressed', String(this.shortcuts));
+    for (const [id, key] of [['btn-reset', 'r'], ['btn-injure', 'i'], ['btn-present', 'p']]) {
+      const el = appEl(id);
+      if (el) { if (this.shortcuts) el.setAttribute('aria-keyshortcuts', key); else el.removeAttribute('aria-keyshortcuts'); }
+    }
+    if (this.tissue) this.tissue.scenarios.forEach((sc, i) => {
+      const chip = this.scenarioButtons[sc.key];
+      if (!chip || i >= 9) return;
+      if (this.shortcuts) chip.setAttribute('aria-keyshortcuts', String(i + 1)); else chip.removeAttribute('aria-keyshortcuts');
+      const kbd = chip.querySelector('kbd');
+      if (kbd) kbd.hidden = !this.shortcuts;
+    });
+    if (fromUi) {
+      this.announce(this.shortcuts
+        ? 'Single-key shortcuts on: R resets, I injures, P is presentation mode, 1 to 9 pick a scenario.'
+        : 'Single-key shortcuts off. Space still plays and pauses, and every control is still reachable with Tab.', true);
     }
   }
 
@@ -6615,6 +7286,7 @@ class TissueApp {
   setTissue(key, opts = {}) {
     const tissue = TISSUES[key];
     if (!tissue) return;
+    const tok = this.focusToken();     // the dials, readouts and card below are all replaced
     this.setPlaying(false, true);
     this.tissueKey = key; this.tissue = tissue;
     const radio = appEl(`tissue-${key}`); if (radio) radio.checked = true;
@@ -6631,6 +7303,8 @@ class TissueApp {
     this.voc = Object.assign({ cellStateNoun: this.stateNoun.noun }, (tissue.copy && tissue.copy.vocabulary) || {});
     if (this.renderer && typeof this.renderer.setTissue === 'function') this.renderer.setTissue(tissue);
     this.buildDials(); this.buildScenarios(); this.buildReadouts(); this.buildLayers(); this.buildLegend(); this.buildAbout(); this.buildHint();
+    this.restoreFocus(tok);
+    this.measureRun();                 // a tissue with seven dials has a taller sticky header
     appEl('btn-injure').hidden = !tissue.injury;
     this.engine = null; this.stats = null; this.ready = false;
     this.warmDone = false; this.lastTrend = null; this.stopAt = null;
@@ -6642,6 +7316,32 @@ class TissueApp {
       catch (e) { this.busy(null); this.showNotice('The simulation could not start', String(e && e.message || e)); return; }
       this.loadScenario(sc, { dials: opts.dials, ghost: false, autoplay: false });
     }, 30);
+  }
+
+  /**
+   * Focus survival across a rebuild (WCAG 2.4.3). `replaceChildren` on the scenario card, and the
+   * whole-console rebuild behind a tissue switch, dropped focus to the document body — from which
+   * the next Tab restarts at the skip link, and a screen-reader user loses their place. Remember where
+   * focus was, and afterwards put it on the same control, or on the container that replaced it.
+   * Focus OUTSIDE the rebuilt regions (a scenario chip, the tissue radio) is left strictly alone,
+   * so nothing here can move focus for a mouse user.
+   */
+  focusToken() {
+    const el = document.activeElement;
+    if (!el || !el.closest || el === document.body) return null;
+    const box = el.closest('#scenario-card, #dials, #readouts, #layers');
+    return box ? { id: el.id || '', box: box.id } : null;
+  }
+  restoreFocus(tok) {
+    if (!tok) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement) return;  // something else took it
+    let el = tok.id ? appEl(tok.id) : null;                       // the same control, if the rebuild kept it
+    const box = appEl(tok.box);
+    if ((!el || !el.isConnected || el.offsetParent === null) && box) {
+      el = box.hasAttribute('tabindex') ? box : box.querySelector('button, [href], input, select, textarea, summary, [tabindex]:not([tabindex="-1"])');
+    }
+    if (el && typeof el.focus === 'function') { try { el.focus({ preventScroll: false }); } catch (e) { el.focus(); } }
   }
 
   scenario() { return this.tissue ? (this.tissue.scenarios.find((s) => s.key === this.scenarioKey) || this.tissue.scenarios[0]) : null; }
@@ -6657,10 +7357,12 @@ class TissueApp {
       b.addEventListener('click', () => this.loadScenario(sc.key));
       this.scenarioButtons[sc.key] = b; box.append(b);
     });
+    this.setShortcuts(this.shortcuts, false);   // the new chips advertise the digits only if they work
   }
 
   renderScenarioCard(sc) {
     const card = appEl('scenario-card');
+    const tok = this.focusToken();
     const from = sc.init && sc.init.from;
     const events = this.describeEvents(sc);
     const toggle = appH('button', {
@@ -6679,6 +7381,7 @@ class TissueApp {
       events ? appH('p', { class: 'note', id: 'events-note', text: this.eventsNote(events) }) : '',
       events ? appH('div', { class: 'tools-row' }, [toggle]) : '',
     );
+    this.restoreFocus(tok);
   }
 
   eventsNote(events) {
@@ -6792,11 +7495,17 @@ class TissueApp {
       this.lastTrend = null;
       this.stopAt = null;
       this.sample(true, performance.now());
-      if (o.flash) this.flash(o.flash);
-      // a scenario swap is silent on screen apart from the card: say which one loaded (C3).
+      // A scenario swap is silent on screen apart from the card, so it says which one loaded (C3).
+      // The resume BELOW used to be the last word: setPlaying's own "Playing at N days per second"
+      // overwrote #status in the same task, so switching scenario or pressing Reset while the
+      // clock ran never reached a screen reader. The resume is quiet now and the play state is
+      // part of this one sentence instead.
       // No programmatic focus move — loadScenario also runs on page load and on a radio change.
-      else this.announce(`Scenario “${sc.title}” loaded, day 0. ${sc.goal ? appFirstSentence(sc.goal) : ''}`.trim(), true);
-      this.setPlaying(o.autoplay === undefined ? wasPlaying : o.autoplay);
+      const resume = o.autoplay === undefined ? wasPlaying : o.autoplay;
+      const said = o.flash || `Scenario “${sc.title}” loaded, day 0. ${sc.goal ? appFirstSentence(sc.goal) : ''}`.trim();
+      const withState = resume ? `${said} Still running at ${this.speed} simulated days per second.` : said;
+      if (o.flash) this.flash(withState); else this.announce(withState, true);
+      this.setPlaying(resume, true);
       this.scheduleUrl();
     }, 30);
   }
@@ -6832,7 +7541,10 @@ class TissueApp {
       const id = `dial-${d.key}`;
       const txt = appFormatDial(d, d.default);
       const input = appH('input', { type: 'range', id, min: d.min, max: d.max, step: d.step, value: d.default, 'aria-valuetext': txt, 'aria-describedby': `${id}-hint` });
-      const out = appH('output', { for: id, text: txt });
+      // <output> maps to role=status, i.e. an implicit polite live region: without aria-live="off"
+      // one drag of this slider queues ~40 announcements on top of the value the slider itself
+      // already speaks, and the page has six or nine live regions instead of the one it claims.
+      const out = appH('output', { for: id, 'aria-live': 'off', text: txt });
       input.addEventListener('input', () => this.setDial(d.key, parseFloat(input.value), 'ui'));
       const m = String(d.metaphor || '');
       const ci = m.indexOf(':');
@@ -6843,8 +7555,13 @@ class TissueApp {
       // fold into a details (C8) — seven cartilage dials with three lines each pushed Play and
       // the readouts more than a screen below the fold.
       const hint = appH('div', { class: 'hint', id: `${id}-hint` }, [d.biology ? appH('span', { text: d.biology }) : '']);
+      // the summary text is the same three words on every dial: four (seven, for cartilage)
+      // identically named disclosures in a row in a screen reader's elements list. The dial's own
+      // label goes in front of it in the accessible name — the visible words are kept verbatim,
+      // so the name still contains the label a voice user would say (WCAG 2.5.3).
+      const summaryText = rest && d.watch ? 'Metaphor & what to watch' : (rest ? 'Metaphor' : 'What to watch');
       const more = (rest || d.watch) ? appH('details', { class: 'dial-more' }, [
-        appH('summary', { text: rest && d.watch ? 'Metaphor & what to watch' : (rest ? 'Metaphor' : 'What to watch') }),
+        appH('summary', { text: summaryText, 'aria-label': `${appShortLabel(d.label)}: ${summaryText}` }),
         rest ? appH('p', { class: 'metaphor-note', text: `Like ${tag}: ${rest}` }) : '',
         d.watch ? appH('p', {}, [appH('b', { text: 'Watch: ' }), document.createTextNode(d.watch)]) : '',
       ]) : '';
@@ -6936,8 +7653,11 @@ class TissueApp {
         role: 'img', tabindex: '0', 'aria-describedby': 'chart-keys-hint',
         'aria-label': `${r.label} chart over the last 90 days; focus it and use the arrow keys to read day by day`,
       });
+      // `background-color`, not the `background` shorthand: the shorthand resets background-image
+      // to none, and an inline declaration outranks any selector, so the hatch rule in index.html
+      // never applied — the chart drew a hatched band the key beside it did not (B5).
       const keys = appH('div', { class: 'keys' }, series.length > 1 ? series.map((s) => appH('span', {}, [
-        appH('i', { class: `key-mark ${s.marker}${s.pattern === 'hatch' ? ' hatch' : ''}`, style: `background:${s.color}` }), document.createTextNode(s.label),
+        appH('i', { class: `key-mark ${s.marker}${s.pattern === 'hatch' ? ' hatch' : ''}`, style: `background-color:${s.color}` }), document.createTextNode(s.label),
       ])) : []);
       const ghostKey = appH('span', { class: 'ghost-key', hidden: true }, [appH('i', { class: 'dash' }), document.createTextNode('previous run (dashed)')]);
       keys.append(ghostKey);
@@ -6952,10 +7672,18 @@ class TissueApp {
     this.syncReferenceUI();
   }
 
-  /** The keyboard crosshair speaks: mirror the tooltip into the status region (C4). */
+  /**
+   * The keyboard crosshair speaks: mirror the tooltip into the status region (C4) — but only once
+   * the key comes to rest. Auto-repeat delivers ~30 keydowns a second and each one moved the
+   * crosshair one sample, so a held arrow rewrote the polite region 30 times a second with a
+   * four-to-six-line reading: a reader that queues rather than coalesces would still be talking
+   * long after the key was released.
+   */
   onPlotHover(readout, lines, source) {
     if (source !== 'key' || !lines || !lines.length) return;
-    this.announce(`${readout.label}, ${lines.join(', ')}`, true);
+    const text = `${readout.label}, ${lines.join(', ')}`;
+    clearTimeout(this.hoverTimer);
+    this.hoverTimer = setTimeout(() => this.announce(text, true), APP_HOVER_SAY_MS);
   }
 
   /** What the third flux bar and its table row are called: the tissue's word, else a neutral one. */
@@ -7028,7 +7756,10 @@ class TissueApp {
     ]));
     // the last five days as numbers (C4): a chart is a picture, and "is it still rising?" needs
     // more than the latest value. Filled only while the details is open.
-    this.historyOut = appH('div', { class: 'history-out' });
+    // The box scrolls sideways (434 px of columns in a 355 px console), so it is a NAMED region
+    // and — while it actually overflows — a tab stop: without one, the last day is unreachable
+    // for a keyboard user in Firefox and Safari (WCAG 2.1.1, axe scrollable-region-focusable).
+    this.historyOut = appH('div', { class: 'history-out', role: 'region', tabindex: '-1', 'aria-label': 'Last five days, scroll sideways for the later days' });
     this.historyBox = appH('details', { class: 'history' }, [appH('summary', { text: 'Last five days as a table' }), this.historyOut]);
     this.historyBox.addEventListener('toggle', () => this.renderHistory());
     box.append(this.historyBox);
@@ -7070,9 +7801,11 @@ class TissueApp {
       appH('thead', {}, [appH('tr', {}, [appH('th', { scope: 'col', text: 'Series' }), ...days.map((d) => appH('th', { scope: 'col', text: `d ${d}` }))])]),
       appH('tbody', {}, rows),
     ]));
+    appScrollable(out, 'x');
   }
   renderTable(now) {
     this.lastTableAt = now;
+    appScrollable(appEl('stats-table'), 'x');
     if (this.stats) this.tableCaption.textContent = `Latest values, day ${this.stats.t.toFixed(1)}`;
     for (const c of this.tableCells) {
       const v = c.getter();
@@ -7132,15 +7865,51 @@ class TissueApp {
     });
     rot.addEventListener('click', () => this.setAutoRotate(!this.autoRotate, true));
     this.layerButtons['auto-rotate'] = rot; box.append(rot);
+    this.buildCamera();
+  }
+
+  /**
+   * Orbit, zoom and recentre without dragging: the single-pointer alternative to the drag gesture
+   * the 3D view otherwise needs (WCAG 2.5.7 Dragging Movements), and the same moves the arrow
+   * keys make on the focused canvas. Rebuilt whenever the layer row is, and again once the
+   * renderer has loaded (initRenderer), because until then there is nothing to drive.
+   */
+  buildCamera() {
+    const box = appEl('layers');
+    if (!box) return;
+    const old = box.querySelector('.cam-group');
+    if (old) old.remove();
+    const r = this.renderer;
+    const items = APP_CAMERA.filter(([, , , method]) => r && typeof r[method] === 'function');
+    if (!items.length) return;
+    const row = appH('div', { class: 'cam-group', role: 'group', 'aria-label': '3D camera' });
+    for (const [id, glyph, name, method, args] of items) {
+      const b = appH('button', {
+        class: 'chip', type: 'button', id: `btn-${id}`, 'aria-label': name,
+        title: `${name}. With the 3D view focused the arrow keys, + and − and Home do the same.`,
+      }, [appH('span', { 'aria-hidden': 'true', text: glyph })]);
+      b.addEventListener('click', () => {
+        // a move the viewer asked for beats the rotation they did not: stop auto-rotate first,
+        // exactly as a drag or an arrow key on the canvas does
+        if (this.autoRotate) this.setAutoRotate(false, true);
+        try { this.renderer[method](...args(APP_CAMERA_STEP)); } catch (e) { /* renderer torn down */ }
+      });
+      row.append(b);
+    }
+    box.append(row);
   }
 
   /** Auto-rotate, from the chip or from the renderer (a drag or a key press stops it). */
   setAutoRotate(on, fromUi) {
+    const was = this.autoRotate;
     this.autoRotate = !!on;
     const b = this.layerButtons['auto-rotate'];
     if (b) b.setAttribute('aria-pressed', String(this.autoRotate));
     if (fromUi && this.renderer && typeof this.renderer.setAutoRotate === 'function') this.renderer.setAutoRotate(this.autoRotate);
     if (fromUi) this.scheduleUrl();
+    // a state change nobody asked for out loud: dragging or an arrow key on the canvas stops the
+    // rotation, and the chip's aria-pressed flips silently. Say it once.
+    else if (was && !this.autoRotate) this.announce('Automatic rotation stopped. The auto-rotate chip under the view turns it back on.', true);
   }
 
   defaultSwatches() {
@@ -7161,6 +7930,9 @@ class TissueApp {
     // optional scale cue (C13): a definition that knows how big its cube is says so
     const um = Number(t.domainMicrons);
     if (Number.isFinite(um) && um > 0) rows.push(appH('li', { class: 'legend-row legend-scale' }, [appH('span', { class: 'swatch scale-swatch', 'aria-hidden': 'true' }), appH('span', { text: `Cube edge ≈ ${um >= 1000 ? `${(um / 1000).toFixed(um % 1000 ? 1 : 0)} mm` : `${Math.round(um)} µm`}` })]));
+    // the legend is capped against the stage and scrolls inside that cap (layoutLegend), so it
+    // needs a name and — while it actually scrolls — a tab stop of its own
+    box.setAttribute('aria-label', 'Colour key and how to read the view');
     box.append(appH('ul', { class: 'legend-swatches', 'aria-label': 'Colour key' }, rows));
     // "How to read the view": every string the definition put in copy.legend, in its own
     // order — fibers, cells, scaffold, gel, load and each key under `fields` — not a fixed
@@ -7177,6 +7949,7 @@ class TissueApp {
     if (guide.length) {
       box.append(appH('details', { class: 'legend-guide' }, [appH('summary', { text: 'How to read the view' }), appH('ul', {}, guide.map((g) => appH('li', { text: g })))]));
     }
+    this.layoutLegend();
   }
 
   /**
@@ -7205,7 +7978,9 @@ class TissueApp {
       })]),
     ]);
     box.replaceChildren(body, dismiss || '');
-    box.hidden = this.hasPlayed;
+    // "Got it" means got it: this is re-derived on every tissue switch, so without the flag the
+    // card came back the moment the student tried the second tissue
+    box.hidden = this.hasPlayed || this.hintDismissed;
   }
 
   /** Open the About details and put it in view (the hint's "What am I looking at?" button). */
@@ -7231,6 +8006,17 @@ class TissueApp {
     }
     ab.append(appH('h3', { text: 'Keyboard' }));
     ab.append(appH('ul', { class: 'keys-list' }, APP_KEYS.map(([k, what]) => appH('li', {}, [appH('kbd', { text: k }), document.createTextNode(` ${what}`)]))));
+    // WCAG 2.1.4 asks for a way to turn single-character shortcuts off (dictation puts every
+    // spoken letter through as a keystroke: with focus on the page, an "r" restarts the run).
+    // Space is a standard activation key and is never gated.
+    const shortcutChip = appH('button', {
+      type: 'button', class: 'chip', id: 'opt-shortcuts', 'aria-pressed': String(this.shortcuts),
+      text: 'Single-key shortcuts',
+      title: 'R, I, P and 1–9. Turn them off if you use dictation or a switch that sends letters. Space always plays and pauses.',
+      onclick: () => this.setShortcuts(!this.shortcuts, true),
+    });
+    ab.append(appH('p', { class: 'note' }, [shortcutChip]));
+    ab.append(appH('p', { class: 'note', text: 'The single letters and digits above work while nothing is being typed into. Turn them off with the button and only Space, Tab and the arrow keys on a focused control stay.' }));
     ab.append(appH('p', { class: 'note', text: 'Drag the 3D view to orbit, scroll to zoom. With the view focused, the arrow keys orbit, + and − zoom and Home reframes it. Hover a chart for exact values, or focus it and walk the crosshair with the arrow keys; the Table button under the readouts lists the same numbers as text.' }));
     ab.append(appH('div', { class: 'tools' }, [
       appH('button', { type: 'button', text: 'Export trajectory (JSON for Blender)', onclick: () => this.exportJSON() }),
@@ -7241,10 +8027,23 @@ class TissueApp {
   }
 
   // ---------- renderer ----------
+  /**
+   * WebGL never arrived, so the canvas is a picture and nothing else: it must stop promising the
+   * camera keys it can no longer honour (4.1.2). The live description stays — it is the tissue's
+   * state in words, which is exactly what is left when the picture is gone.
+   */
+  viewIsInert() {
+    const c = appEl('view');
+    if (c) { c.removeAttribute('aria-describedby'); c.removeAttribute('aria-keyshortcuts'); }
+    const hint = appEl('view-keys-hint');
+    if (hint) hint.hidden = true;
+  }
+
   async initRenderer() {
     const canvas = appEl('view');
     if (!appHasWebGL()) {
       this.rendererState = 'failed';
+      this.viewIsInert();
       this.showNotice('3D view unavailable', 'This browser could not create a WebGL context, so the tissue cannot be drawn. The simulation, dials, readouts and values table still work. Try another browser, or enable hardware acceleration in the browser settings.');
       canvas.setAttribute('aria-label', '3D view unavailable: WebGL is not available in this browser. The readouts and values table still describe the tissue.');
       return;
@@ -7253,6 +8052,7 @@ class TissueApp {
     try { Ctor = await appLoadRenderer(); }
     catch (e) {
       this.rendererState = 'failed';
+      this.viewIsInert();
       this.showNotice('Could not load the 3D library', `Three.js did not load from cdn.jsdelivr.net (${(e && e.message) || 'network error'}). The simulation, dials and readouts still run.`, appH('p', { html: APP_OFFLINE_HTML }));
       canvas.setAttribute('aria-label', '3D view unavailable: the Three.js library did not load. The readouts and values table still describe the tissue.');
       this.flash('The 3D view could not load; the readouts still run.');
@@ -7267,12 +8067,14 @@ class TissueApp {
     }
     catch (e) {
       this.rendererState = 'failed';
+      this.viewIsInert();
       this.showNotice('3D view unavailable', `The WebGL renderer could not start (${(e && e.message) || 'unknown error'}). The simulation, dials and readouts still run.`);
       return;
     }
     if (this.tissue && typeof this.renderer.setTissue === 'function') this.renderer.setTissue(this.tissue);
     this.rendererState = 'ready';
     this.buildLegend();
+    this.buildCamera();          // the camera chips exist only once there is a camera to drive
     // the camera is keyboard-operable (B2); give the pointer the same way back to the default view
     if (typeof this.renderer.resetView === 'function') {
       const b = appEl('btn-view');
@@ -7513,11 +8315,24 @@ class TissueApp {
     // trend has held for a second and not more often than every APP_TREND_MS, because the first
     // days of a run cross the thresholds several times — and otherwise at most once every
     // APP_STATUS_MS while the clock runs. Pauses, steps and scenario loads announce on their own.
+    // …and never within APP_STATUS_FLOOR_MS of ANY previous announcement while the clock runs: the
+    // trend path was gated only by its own 5 s timer, so a flip could land 1.1 s after "Playing at
+    // 20 days per second" or 2.5 s after a routine reading, repeating a sentence whose first
+    // seventy characters were identical. A sentence identical to the last one said is skipped
+    // outright — a threshold crossed and re-crossed is not news.
     if (trend !== this.pendingTrend) { this.pendingTrend = trend; this.pendingTrendAt = now; }
+    const floor = this.playing ? APP_STATUS_FLOOR_MS : 0;
     const turned = trend !== this.lastTrend && this.lastTrend !== null
-      && now - this.pendingTrendAt >= APP_TREND_HOLD_MS && now - this.lastTrendSaidAt >= APP_TREND_MS;
-    if (turned) { this.lastTrendSaidAt = now; this.announce(`Day ${s.t.toFixed(1)}. ${this.sentence(s)}`, true); }
-    else if (this.playing && now - this.lastStatusAt >= APP_STATUS_MS) this.announce(`Day ${s.t.toFixed(1)}. ${this.sentence(s)}`);
+      && now - this.pendingTrendAt >= APP_TREND_HOLD_MS && now - this.lastTrendSaidAt >= APP_TREND_MS
+      && now - this.lastStatusAt >= floor;
+    const line = this.sentence(s);
+    if (turned) {
+      this.lastTrendSaidAt = now;
+      if (line !== this.lastSaidSentence) { this.lastSaidSentence = line; this.announce(`Day ${s.t.toFixed(1)}. ${line}`, true); }
+    } else if (this.playing && now - this.lastStatusAt >= APP_STATUS_MS) {
+      this.lastSaidSentence = line;
+      this.announce(`Day ${s.t.toFixed(1)}. ${line}`);
+    }
     if (turned || this.lastTrend === null || now - this.pendingTrendAt >= APP_TREND_HOLD_MS) this.lastTrend = trend;
     if (force || now - this.lastLabelAt > APP_LABEL_MS) {
       appEl('view').setAttribute('aria-label', this.describe(s));
@@ -7526,16 +8341,13 @@ class TissueApp {
     if (this.tableOn && (force || now - this.lastTableAt > APP_TABLE_MS)) { this.renderTable(now); this.renderHistory(); }
   }
 
-  /** The flux gauge as text for the value beside its title: "0.05/d vs 0.02/d · 2.50 ×". */
-  gaugeValueText() {
-    const s = this.stats;
-    if (!s) return '';
-    const ratio = (s.deposition + 1e-9) / (s.degradation + 1e-9);
-    const r = ratio > 99 ? '>99' : ratio.toFixed(2);
-    let out = `${copyFormatRate(s.deposition)} vs ${copyFormatRate(s.degradation)} · ${r} ×`;
-    if (Number.isFinite(s.scaffoldFlux) && s.scaffoldFlux > 0) out += ` · ${copyFormatRate(s.scaffoldFlux)}`;
-    return out;
-  }
+  /**
+   * The flux gauge as text for the value beside its title: "0.05/d vs 0.02/d · 2.50 ×". The gauge
+   * itself owns the wording, so the tissue's own word for a dissolving scaffold
+   * (`copy.gauge.scaffold`) reaches the DOM value and not only the canvas — this text is what a
+   * screen reader gets instead of the picture.
+   */
+  gaugeValueText() { return this.gauge && typeof this.gauge.describe === 'function' ? this.gauge.describe() : ''; }
 
   // ---------- screen-reader status region (C3) ----------
   /**
@@ -7613,6 +8425,9 @@ class TissueApp {
     for (const p of this.plots) { p.plot.spec.fontPx = fontPx; p.plot.draw(); }
     if (this.gauge && typeof this.gauge.setFontPx === 'function') this.gauge.setFontPx(fontPx);
     if (this.renderer && typeof this.renderer.resize === 'function') this.renderer.resize();
+    // the sentence and the clock grow, so the HUD is taller and the legend has less room; the
+    // console's type grows too, so the sticky header is taller
+    this.measureRun(); this.layoutLegend();
     if (fromUi) {
       this.scheduleUrl();
       this.announce(this.present ? 'Presentation mode on: bigger sentence and clock, hints hidden.' : 'Presentation mode off.', true);

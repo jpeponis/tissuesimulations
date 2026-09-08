@@ -114,6 +114,41 @@ describe('format-2 export (docs/EXTENDING.md §5)', () => {
     });
   }
 
+  // v0.4: a field's `pointScale` / `style` render hints travel with the export, so an offline
+  // renderer draws the haze the browser drew (blender/import_tissue.py normalise_fields reads
+  // them). They are emitted ONLY when the definition declares one, which is why the two shipped
+  // tissues' exports did not change shape when the writer gained this.
+  test('a field\'s render hints are exported only when the definition declares them', { skip }, () => {
+    const base = TISSUES.fibrous;
+    for (const f of new TissueEngine(base, { seed: 7 }).exportMeta().fields) {
+      assert.deepEqual(Object.keys(f).sort(), ['color', 'key', 'label'], 'no hint declared, no hint emitted');
+    }
+    const hinted = Object.assign({}, base, {
+      fields: base.fields.map((f, i) => (i === 0 ? Object.assign({}, f, { pointScale: 1.4, style: 'points' }) : f)),
+    });
+    const meta = new TissueEngine(hinted, { seed: 7 }).exportMeta();
+    assert.equal(meta.fields[0].pointScale, 1.4);
+    assert.equal(meta.fields[0].style, 'points');
+    assert.ok(!('pointScale' in meta.fields[1]), 'a field that declares nothing stays as it was');
+
+    // the reader takes the value rather than defaulting it, and the file still parses
+    const dir = mkdtempSync(join(tmpdir(), 'tw-hint-'));
+    try {
+      const { traj } = exportTrajectory(hinted);
+      const file = join(dir, 'hinted.json');
+      writeFileSync(file, JSON.stringify(traj));
+      assert.match(dryRun(file), /dry run: format 2/);
+      const read = execFileSync('python3', ['-c', [
+        'import importlib.util, json, sys',
+        "spec = importlib.util.spec_from_file_location('it', sys.argv[1])",
+        'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)',
+        "meta = json.load(open(sys.argv[2]))['meta']",
+        'print(json.dumps([f["pointScale"] for f in m.normalise_fields(meta["fields"], [])]))',
+      ].join('\n'), IMPORTER, file], { encoding: 'utf8' });
+      assert.deepEqual(JSON.parse(read), [1.4, 1], 'the importer reads the declared scale and defaults the other');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test('the committed sample trajectories still read', { skip }, () => {
     const fixtures = ['sample_trajectory.json', 'sample_trajectory_cartilage.json']
       .map((f) => join(root, 'blender', f)).filter(existsSync);

@@ -71,7 +71,8 @@ function copyNum(v) {
  *   thresholds      { quiet, active, empty, stiffKPa, condensing, evaporating, still } — where the
  *                   sentence switches. `condensing` / `evaporating` are deposition/degradation
  *                   ratios, `stiffKPa` a stiffness in kPa, `still` the rate below which both
- *                   fluxes count as zero
+ *                   fluxes count as zero, `empty` the density below which there is no matrix yet
+ *                   (measured on species.tissueTotal, i.e. WITHOUT an undissolved scaffold)
  *   equilibrium     optional (stats, V) => string, a complete replacement for the sentence; a
  *                   falsy or non-string return falls back to the generic one
  *   scaffoldNoun    (read by the app) name of the third flux bar for a tissue whose scaffold dissolves
@@ -112,7 +113,13 @@ function copyReadStats(stats, V) {
   const dep = Math.max(0, copyNum(s.deposition));
   const deg = Math.max(0, copyNum(s.degradation));
   const alpha = copyNum(s.cells ? s.cells.a : s.meanAlpha);
-  const rho = copyNum(s.species ? s.species.total : s.meanRho);
+  // What counts as "matrix" here is what the CELLS have built. A tissue whose cube starts full of
+  // an undissolved scaffold (a hydrogel trellis) reports `species.tissueTotal` — the same total
+  // minus every scaffold species — and the sentence keys off that, so day 0 of such a tissue reads
+  // "hardly any … yet" instead of counting the trellis as matrix. A tissue with no scaffold
+  // species has tissueTotal === total, and the v0.1 shape (meanRho) is unchanged.
+  const sp = s.species || null;
+  const rho = copyNum(sp ? (Number.isFinite(sp.tissueTotal) ? sp.tissueTotal : sp.total) : s.meanRho);
   const logE = s.logE !== undefined ? s.logE : s.meanLogE;
   const E = Number.isFinite(logE) ? Math.pow(10, logE) : NaN;
   const tiny = T.still;
@@ -120,7 +127,10 @@ function copyReadStats(stats, V) {
   const ratio = deg > tiny ? dep / deg : dep > tiny ? Infinity : 1;
   const trend = still ? 'still' : ratio > T.condensing ? 'condensing' : ratio < T.evaporating ? 'evaporating' : 'steady';
   const cells = alpha < T.quiet ? 'quiet' : alpha > T.active ? 'activated' : 'partly';
-  return { dep, deg, alpha, rho, E, ratio, trend, cells, empty: rho < T.empty, stiff: Number.isFinite(E) && E >= T.stiffKPa };
+  const empty = rho < T.empty;
+  // "…and the matrix around them is already stiff" is a claim about the matrix the CELLS built, so
+  // it cannot be made while there is none: a fresh hydrogel is 30–60 kPa on the trellis alone.
+  return { dep, deg, alpha, rho, E, ratio, trend, cells, empty, stiff: Number.isFinite(E) && E >= T.stiffKPa && !empty };
 }
 
 /**
@@ -148,7 +158,7 @@ export function copyTrend(stats, vocabulary) {
  * < thresholds.evaporating evaporating, otherwise holding shape ("still" below
  * thresholds.still on both mean rates). Cells: below thresholds.quiet quiet,
  * above thresholds.active working. Empty: density < thresholds.empty.
- * Stiff: E >= thresholds.stiffKPa.
+ * Stiff: E >= thresholds.stiffKPa AND there is matrix to be stiff (density >= thresholds.empty).
  */
 export function copyEquilibriumSentence(stats, vocabulary) {
   const V = copyVocabulary(vocabulary);

@@ -1,8 +1,9 @@
 // Tissue Weather — 3D renderer (EXTENDING.md §4). ES module, named exports only.
 // Draws whatever a tissue definition describes: fiber species (oriented rods),
 // gel species (translucent haze), scaffold species (dissolving lattice), cell
-// types (ellipsoids), diffusible fields (point clouds), load arrows (only when
-// the tissue has a dial with role 'load') and the domain cube — three.js r160.
+// types (ellipsoids), diffusible fields (instanced haze blobs or point sprites),
+// load arrows (only when the tissue has a dial with role 'load') and the domain
+// cube — three.js r160.
 //
 // Public API:
 //   new TissueRenderer(canvasEl, opts)   opts: see the defaults in the constructor
@@ -16,12 +17,18 @@
 //   .resize()                            fit canvas to its parent, keep the cube framed (aspect 0.6 … 2.4)
 //   .setAutoRotate(bool)                 fires opts.onAutoRotate(bool) when the value changes
 //   .resetView()                         camera back to the default framing (Home key, "Reset view" button)
+//   .orbit(dTheta, dPhi)                 orbit by radians (opts.keyOrbitStep is the arrow-key step)
+//   .dolly(factor)                       distance × factor (opts.keyDollyStep is the +/− step)
+//   Those three are the whole camera API: an on-screen orbit/zoom control (the single-pointer
+//   alternative to dragging, WCAG 2.5.7) needs no other renderer internals.
 //   .layoutParams()                      the fiber recipe actually in use → export meta.render (src/recipe.js)
 //   .markDirty()                         force the next update() to rebuild (see the dirty check below)
 //   .screenshot()                        → PNG data URL of the current frame
 //   .legendSwatches()                    → [{ key, kind, label, css }] for the app legend
 //   .dispose()
 //   .stats                               read-only { updateMs, updates, skipped, fibersVisible, cells, gelVisible, strutsVisible }
+//   .hintWarnings                        read-only [string] — `render` hint keys the last setTissue
+//                                        ignored because the species' kind does not honour them
 //   TissueRenderer.tissueFromState(state) fallback definition when no tissue was set (all species as grey fibers)
 //
 // Dirty check (docs/REVIEW.md B1). update() rebuilds instance buffers only when something it
@@ -38,6 +45,24 @@
 // alone so the app's shortcuts still reach it; any key on the canvas stops auto-rotate, like a
 // pointerdown (WCAG 2.2.2), through setAutoRotate → opts.onAutoRotate.
 //
+// Field haze (docs/REVIEW.md §5). A diffusible field is drawn as one blob per voxel, and there
+// are two ways to draw it. `fieldStyle: 'spheres'` (the default) puts an INSTANCED SPHERE at
+// each voxel, through the same haze shader the gel uses; `'points'` is the v0.1 gl_PointSize
+// sprite cloud. The sprite is one vertex per blob and cheaper to draw, but its size is a POINT
+// SIZE, which every driver clamps at its own limit (ANGLE/SwiftShader allow 220 px, some mobile
+// GL drivers stop at 64) — the same scene then reads differently on different machines, which
+// is the §5 complaint. A sphere has a world size and no such ceiling.
+//
+// The sphere is tuned to REPLACE the sprite, not to look new: same law for the size
+// (0.35 + 0.65·value) and the alpha (0.2 + 0.8·value), flat unlit colour, no fog and no depth
+// cue (fieldFog / fieldDepthCue, both off, are what the sprite cloud does), and a diameter of
+// `fieldSphereDiameter` × the sprite's. That factor is 1.1 because the sprite's gaussian fills
+// a SQUARE quad and the sphere only a disc; measured on one field (cartilage IL-1, N = 12,
+// 1280×800) the two then agree to a rounding error: mean luminance 40.3 vs 40.3, lit fraction
+// 0.265 vs 0.264, hue fraction 0.226 vs 0.225. Cost, same scene on SwiftShader: about 30 % of
+// the frame — `fieldDetail: 0` (20 triangles instead of 80) or `fieldStyle: 'points'` buys it
+// back on a machine that needs it.
+//
 // Colour (docs/REVIEW.md E4). The definition's hex IS the colour: fiber/cell/gel saturation
 // factors default to 1.0, and legendSwatches() puts each hex through the same exposure and tone
 // curve as the GPU (a CPU copy of three's ACES / AgX), so a swatch matches the unlit colour of
@@ -45,7 +70,7 @@
 // the rim term and the depth cue are NOT applied — a lit fiber is brighter than its swatch.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RECIPE_FIBER, recipeFiberLayout, recipeFiberScales, recipeFiberRadius, recipeFiberLength, recipeFiberFade, recipeFiberDir, recipeRenderMeta } from './recipe.js';
+import { RECIPE_FIBER, recipeRng, recipeFiberLayout, recipeFiberScales, recipeFiberRadius, recipeFiberLength, recipeFiberFade, recipeFiberDir, recipeRenderMeta } from './recipe.js';
 
 // Depth cue (Beer–Lambert): path length from an instance centre to the face of
 // the unit block along the direction toward the camera. Instances seen deep in
@@ -220,7 +245,26 @@ export class TissueRenderer {
       keyIntensity: 1.6, fillIntensity: 0.3, hemiIntensity: 0.55,
       keyColor: 0xfff1dc, fillColor: 0x8fb0ff, hemiSky: 0xc9d6ea, hemiGround: 0x3a2a1c,
       pointBlending: 'normal', // 'normal' | 'additive'
-      pointOpacity: 0.45, pointSize: 1.8, // field point clouds (size × h)
+      pointOpacity: 0.45, pointSize: 1.8, // diffusible field haze: blob diameter = pointSize × h
+      pointMin: 0.02,         // hide a field voxel below this value (both styles)
+      // --- field haze style (docs/REVIEW.md §5: gl_PointSize is device-dependent) ------------
+      // 'spheres' draws one instanced sphere per voxel, sized and faded like the sprite it
+      // replaces; 'points' is the v0.1 gl_PointSize sprite cloud, which a driver may clamp to
+      // its own point-size limit (SwiftShader and most desktop GL allow 220+, some mobile
+      // drivers stop at 64) and which cannot be shadowed, fogged or depth-cued. A field may ask
+      // for a style of its own with `fields[i].style`; an explicit `fieldStyle` opt wins.
+      fieldStyle: 'spheres',  // 'spheres' | 'points'
+      // The sphere is tuned to LOOK like the sprite it replaces, so switching styles is not a
+      // change of visual language: same diameter, and alpha ∝ (1 − (d/R)²)^(edgeFade/2) across
+      // the disc, which at edgeFade 3.5 tracks the sprite's exp(−8·d²) gaussian to a few percent.
+      fieldSphereDiameter: 1.1, // × the sprite diameter (pointSize · h · pointScale): the sprite's
+                              // square quad covers its corners too, so the disc needs 10 % more
+                              // width to lay down the same haze (measured, see the header)
+      fieldEdgeFade: 3.5,     // alpha ∝ |n·v|^fade — the soft, gaussian-like falloff
+      fieldAmbient: 1.0, fieldDiffuse: 0.0, fieldRim: 0.0,  // flat, like the sprite: a field is not lit
+      fieldDepthCue: 0,       // the sprite cloud takes no depth cue; 0 keeps the haze even
+      fieldFog: false,        // …and no fog, for the same reason
+      fieldDetail: 1,         // IcosahedronGeometry detail (0 = 20 triangles, 1 = 80)
       wireColor: 0x4a5a70,
       loadColor: '#d9c9a3',
       // --- wound marker (state.wound; hidden when the state has none) ---
@@ -230,6 +274,9 @@ export class TissueRenderer {
       woundFadeDays: 7,       // … decaying with this time constant (opacity = 0.15 + 0.55·e^(−age/7))
       woundGhost: 0.35,       // × that opacity, drawn again without depth test so the outline reads
                               // through the matrix in front of it (0 = only the occluded version)
+      woundGhostMin: 0.12,    // …but never fainter than this: at woundOpacity 0.15 the decayed
+                              // ghost is 0.05, which is below the visibility floor in a dense
+                              // tangle (round-3 review B, finding 7). 0 = pure decay, as in v0.4.
       woundMeridians: 6, woundRings: 3, woundSegments: 48,
     }, opts);
     if (this.opts.autoRotate === undefined) this.opts.autoRotate = !reduced;
@@ -335,6 +382,17 @@ export class TissueRenderer {
       opacity: this.opts.scaffoldOpacity, edgeFade: this.opts.scaffoldEdgeFade,
       ambient: this.opts.scaffoldAmbient, diffuse: this.opts.scaffoldDiffuse, rim: this.opts.scaffoldRim,
     });
+    // one material for every field of the sphere style (the colour is per instance, the rest is
+    // shared); built even when the points style is selected, so a later setTissue can switch
+    this.fieldMat = this._makeHazeMaterial({
+      opacity: this.opts.pointOpacity, edgeFade: this.opts.fieldEdgeFade,
+      ambient: this.opts.fieldAmbient, diffuse: this.opts.fieldDiffuse, rim: this.opts.fieldRim,
+    });
+    // its own depth-cue uniform (not the shared one) and no fog: a diffusible field is a glow,
+    // not a surface, and the sprite cloud it replaces was subject to neither
+    this.fieldMat.uniforms.uDepthCue = { value: +this.opts.fieldDepthCue || 0 };
+    this.fieldMat.fog = !!this.opts.fieldFog;
+    if (this.opts.pointBlending === 'additive') { this.fieldMat.blending = THREE.AdditiveBlending; this.fieldMat.depthWrite = false; }
 
     // --- static scenery: wire cube, load arrows ------------------------------
     const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
@@ -364,6 +422,7 @@ export class TissueRenderer {
     this._gelFade = 0;
     // optional per-species `render` hints (EXTENDING §1, B5), collapsed to one set per kind
     this._fiberHint = TissueRenderer._noHint(); this._gelHint = TissueRenderer._noHint(); this._scafHint = TissueRenderer._noHint();
+    this.hintWarnings = [];   // filled by setTissue: `render` keys a species' kind ignores
     this._gelStyle = this.opts.gelStyle;
     this._fiberSc = recipeFiberScales(1, null);   // replaced per grid in _buildFibers
     this._dir3 = new Float64Array(3);             // scratch for recipeFiberDir (no per-instance allocation)
@@ -384,17 +443,6 @@ export class TissueRenderer {
 
   // ---------------------------------------------------------------------------
   // helpers
-
-  // Seeded PRNG (mulberry32) so per-instance jitter is reproducible.
-  static _rng(seed) {
-    let a = seed >>> 0;
-    return function () {
-      a = (a + 0x6D2B79F5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
 
   // Scale saturation of a linear-RGB triple around its luminance (1 = unchanged).
   static _saturate(rgb, sat) {
@@ -420,7 +468,6 @@ export class TissueRenderer {
     const sat = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
     // NoToneMapping drops the whole tonemapping_fragment include, exposure and all
     if (mode === 'none') return [sat(rgb[0]), sat(rgb[1]), sat(rgb[2])];
-    let r = rgb[0] * exposure, g = rgb[1] * exposure, b = rgb[2] * exposure;
     if (mode === 'agx') {
       // LINEAR_SRGB_TO_LINEAR_REC2020 is applied BEFORE the exposure in three r160
       let x = 0.6274 * rgb[0] + 0.3293 * rgb[1] + 0.0433 * rgb[2];
@@ -449,8 +496,8 @@ export class TissueRenderer {
         sat(-0.1246 * pr + 1.1329 * pg - 0.0083 * pb),
         sat(-0.0182 * pr - 0.1006 * pg + 1.1187 * pb)];
     }
-    // ACESFilmicToneMapping
-    r /= 0.6; g /= 0.6; b /= 0.6;
+    // ACESFilmicToneMapping: exposure, then three's own /0.6 pre-scale
+    const r = rgb[0] * exposure / 0.6, g = rgb[1] * exposure / 0.6, b = rgb[2] * exposure / 0.6;
     const ir = 0.59719 * r + 0.35458 * g + 0.04823 * b;
     const ig = 0.07600 * r + 0.90834 * g + 0.01566 * b;
     const ib = 0.02840 * r + 0.13383 * g + 0.83777 * b;
@@ -472,18 +519,44 @@ export class TissueRenderer {
   }
 
   /**
+   * Which `render` hint keys each species kind actually honours (EXTENDING §1, B5). A key that a
+   * kind does not honour is a DEAD OPTION — the renderer says so through hintWarnings and
+   * console.warn rather than silently dropping it (docs/REVIEW.md round-3 review B, finding 4).
+   *
+   *   kind       minDensity            radiusScale               opacity                 style
+   *   fiber      fade-in threshold     × opts.fiberRadiusScale   fiber material alpha    —
+   *   gel        hide below            × opts.gelSize/PointSize  × opts.gelOpacity       'spheres' | 'points'
+   *   scaffold   hide struts below     × opts.scaffoldRadius     × opts.scaffoldOpacity  —
+   *
+   * `style` is gel-only: fibers are rods and scaffold struts are cylinders, neither has a second
+   * representation to switch to. Fields carry their own `pointScale` / `style` (fields[], not
+   * species[]), which _buildFields reads.
+   */
+  static _hintKeys(kind) {
+    return kind === 'gel' ? ['minDensity', 'radiusScale', 'opacity', 'style'] : ['minDensity', 'radiusScale', 'opacity'];
+  }
+
+  /**
    * Collapse the optional `render` hints of one species group into one set (EXTENDING §1, B5).
    * A kind is drawn by ONE instanced layer whose instances mix every species of that kind, so a
    * hint cannot be per species on screen: `minDensity` takes the LOWEST value declared (the
    * layer must appear as soon as any of its species should), `radiusScale` and `opacity` the
    * MEAN of the declared ones, `style` the first declared. Undeclared → the renderer opt.
+   * `warn` (an array) collects one message per hint key this kind ignores, so a typo or a
+   * gel-only key on a fiber species is loud instead of inert.
    */
-  static _hintOf(defs) {
+  static _hintOf(defs, kind = 'fiber', warn = null) {
     const h = TissueRenderer._noHint();
+    const honoured = TissueRenderer._hintKeys(kind);
     let rs = 0, rsN = 0, op = 0, opN = 0;
     for (const s of defs) {
       const r = s && s.render;
       if (!r || typeof r !== 'object') continue;
+      if (warn) {
+        for (const k of Object.keys(r)) {
+          if (!honoured.includes(k)) warn.push(`species '${s.key}' (kind ${kind}): render.${k} is ignored for this kind (honoured: ${honoured.join(', ')})`);
+        }
+      }
       const md = +r.minDensity;
       if (Number.isFinite(md) && md >= 0) h.minDensity = h.minDensity === null ? md : Math.min(h.minDensity, md);
       const sc = +r.radiusScale;
@@ -740,7 +813,8 @@ export class TissueRenderer {
     const fade = this.opts.woundFadeDays > 0 ? Math.exp(-age / this.opts.woundFadeDays) : 0;
     const op = this.opts.woundOpacity + this.opts.woundOpacityPeak * fade;
     W.mat.opacity = op;
-    if (W.ghostMat) W.ghostMat.opacity = op * this.opts.woundGhost;
+    // the ghost pass keeps a floor: the healed outline is the thing a student is asked to find
+    if (W.ghostMat) W.ghostMat.opacity = Math.max(+this.opts.woundGhostMin || 0, op * this.opts.woundGhost);
     W.obj.visible = true;
   }
 
@@ -755,14 +829,25 @@ export class TissueRenderer {
     const rawFiber = species.filter((s) => (s.kind || 'fiber') === 'fiber');
     const rawGel = species.filter((s) => s.kind === 'gel');
     const rawScaf = species.filter((s) => s.kind === 'scaffold');
-    this._fiberHint = TissueRenderer._hintOf(rawFiber);
-    this._gelHint = TissueRenderer._hintOf(rawGel);
-    this._scafHint = TissueRenderer._hintOf(rawScaf);
+    const warn = [];
+    this._fiberHint = TissueRenderer._hintOf(rawFiber, 'fiber', warn);
+    this._gelHint = TissueRenderer._hintOf(rawGel, 'gel', warn);
+    this._scafHint = TissueRenderer._hintOf(rawScaf, 'scaffold', warn);
+    this.hintWarnings = warn;   // dead `render` keys, also reported once through console.warn
+    if (warn.length && typeof console !== 'undefined' && console.warn) for (const w of warn) console.warn('TissueRenderer: ' + w);
     // an explicit gelStyle opt wins over a species hint; otherwise the definition may ask for points
     this._gelStyle = (!this._optSet.has('gelStyle') && (this._gelHint.style === 'points' || this._gelHint.style === 'spheres'))
       ? this._gelHint.style : this.opts.gelStyle;
     this.gelMat.uniforms.uOpacity.value = this.opts.gelOpacity * this._gelHint.opacity;
     this.scaffoldMat.uniforms.uOpacity.value = this.opts.scaffoldOpacity * this._scafHint.opacity;
+    // fiber `opacity`: the rods are a lit MeshStandardMaterial, so the hint is the material's own
+    // alpha (depthWrite stays on — instanced rods are not sorted, and a see-through tangle without
+    // depth writes reads as noise). 1 (the default) leaves the material opaque, as before.
+    const fOp = this._fiberHint.opacity;
+    const fTrans = fOp < 1;
+    if (this.fiberMat.transparent !== fTrans) this.fiberMat.needsUpdate = true;   // blending is a recompile
+    this.fiberMat.transparent = fTrans;
+    this.fiberMat.opacity = fTrans ? Math.max(0, fOp) : 1;
     this._fiberSp = rawFiber.map((s) => mk(s, this.opts.fiberSaturation));
     this._gelSp = rawGel.map((s) => mk(s, this.opts.gelSaturation));
     this._scafSp = rawScaf.map((s) => mk(s, this.opts.scaffoldSaturation));
@@ -794,11 +879,16 @@ export class TissueRenderer {
     this._uRimCell.value = hasGel ? this.opts.cellRimGel : this.opts.cellRim;
     this._uTintCell.value = hasGel ? this.opts.cellRimTint : 0;
     this._gelFade = hasGel && +this.opts.gelCellFade > 0 ? Math.min(0.95, +this.opts.gelCellFade) : 0;
-    // fields: optional `pointScale` (B5) scales this field's sprites (1 = the renderer default)
+    // fields: optional `pointScale` (B5) scales this field's blobs (1 = the renderer default) and
+    // optional `style` ('spheres' | 'points') picks how they are drawn — an explicit `fieldStyle`
+    // opt wins over the definition, exactly like `gelStyle` does for the gel haze.
+    const fStyleOpt = this._optSet.has('fieldStyle');
     this._fieldDefs = (T.fields || []).map((f) => ({
       key: f.key, label: f.label || f.key, color: f.color || '#3fd6c4',
       col: TissueRenderer._lin(f.color || '#3fd6c4', 1),
       pointScale: +f.pointScale > 0 ? +f.pointScale : 1, idx: -1,
+      style: (!fStyleOpt && (f.style === 'points' || f.style === 'spheres')) ? f.style
+        : (this.opts.fieldStyle === 'points' ? 'points' : 'spheres'),
     }));
     // load dial: any range (fibrous strain 0–1, cartilage compression 0–0.2) → normalise for the arrows
     const loadDial = (T.dials || []).find((d) => d.role === 'load');
@@ -852,7 +942,7 @@ export class TissueRenderer {
     }
     if (this.scaffold) { this.scene.remove(this.scaffold.mesh); this.scaffold.geo.dispose(); this.scaffold.mesh.dispose(); this.scaffold = null; }
     if (this.fields) {
-      for (const L of this.fields) { this.scene.remove(L.points); L.geo.dispose(); L.mat.dispose(); }
+      for (const L of this.fields) { this.scene.remove(L.obj); L.geo.dispose(); if (L.style === 'points') L.mat.dispose(); else L.mesh.dispose(); }
       this.fields = null;
     }
     this._gridN = 0;
@@ -867,7 +957,7 @@ export class TissueRenderer {
       centers[3 * v] = (i + 0.5) * h; centers[3 * v + 1] = (j + 0.5) * h; centers[3 * v + 2] = (k + 0.5) * h;
     }
     this._gridN = N;
-    this._buildFibers(N, centers);
+    this._buildFibers(N);
     if (this._gelSp.length) this._buildGel(N, centers);
     if (this._scafSp.length) this._buildScaffold(N, centers);
     this._buildFields(N, centers);
@@ -880,7 +970,7 @@ export class TissueRenderer {
    * bleed past the faces of the cube). `margin` is the sprite's world half-size.
    */
   static _jitterPoints(N, centers, seed, margin) {
-    const V = N * N * N, h = 1 / N, rand = TissueRenderer._rng(seed);
+    const V = N * N * N, h = 1 / N, rand = recipeRng(seed);
     const out = new Float32Array(V * 3);
     const lo = margin > 0.5 ? 0.5 : (margin > 0 ? margin : 0), hi = 1 - lo;
     for (let v = 0; v < V; v++) {
@@ -916,8 +1006,8 @@ export class TissueRenderer {
 
   // Per-instance layout (offset inside the voxel, random unit vector r_j, length/radius jitter)
   // and the density/FA laws both come from src/recipe.js, so the Blender importer can reproduce
-  // this exact arrangement. `centers` is unused here — the recipe derives voxel centres itself.
-  _buildFibers(N, centers) {   // eslint-disable-line no-unused-vars
+  // this exact arrangement. No `centers` argument: the recipe derives the voxel centres itself.
+  _buildFibers(N) {
     const K = this.opts.K, V = N * N * N, count = V * K, h = 1 / N;
     const { base, rvec, jit } = recipeFiberLayout(N, K, this.opts.seed);
     this._fiberSc = this._fiberScales(h);
@@ -951,7 +1041,7 @@ export class TissueRenderer {
       this.gel = { points, geo: g, mat, valAttr, colAttr, occ: new Uint8Array(V), V, h };
       return;
     }
-    const rand = TissueRenderer._rng(this.opts.seed ^ 0x5bd1e995);
+    const rand = recipeRng(this.opts.seed ^ 0x5bd1e995);
     const jit = new Float32Array(V * 4);   // dx, dy, dz (× h), size factor
     for (let v = 0; v < V; v++) {
       jit[4 * v] = (rand() - 0.5) * 0.5; jit[4 * v + 1] = (rand() - 0.5) * 0.5; jit[4 * v + 2] = (rand() - 0.5) * 0.5;
@@ -1015,10 +1105,10 @@ export class TissueRenderer {
     this.scaffold = { mesh, geo, alpha, mid, len, axis, va, vb, count: s, V, h, vd: new Float32Array(V), vc: new Float32Array(3 * V) };
   }
 
-  _makePointMaterial(opacity, size, soft, sizePow) {
+  _makePointMaterial(opacity, size, soft, sizePow, minVal = 0.02) {
     return new THREE.ShaderMaterial({
       uniforms: {
-        uOpacity: { value: opacity }, uSize: { value: size }, uMinVal: { value: 0.02 },
+        uOpacity: { value: opacity }, uSize: { value: size }, uMinVal: { value: minVal },
         uScale: { value: 400 }, uSoft: { value: soft }, uSizePow: { value: sizePow },
       },
       vertexShader: RENDER_POINT_VERT, fragmentShader: RENDER_POINT_FRAG,
@@ -1027,31 +1117,77 @@ export class TissueRenderer {
     });
   }
 
-  // A field's sprite size is `pointSize · h · (fields[i].pointScale ?? 1)` (B5): a field whose
-  // haze should read as a coarse cloud rather than a fine mist says so in the definition.
+  /**
+   * One layer per diffusible field. The blob size starts from one number in both styles — the
+   * sprite diameter `pointSize · h · (fields[i].pointScale ?? 1)` (B5), in world units, which the
+   * sphere style then widens by `fieldSphereDiameter` (see the header) — so the two are directly
+   * comparable. Each field gets its own jittered, clamped cloud, so two hazes interleave instead
+   * of coinciding. `fields[i].style` / `opts.fieldStyle` picks the style.
+   *
+   * Every layer answers the same four things: `obj` (the Object3D to show/hide), `key`, `def`
+   * and `style`; the points style adds `attr`/`mat`, the sphere style `mesh`/`alpha`/`radius`.
+   */
   _buildFields(N, centers) {
     const V = N * N * N, h = 1 / N;
     this.fields = this._fieldDefs.map((f, i) => {
       const size = this.opts.pointSize * h * f.pointScale;
-      const margin = 0.5 * size;
-      const g = new THREE.BufferGeometry();
-      // own jittered, clamped cloud per field: two hazes interleave instead of coinciding,
-      // and no sprite hangs outside the cube
-      g.setAttribute('position', new THREE.BufferAttribute(TissueRenderer._jitterPoints(N, centers, (this.opts.seed ^ 0x1b873593) + 7919 * i, margin), 3));
-      const attr = new THREE.BufferAttribute(new Float32Array(V), 1);
-      attr.setUsage(THREE.DynamicDrawUsage);
-      g.setAttribute('aVal', attr);
-      const colArr = new Float32Array(V * 3);
-      const c = new THREE.Color(f.color);
-      for (let v = 0; v < V; v++) { colArr[3 * v] = c.r; colArr[3 * v + 1] = c.g; colArr[3 * v + 2] = c.b; }
-      g.setAttribute('aCol', new THREE.BufferAttribute(colArr, 3));
-      g.boundingSphere = new THREE.Sphere(this.center.clone(), 1);
-      const mat = this._makePointMaterial(this.opts.pointOpacity, size, 8.0, 1.0);
-      const points = new THREE.Points(g, mat);
-      points.frustumCulled = false; points.renderOrder = 3; points.visible = false;
-      this.scene.add(points);
-      return { key: f.key, def: f, points, geo: g, mat, attr };
+      // one cloud, whichever style draws it: the same seed and the same clamp margin (half the
+      // sprite size), so switching styles moves nothing. A sphere is `fieldSphereDiameter` wider
+      // than that margin and may reach 5 % of a blob past the face — invisible, since a blob's
+      // alpha is already zero at its rim, and worth less than making the two styles disagree.
+      const pos = TissueRenderer._jitterPoints(N, centers, (this.opts.seed ^ 0x1b873593) + 7919 * i, 0.5 * size);
+      return f.style === 'points' ? this._buildFieldPoints(f, pos, V, size) : this._buildFieldSpheres(f, pos, V, size);
     });
+  }
+
+  // gl_PointSize sprites: one draw call per field, but the size is clamped by the driver's
+  // point-size limit and the sprites take no part in fog, depth cue or depth sorting.
+  _buildFieldPoints(f, pos, V, size) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const attr = new THREE.BufferAttribute(new Float32Array(V), 1);
+    attr.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('aVal', attr);
+    const colArr = new Float32Array(V * 3);
+    const c = new THREE.Color(f.color);
+    for (let v = 0; v < V; v++) { colArr[3 * v] = c.r; colArr[3 * v + 1] = c.g; colArr[3 * v + 2] = c.b; }
+    g.setAttribute('aCol', new THREE.BufferAttribute(colArr, 3));
+    g.boundingSphere = new THREE.Sphere(this.center.clone(), 1);
+    const mat = this._makePointMaterial(this.opts.pointOpacity, size, 8.0, 1.0, this.opts.pointMin);
+    const points = new THREE.Points(g, mat);
+    points.frustumCulled = false; points.renderOrder = 3; points.visible = false;
+    this.scene.add(points);
+    return { key: f.key, def: f, style: 'points', obj: points, points, geo: g, mat, attr, V };
+  }
+
+  // Instanced spheres through the same haze shader the gel uses: real geometry, so the blob keeps
+  // its world size on every driver and sits in the depth buffer (and could take the fog and the
+  // depth cue, which fieldFog / fieldDepthCue leave off so it matches the sprite). `radius` is
+  // the value-1 radius; _updateFieldSpheres scales each instance by 0.35 + 0.65·value, the law
+  // the sprite shader applies to gl_PointSize.
+  _buildFieldSpheres(f, pos, V, size) {
+    const geo = new THREE.IcosahedronGeometry(1, Math.max(0, this.opts.fieldDetail | 0));
+    // A polyhedron geometry carries FLAT (per-face) normals, and the haze shader fades alpha by
+    // |n·v| — flat normals would step the alpha face by face and the blob would read as a shard
+    // of glass instead of a soft ball. On a unit sphere at the origin the smooth normal IS the
+    // position, so this is the exact smooth normal, not an approximation.
+    geo.setAttribute('normal', new THREE.BufferAttribute(geo.getAttribute('position').array.slice(), 3));
+    const alpha = new THREE.InstancedBufferAttribute(new Float32Array(V), 1);
+    alpha.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aAlpha', alpha);
+    const mesh = new THREE.InstancedMesh(geo, this.fieldMat, V);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    const colArr = new Float32Array(V * 3);
+    const c = new THREE.Color(f.color);
+    for (let v = 0; v < V; v++) { colArr[3 * v] = c.r; colArr[3 * v + 1] = c.g; colArr[3 * v + 2] = c.b; }
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(colArr, 3);   // constant per field: uploaded once
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 3;
+    mesh.visible = false;
+    TissueRenderer._hideRange(mesh.instanceMatrix.array, 0, V);
+    this.scene.add(mesh);
+    return { key: f.key, def: f, style: 'spheres', obj: mesh, mesh, geo, alpha, pos, V,
+      radius: 0.5 * size * (+this.opts.fieldSphereDiameter > 0 ? +this.opts.fieldSphereDiameter : 1) };
   }
 
   _buildCells(capacity) {
@@ -1076,7 +1212,7 @@ export class TissueRenderer {
   _updatePointScale() {
     const hPx = this.renderer.domElement.height;  // drawing-buffer pixels
     const s = hPx / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) * 0.5));
-    if (this.fields) for (const L of this.fields) L.mat.uniforms.uScale.value = s;
+    if (this.fields) for (const L of this.fields) if (L.style === 'points') L.mat.uniforms.uScale.value = s;
     if (this.gel && this.gel.points) this.gel.mat.uniforms.uScale.value = s;
   }
 
@@ -1185,7 +1321,7 @@ export class TissueRenderer {
         const on = !!fl[L.key] || (!layers.fields && !!layers[L.key]);
         const ix = L.def.idx;
         const src = F && ix >= 0 && ix < F.length ? F[ix] : (state[L.key] && state[L.key].length ? state[L.key] : null);
-        L.points.visible = on && !!src;
+        L.obj.visible = on && !!src;
         if (on && src) this._updateField(L, src);
       }
     }
@@ -1437,10 +1573,34 @@ export class TissueRenderer {
   }
 
   _updateField(layer, field) {
+    if (layer.style === 'spheres') return this._updateFieldSpheres(layer, field);
     const a = layer.attr.array;
     if (field.length === a.length) a.set(field);
     else { const n = Math.min(a.length, field.length); for (let i = 0; i < n; i++) a[i] = field[i]; }
     layer.attr.needsUpdate = true;
+  }
+
+  // The sphere style's per-frame work: scale each blob by 0.35 + 0.65·value and set its alpha to
+  // 0.2 + 0.8·value — the two laws RENDER_POINT_VERT/FRAG apply to a sprite, so switching styles
+  // changes how the haze is drawn, not how strongly a value shows. Below `pointMin` the instance
+  // is collapsed to nothing (the sprite shader's `gl_PointSize = 0` branch).
+  _updateFieldSpheres(L, field) {
+    const V = L.V, M = L.mesh.instanceMatrix.array, AL = L.alpha.array, pos = L.pos;
+    const r0 = L.radius, minV = this.opts.pointMin, n = field.length < V ? field.length : V;
+    for (let v = 0; v < V; v++) {
+      let x = v < n ? field[v] : 0;
+      if (!(x > 0)) x = 0; else if (x > 1) x = 1;
+      const o = v * 16;
+      if (x < minV) { M[o] = M[o + 5] = M[o + 10] = 0; AL[v] = 0; continue; }
+      const r = r0 * (0.35 + 0.65 * x);
+      M[o] = r; M[o + 1] = 0; M[o + 2] = 0; M[o + 3] = 0;
+      M[o + 4] = 0; M[o + 5] = r; M[o + 6] = 0; M[o + 7] = 0;
+      M[o + 8] = 0; M[o + 9] = 0; M[o + 10] = r; M[o + 11] = 0;
+      M[o + 12] = pos[3 * v]; M[o + 13] = pos[3 * v + 1]; M[o + 14] = pos[3 * v + 2]; M[o + 15] = 1;
+      AL[v] = 0.2 + 0.8 * x;
+    }
+    L.mesh.instanceMatrix.needsUpdate = true;
+    L.alpha.needsUpdate = true;
   }
 
   // `load` is the raw dial value; the arrows show it normalised over the dial's own
@@ -1537,11 +1697,16 @@ export class TissueRenderer {
   }
 
   /**
-   * Orbit the camera around controls.target by (dTheta, dPhi) radians, in the same y-up spherical
-   * frame OrbitControls uses (so "up" is camera.up = +z here). No allocation, no private
-   * OrbitControls state: move camera.position, then let controls.update() re-derive its own.
+   * PUBLIC camera step, the single-pointer alternative to dragging (WCAG 2.2 AA 2.5.7): orbit the
+   * camera around controls.target by (dTheta, dPhi) RADIANS, in the same y-up spherical frame
+   * OrbitControls uses (so "up" is camera.up = +z here). No allocation, no private OrbitControls
+   * state: move camera.position, then let controls.update() re-derive its own. Positive dTheta
+   * swings the camera the way ArrowRight does, positive dPhi lowers it (ArrowDown), and
+   * `opts.keyOrbitStep` (π/24) is the step the arrow keys take — and the one an on-screen
+   * orbit button should take, so the two agree.
+   * Does NOT stop auto-rotate — a UI button should call setAutoRotate(false) itself if it means to.
    */
-  _orbit(dTheta, dPhi) {
+  orbit(dTheta, dPhi) {
     const t = this.controls.target;
     const off = this._tmpV.copy(this.camera.position).sub(t).applyQuaternion(this._upQuat);
     const sp = this._sph.setFromVector3(off);
@@ -1555,8 +1720,11 @@ export class TissueRenderer {
     this.controls.update();
   }
 
-  /** Dolly by a distance factor (>1 = further away), clamped to the controls' min/max distance. */
-  _dolly(factor) {
+  /**
+   * PUBLIC: dolly by a distance factor (> 1 = further away, < 1 = closer), clamped to the
+   * controls' min/max distance. `opts.keyDollyStep` (1.12) is the step +/− uses.
+   */
+  dolly(factor) {
     const t = this.controls.target;
     const off = this._tmpV.copy(this.camera.position).sub(t);
     const d = off.length() * factor;
@@ -1581,12 +1749,12 @@ export class TissueRenderer {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     this.setAutoRotate(false);
     const rot = +this.opts.keyOrbitStep || 0, dolly = +this.opts.keyDollyStep || 1;
-    if (k === 'ArrowLeft') this._orbit(-rot, 0);
-    else if (k === 'ArrowRight') this._orbit(rot, 0);
-    else if (k === 'ArrowUp') this._orbit(0, -rot);
-    else if (k === 'ArrowDown') this._orbit(0, rot);
-    else if (k === '+' || k === '=' || k === 'Add') this._dolly(1 / dolly);
-    else if (k === '-' || k === '_' || k === 'Subtract') this._dolly(dolly);
+    if (k === 'ArrowLeft') this.orbit(-rot, 0);
+    else if (k === 'ArrowRight') this.orbit(rot, 0);
+    else if (k === 'ArrowUp') this.orbit(0, -rot);
+    else if (k === 'ArrowDown') this.orbit(0, rot);
+    else if (k === '+' || k === '=' || k === 'Add') this.dolly(1 / dolly);
+    else if (k === '-' || k === '_' || k === 'Subtract') this.dolly(dolly);
     else if (k === 'Home') this.resetView();
     else return;               // not ours: no preventDefault, the app still gets it
     e.preventDefault();
@@ -1612,6 +1780,7 @@ export class TissueRenderer {
     this.cellMat.dispose();
     this.gelMat.dispose();
     this.scaffoldMat.dispose();
+    this.fieldMat.dispose();
     this._wire.geo.dispose(); this._wire.mat.dispose();
     if (this.woundMarker) {
       this.scene.remove(this.woundMarker.obj);

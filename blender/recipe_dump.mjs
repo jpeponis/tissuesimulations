@@ -5,7 +5,8 @@
 //
 // Prints, as one JSON object, everything `blender/import_tissue.py` re-implements in python:
 // the fiber recipe constants and one full per-instance layout (src/recipe.js), the per-frame
-// fiber laws sampled on a grid, the cell colour ramp LUT and the cell aspect law (src/render.js).
+// fiber laws sampled on a grid, the cell colour ramp LUT and the cell aspect law, and the
+// gel / scaffold / field-haze constants and the gel jitter stream (src/render.js).
 // `blender/test_recipe_parity.py` runs this and compares its own arithmetic against it.
 //
 // src/recipe.js is a plain ES module and imports nothing, so it is used directly. src/render.js
@@ -15,7 +16,7 @@
 // of silently comparing a copy against itself.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { RECIPE_FIBER, recipeFiberLayout, recipeFiberScales, recipeFiberRadius, recipeFiberLength, recipeFiberFade, recipeFiberDir, recipeRenderMeta } from '../src/recipe.js';
+import { RECIPE_FIBER, recipeRng, recipeFiberLayout, recipeFiberScales, recipeFiberRadius, recipeFiberLength, recipeFiberFade, recipeFiberDir, recipeRenderMeta } from '../src/recipe.js';
 
 const argv = process.argv.slice(2);
 const arg = (name, dflt) => {
@@ -30,6 +31,21 @@ const N = arg('N', 2), K = arg('K', 1), SEED = arg('seed', RECIPE_FIBER.seed);
 // --- src/render.js: lift the pure colour statics out of the source ----------------------------
 const RENDER_SRC = readFileSync(fileURLToPath(new URL('../src/render.js', import.meta.url)), 'utf8');
 
+/** `n` source lines starting at the line that contains `anchor` (exact substring). */
+function liftLines(anchor, n) {
+  const at = RENDER_SRC.indexOf(anchor);
+  if (at < 0) throw new Error(`src/render.js no longer contains ${JSON.stringify(anchor)} — update blender/recipe_dump.mjs`);
+  const from = RENDER_SRC.lastIndexOf('\n', at) + 1;
+  return RENDER_SRC.slice(from).split('\n').slice(0, n).join('\n');
+}
+
+/** One capture group out of src/render.js's source, or a loud failure. */
+function liftNumber(re, what) {
+  const m = RENDER_SRC.match(re);
+  if (!m) throw new Error(`src/render.js: cannot find ${what} — update blender/recipe_dump.mjs`);
+  return m.slice(1).map(Number);
+}
+
 /** The text of `static <name>(...) { … }` from a class body, braces balanced. */
 function liftStatic(name) {
   const at = RENDER_SRC.indexOf(`static ${name}(`);
@@ -43,6 +59,14 @@ function liftStatic(name) {
   throw new Error(`src/render.js: unbalanced braces in static ${name}()`);
 }
 
+// three's Color converts an sRGB hex into the linear working space with these constants
+// (three/src/math/ColorManagement.js SRGBToLinear); the python side uses the same.
+const srgbToLinear = (c) => (c < 0.04045 ? c * 0.0773993808 : Math.pow(c * 0.9478672986 + 0.0521327014, 2.4));
+const hexToLinear = (hex) => {
+  const h = hex.replace('#', '');
+  return [0, 2, 4].map((i) => srgbToLinear(parseInt(h.slice(i, i + 2), 16) / 255));
+};
+
 const lutNMatch = RENDER_SRC.match(/const RENDER_LUT_N = (\d+)/);
 if (!lutNMatch) throw new Error('src/render.js no longer defines RENDER_LUT_N');
 const RENDER_LUT_N = +lutNMatch[1];
@@ -52,14 +76,9 @@ export class TissueRenderer {
 ${['_saturate', '_toOklab', '_fromOklab', '_rampLUT'].map(liftStatic).join('\n')}
 }`;
 const { TissueRenderer } = await import(`data:text/javascript;base64,${Buffer.from(shim).toString('base64')}`);
-
-// three's Color converts an sRGB hex into the linear working space with these constants
-// (three/src/math/ColorManagement.js SRGBToLinear); the python side uses the same.
-const srgbToLinear = (c) => (c < 0.04045 ? c * 0.0773993808 : Math.pow(c * 0.9478672986 + 0.0521327014, 2.4));
-const hexToLinear = (hex) => {
-  const h = hex.replace('#', '');
-  return [0, 2, 4].map((i) => srgbToLinear(parseInt(h.slice(i, i + 2), 16) / 255));
-};
+// `_lin` itself cannot be lifted (it goes through THREE.Color); this is the same conversion,
+// with three's own sRGB→linear constants, which the python side also mirrors.
+TissueRenderer._lin = (css, sat = 1) => TissueRenderer._saturate(hexToLinear(css), sat);
 
 // --- the fiber recipe (E2) --------------------------------------------------------------------
 const lay = recipeFiberLayout(N, K, SEED);
@@ -135,18 +154,59 @@ const CELL_RAMP = optOf('cellRamp').replace(/'/g, '').trim();
 const CELL_ASPECT_EXP = +optOf('cellAspectExp');
 const CELL_SAT = +optOf('cellSaturation');
 
-const rampOf = (c0, c1) => {
-  const a = TissueRenderer._saturate(hexToLinear(c0), CELL_SAT);
-  const b = TissueRenderer._saturate(hexToLinear(c1), CELL_SAT);
-  const mid = CELL_MID && CELL_MID !== 'null' ? TissueRenderer._saturate(hexToLinear(CELL_MID), 1) : null;
-  return Array.from(TissueRenderer._rampLUT(a, b, CELL_RAMP, CELL_LIFT, mid));
+// WHICH colours a `colors` array turns into: the renderer's own three lines out of setTissue,
+// run here rather than restated, because a two-entry array and a three-entry one do different
+// things (the third entry is the ramp's MID, and the end colour still comes from colors[1]) and
+// the importer has to follow whatever those lines say. Restating them is how the two would drift.
+const selectSrc = liftLines('const c0 = TissueRenderer._lin(cols[0]', 3);
+const selectRamp = new Function('TissueRenderer', 'cols', 'explicitMid',
+  `${selectSrc}\n  return { c0, c1, mid };`);
+const EXPLICIT_MID = CELL_MID && CELL_MID !== 'null' ? TissueRenderer._lin(CELL_MID, 1) : null;
+
+const rampOf = (colors) => {
+  const { c0, c1, mid } = selectRamp.call({ opts: { cellSaturation: CELL_SAT } }, TissueRenderer, colors, EXPLICIT_MID);
+  return { lut: Array.from(TissueRenderer._rampLUT(c0, c1, CELL_RAMP, CELL_LIFT, mid)), mid: mid ? Array.from(mid) : null };
 };
 
 const PAIRS = [
   { key: 'fibroblast', colors: ['#4ea3ff', '#ff7a3d'] },        // src/tissues/fibrous.js
   { key: 'chondrocyte', colors: ['#ff7a3d', '#3fb8b0'] },       // src/tissues/cartilage.js
   { key: 'synthetic', colors: ['#7fd1ff', '#ff9a6b'] },         // blender/make_sample_trajectory.py
+  // no registered tissue ships three colours yet; the format allows it and both sides must agree
+  { key: 'three-colour', colors: ['#4ea3ff', '#8ad6a0', '#ff7a3d'] },
 ];
+
+// --- the gel / scaffold / field haze (E5) -----------------------------------------------------
+// Not laws lifted out of the renderer — they live inside instance methods that need a WebGL
+// context — but their CONSTANTS, read out of the renderer's own defaults, plus the gel jitter
+// STREAM, which is `recipeRng` (the real module) driven by the renderer's own seed arithmetic.
+// A retune of any of them, or a moved seed, fails the python mirror instead of drifting quietly.
+const [GEL_JIT_SPAN] = liftNumber(/jit\[4 \* v\] = \(rand\(\) - 0\.5\) \* ([\d.]+);/, 'the gel jitter span');
+const [GEL_SIZE_MIN, GEL_SIZE_SPAN] = liftNumber(/jit\[4 \* v \+ 3\] = ([\d.]+) \+ ([\d.]+) \* rand\(\);/, 'the gel size jitter');
+const [GEL_XOR] = liftNumber(/const rand = recipeRng\(this\.opts\.seed \^ (0x[0-9a-f]+)\);/i, 'the gel jitter seed');
+const [FIELD_XOR, FIELD_STRIDE] = liftNumber(/_jitterPoints\(N, centers, \(this\.opts\.seed \^ (0x[0-9a-f]+)\) \+ (\d+) \* i,/i, 'the field cloud seed');
+const HAZE = {
+  gelMin: +optOf('gelMin'), gelSize: +optOf('gelSize'), gelOpacity: +optOf('gelOpacity'),
+  gelCellFade: +optOf('gelCellFade'),
+  gelJitterSpan: GEL_JIT_SPAN, gelSizeJitter: [GEL_SIZE_MIN, GEL_SIZE_SPAN], gelSeedXor: GEL_XOR,
+  scaffoldMin: +optOf('scaffoldMin'), scaffoldRadius: +optOf('scaffoldRadius'),
+  scaffoldMinRadius: +optOf('scaffoldMinRadius'), scaffoldOpacity: +optOf('scaffoldOpacity'),
+  scaffoldAlphaExp: +optOf('scaffoldAlphaExp'), scaffoldRadiusExp: +optOf('scaffoldRadiusExp'),
+  scaffoldBreak: +optOf('scaffoldBreak'),
+  pointSize: +optOf('pointSize'), pointOpacity: +optOf('pointOpacity'), pointMin: +optOf('pointMin'),
+  fieldSeedXor: FIELD_XOR, fieldSeedStride: FIELD_STRIDE,
+};
+
+// the gel jitter stream for this N and seed: three offsets (× h) and a size factor per voxel,
+// four draws each, exactly as _buildGel consumes them
+const gelJit = [];
+{
+  const rand = recipeRng((SEED ^ GEL_XOR) >>> 0);
+  for (let v = 0; v < N * N * N; v++) {
+    gelJit.push((rand() - 0.5) * GEL_JIT_SPAN, (rand() - 0.5) * GEL_JIT_SPAN, (rand() - 0.5) * GEL_JIT_SPAN,
+      GEL_SIZE_MIN + GEL_SIZE_SPAN * rand());
+  }
+}
 
 const ASPECTS = [];
 for (const asp of [1, 1.4, 1.8, 2.2, 2.5]) for (const r of [0.03, 0.035, 0.0416]) {
@@ -163,6 +223,8 @@ process.stdout.write(JSON.stringify({
   dirs,
   frame: { rho: Array.from(rho), fa: Array.from(faArr), f: Array.from(fvec), rods },
   cell: { lutN: RENDER_LUT_N, mid: CELL_MID, lift: CELL_LIFT, mode: CELL_RAMP, saturation: CELL_SAT, aspectExp: CELL_ASPECT_EXP },
-  ramps: PAIRS.map((p) => ({ key: p.key, colors: p.colors, lut: rampOf(p.colors[0], p.colors[1]) })),
+  ramps: PAIRS.map((p) => Object.assign({ key: p.key, colors: p.colors }, rampOf(p.colors))),
   aspects: ASPECTS,
+  haze: HAZE,
+  gelJit,
 }) + '\n');

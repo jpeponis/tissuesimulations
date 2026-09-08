@@ -94,6 +94,8 @@ export const TISSUE_FIBROUS = {
   name: 'Fibrous connective tissue',
   short: 'Fibroblasts build, align and mature collagen under load',
   version: '0.2.0',
+  domainMicrons: 300,        // the cube edge in real units: docs/MODEL.md converts every rate at L ≈ 300 µm,
+                             // and the app prints "Cube edge ≈ 300 µm" in the colour key
 
   // ---- matrix species
   species: [
@@ -149,7 +151,7 @@ export const TISSUE_FIBROUS = {
         'Pause and note which changed first: density, alignment, or maturity.',
       ],
       question: 'Stiffness and activation both rise. Which one is driving the other, and how would you test that with the dials?',
-      expect: 'Density climbs, fibers swing toward the load arrows and turn amber over four to eight weeks, the stiffness trace climbs steadily, and cells shift from blue toward orange.',
+      expect: 'The first two days evaporate: the cells start quiescent, so density dips from 0.15 to 0.13 and the flux bar only tips toward condensing on about day 3. After that density climbs, fibers swing toward the load arrows and turn amber over four to eight weeks, the stiffness trace climbs steadily, and cells shift from blue toward orange.',
       dials: { Gext: 0.5, strain: 0.6, protease: 0.4, nCells: 160 },
       init: { species: { new: 0.15, mat: 0 }, jitter: 0.2 },
       checks: [
@@ -168,12 +170,12 @@ export const TISSUE_FIBROUS = {
     { key: 'unloading', title: 'Unloading',
       goal: 'Take a mature tissue off load and out of its growth-factor bath, and watch a matrix that took weeks to build come apart.',
       steps: [
-        'Note that two dials moved at once: load is at 0 and the bath has dropped from 0.5 to 0.2. Press Play.',
+        'Note that three dials moved at once: load 0.6 → 0, the bath 0.5 → 0.2 and protease 0.4 → 0.5. Press Play.',
         'Watch the flux bar and the cell colour during the first few days.',
-        'Run for six weeks, then test the dials one at a time: put the load back at 0.6, or the bath back at 0.5, and reset.',
+        'Run for six weeks. Then press Reset (it puts the preset back), change ONE thing, and press Play again: the load to 0.6, or the chemistry the matured tissue had — bath 0.5 and protease 0.4.',
       ],
-      question: 'Two things were taken away at once. Which one causes the atrophy — try each alone and watch the density trace, not just the colour.',
-      expect: 'Cells fade back toward blue within days, the flux bar tips to evaporating, density and alignment fall over weeks, and amber mature fibers outlast the pale new ones. Take away only the load and the story is different: alignment decays, but the density holds and the cells stay mostly switched on.',
+      question: 'Three things were taken away at once. Which of them causes the atrophy — put each back on its own and watch the density trace, not just the colour.',
+      expect: 'Cells fade back toward blue within days, the flux bar tips to evaporating, density and alignment fall over weeks, and amber mature fibers outlast the pale new ones. Give the cells their chemistry back but no load (bath 0.5, protease 0.4) and the story is different: alignment collapses, but the density holds near 1.0 and the cells settle around 0.7. Put the bath back and leave the protease at 0.5 and the density still slides — about a quarter in three months — so the protease dial is part of the atrophy too.',
       dials: { Gext: 0.2, strain: 0.0, protease: 0.5, nCells: 160 },
       init: { from: { scenario: 'maturation', days: 60 } },
       checks: [
@@ -190,11 +192,11 @@ export const TISSUE_FIBROUS = {
       goal: 'Push the growth-factor bath high and find out whether turning it back down undoes what it started.',
       steps: [
         'Press Play with the bath at 0.9 and run for four weeks.',
-        'Drop the bath to 0.2 without pausing and keep running.',
+        'Drop the bath to 0.2 yourself, without pausing, and keep running (or switch on Auto-apply scripted events, which does it for you on day 45).',
         'Wait another four weeks and compare stiffness and activation with where they started.',
       ],
-      question: 'You returned the bath to its starting value, yet the growth-factor haze stays thick. Where is that growth factor coming from, and what would you turn down to break the loop?',
-      expect: 'Dense, stiff, poorly aligned matrix by week four. After you lower the bath, activation dips a little and settles back; stiffness does not dip at all but keeps climbing. The tissue does not retrace its path.',
+      question: 'You turned the bath down to 0.2 — lower than this tissue has ever run — yet the growth-factor haze stays at about twice that. Where is it coming from, and what would you turn down to break the loop?',
+      expect: 'Dense, stiff, poorly aligned matrix by week four: density 0.82, stiffness about 37 kPa, activation 0.88, and the whole-tissue alignment only 0.13 — scar, not tendon. After you drop the bath, activation dips to about 0.73 and settles near 0.80, while stiffness does not dip at all and climbs past 130 kPa by week thirteen. The tissue does not retrace its path.',
       dials: { Gext: 0.9, strain: 0.3, protease: 0.2, nCells: 160 },
       init: { species: { new: 0.15, mat: 0 }, jitter: 0.2 },
       events: [{ at: 45, dials: { Gext: 0.2 } }],
@@ -277,7 +279,7 @@ export const TISSUE_FIBROUS = {
     intro: {
       tagline: 'A cloud of matrix and the cells that make it, in dynamic equilibrium.',
       paragraphs: [
-        'You are looking at a cube of tissue about a third of a millimetre across. The rods are bundles of extracellular matrix fibers: pale blue when freshly laid down, amber once crosslinked and mature. The small bodies among them are fibroblasts. Blue ones are resting; orange ones have activated into contractile, collagen-producing myofibroblasts and stretch into spindles.',
+        'You are looking at a cube of tissue about 300 µm across (the colour key repeats the scale). The rods are bundles of extracellular matrix fibers: pale blue when freshly laid down, amber once crosslinked and mature. The small bodies among them are fibroblasts. Blue ones are resting; orange ones have activated into contractile, collagen-producing myofibroblasts and stretch into spindles.',
         'The four dials are the weather. Growth-factor bath is humidity: the signal available to drive cells. Load is pressure: a steady stretch along the arrows. Protease is temperature: how fast matrix breaks back down. Cell number is the supply of condensation nuclei. Three act only through the cells; load also pulls on the fibers directly.',
         'Dynamic reciprocity, a phrase from Bissell, Hall and Parry in 1982, means the conversation runs both ways. Cells build and digest the matrix; the matrix, through its stiffness, alignment and stored growth factor, tells the cells what to become. Turn a dial and you nudge that loop. Sometimes it settles back; sometimes, as in fibrosis, it locks in.',
       ],
@@ -310,6 +312,10 @@ export const TISSUE_FIBROUS = {
       cellsActive: 'activated cells are pumping out collagen',
       cellsQuiet: 'the cells are quiet',
     },
+    // The two sides of the flux gauge and its caption, in this tissue's own words
+    // (docs/EXTENDING.md §1 `copy.gauge`). They are the weather words the gauge falls back to
+    // anyway; stating them here keeps the wording with the tissue that means it.
+    gauge: { left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation' },
   },
 
   // ---- injury

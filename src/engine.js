@@ -54,12 +54,15 @@
  *                    applied by checkScenario() and the headless tools when the
  *                    clock reaches day `at` (before stepping on).  The app may
  *                    treat them as suggestions (v0.1 never auto-injured).
- *  checks            `{ at, stat, op, value }` or `{ at, stat, rel: { stat, op, at? }, value? }`:
- *                    with `rel` the check passes when stat(at) op (rel.stat at
- *                    rel.at (default: same day) + value (default 0)).  `at` may also be a
+ *  checks            `{ at, stat, op, value }` or `{ at, stat, rel: { stat, op, at?, factor? }, value? }`:
+ *                    with `rel` the check passes when stat(at) op (rel.stat at rel.at (default:
+ *                    same day) · factor (default 1) + value (default 0)).  `at` may also be a
  *                    WINDOW `[from, to]` with `agg: 'min' | 'max' | 'mean' | 'first'`, which
  *                    checkScenario evaluates on samples every 0.5 d inside the window (a
- *                    `rel` reference day then defaults to `from`).
+ *                    `rel` reference day then defaults to `from`), or with `agg: 'cross'` +
+ *                    `threshold`, which reports the first sampled DAY where `stat op threshold`
+ *                    holds and passes when there is one (result: value = the day, ref = the
+ *                    threshold, plus `crossed: { day, stat }`; no `rel`, no `value`).
  *  cell hook outputs out.a / out.b are pre-filled with the current values (so a
  *                    hook that does not write them leaves the state unchanged);
  *                    out.aSum is pre-filled with NaN and the engine substitutes
@@ -86,10 +89,15 @@
  *                    the pass T is rescaled onto the new fiber total and FA / the principal
  *                    axis are refreshed (same math as the voxel pass, same fEvery cadence).
  *                    Transport is hindered by the voxel hook's OPTIONAL out.mobility ∈ [0,1]
- *                    (default 1, e.g. a tight hydrogel mesh); a face uses the mean of its two
- *                    voxels.  Sink loss counts as degradation, or as scaffoldFlux for a
- *                    species of kind 'scaffold'.
- *  out.mobility      voxel-hook output, only read when some species has D (see above).
+ *                    (default 1, e.g. a tight hydrogel mesh); a diffusive face uses the mean of
+ *                    its two voxels and the sink uses the face voxel's own value, so a sealed
+ *                    mesh also stops the leak (v0.4).  Sink loss counts as degradation, or as
+ *                    scaffoldFlux for a species of kind 'scaffold'.
+ *  species.carryTensor  OPTIONAL `false` on a FIBER species with D (v0.4): the mass moves but T does
+ *                    not travel with it, so the arriving matrix takes the destination voxel's
+ *                    orientation (isotropic where it has none) and trace(T) is still exact.  ~3×
+ *                    cheaper than carrying the tensor; the default stays true.
+ *  out.mobility      voxel-hook output, only read when some species has D or sink (see above).
  *  out.polS/alignS   OPTIONAL per-fiber-species orientation of a cell's deposition
  *                    (Float32Array indexed by SPECIES index).  They are read only when the
  *                    hook sets out.usePolS = true (one store per cell otherwise); an entry
@@ -106,7 +114,10 @@
  *                    accumulators 1..3 default to 0.  ctx.aSum stays an alias of ctx.vox[0].
  *  out.scaffoldLoss  voxel-hook output (≥ 0): dissolution of a 'scaffold' species, which is
  *                    neither deposition nor degradation of tissue.  stats().scaffoldFlux is
- *                    its mean per-voxel rate (a third flux bar).
+ *                    its mean per-voxel rate (a third flux bar).  When the ≥ 0 clamp on dRho
+ *                    truncated a scaffold species this step, the reported rate is capped at what
+ *                    the scaffold species ACTUALLY lost / dt (v0.4), so a hook that keeps asking
+ *                    after the network has gone no longer keeps the bar lit.
  *  cellType.states   `[{ key: 'a'|'b'|'c', label, range }]` labels and ranges the cell scalars;
  *                    `stateLabels` / `cRange` remain accepted aliases (TissueEngine.cellStates
  *                    merges the two forms).  Only `c` may have a range other than [0, 1]:
@@ -135,7 +146,9 @@
  *                    likewise pulls its polarity into that plane).  Trace-preserving either way.
  *  cellType.motile   `false` is honoured: the cell keeps its polarity and position (no guidance,
  *                    load alignment, noise draws or migration) and repulsion moves only the
- *                    motile partner of a pair, so it acts as an obstacle.  Its hooks still run.
+ *                    motile partner of a pair — which then takes the WHOLE overlap correction
+ *                    (the ½ split is between the partners that can move), so it acts as an
+ *                    obstacle rather than a soft partner.  Its hooks still run.
  *  cellType.rCell    OPTIONAL per-type repulsion radius (default engine.rCell); a pair's contact
  *                    distance is rCell_i + rCell_j.  validate() warns when 2·max(rCell) ≥ h,
  *                    which is the assumption behind the 27-bin neighbour search.
@@ -154,12 +167,18 @@
  *                    fire on the same day boundaries) and _loadFrom falls back to it.
  *  stats().cells     .byType.<cellType key> = { n, a, b, c }; stat paths 'cells.byType.<key>'
  *                    (the count) and 'cells.byType.<key>.a|b|c|n'.
- *  snapshot().fields per-frame field grids (4 decimals), one per declared field; exportMeta adds
- *                    `fields` (key/label/colour), `loadRange` ([min, max] of the load dial),
- *                    `tissueName` and `scenarioTitle`.  All additive: format 2 readers are fine.
- *  validate warnings TissueEngine.warnings(t, { overrides }) returns non-fatal notes (field or
- *                    species mode, repulsion range vs h, cell seeding); validate() prints each
- *                    once per definition with console.warn and still returns only hard errors.
+ *  snapshot(o)       per-frame field grids (4 decimals), one per declared field, unless
+ *                    `o.fields === false` (then the key is absent — §5 readers tolerate that, and
+ *                    an export ring buffer is 26-38 % smaller); exportMeta adds `fields`
+ *                    (key/label/colour, plus `pointScale` / `style` when the definition declares
+ *                    them), `loadRange` ([min, max] of the load dial), `tissueName`
+ *                    and `scenarioTitle`.  All additive: format 2 readers are fine.
+ *  validate warnings TissueEngine.notes(t, { overrides }) returns non-fatal notes as
+ *                    [{ text, actionable }] (field or species mode, repulsion range vs h, cell
+ *                    seeding, a range check that cannot pass); warnings() is the same as strings.
+ *                    validate() prints the ACTIONABLE ones once per definition with console.warn —
+ *                    a correctly integrated fast field is not a warning — and still returns only
+ *                    hard errors.
  *  field.boundary    OPTIONAL 'bath' (default: relaxation toward the bath dial
  *                    everywhere at kBath) or 'face:+z' / 'face:-z' (Dirichlet:
  *                    the voxels of that z layer are held at the bath dial's value
@@ -230,16 +249,19 @@ const ENGINE_QS_THETA = 0.5;       // quasi-steady solve: how far the field move
  *   'auto'         explicit while lam ≤ 1/6, then sub-cycled, then (if the steady problem is well
  *                  posed) quasi-steady once more than ENGINE_SUB_MAX sub-steps would be needed
  * `steady` says whether a steady solve is well posed (Dirichlet face, bath relaxation or decay).
- * Returns { mode: 0 | 1 | 2 (index into ENGINE_MODES), nSub, nWant, capped, fellBack }.
+ * Returns { mode: 0 | 1 | 2 (index into ENGINE_MODES), nSub, nWant, capped, fellBack, want }.
+ * A definition that ASKED for 'subcycled' is reported as sub-cycled even where one sub-step is
+ * enough: the arithmetic is then identical to 'explicit' (one sub-step of dt IS an explicit step),
+ * but the report must not contradict the definition.
  */
 function engineDiffusionMode(lam, want = 'auto', steady = false) {
   const nWant = lam > ENGINE_LAM_STABLE ? Math.ceil(6 * lam) : 1;
-  if (want === 'explicit') return { mode: 0, nSub: 1, nWant, capped: nWant > 1, fellBack: false };
+  if (want === 'explicit') return { mode: 0, nSub: 1, nWant, capped: nWant > 1, fellBack: false, want };
   const fellBack = want === 'quasiSteady' && !steady;
-  if (want === 'quasiSteady' && steady) return { mode: 2, nSub: 1, nWant, capped: false, fellBack: false };
-  if (want === 'auto' && nWant > ENGINE_SUB_MAX && steady) return { mode: 2, nSub: 1, nWant, capped: false, fellBack: false };
+  if (want === 'quasiSteady' && steady) return { mode: 2, nSub: 1, nWant, capped: false, fellBack: false, want };
+  if (want === 'auto' && nWant > ENGINE_SUB_MAX && steady) return { mode: 2, nSub: 1, nWant, capped: false, fellBack: false, want };
   const nSub = nWant > ENGINE_SUB_MAX ? ENGINE_SUB_MAX : nWant;
-  return { mode: nSub > 1 ? 1 : 0, nSub, nWant, capped: nWant > ENGINE_SUB_MAX, fellBack };
+  return { mode: nSub > 1 || want === 'subcycled' ? 1 : 0, nSub, nWant, capped: nWant > ENGINE_SUB_MAX, fellBack, want };
 }
 
 /** mulberry32 PRNG: returns a function producing uniform floats in [0,1). */
@@ -273,6 +295,8 @@ const ENGINE_AGGS = Object.freeze({
   mean: (a) => a.reduce((x, y) => x + y, 0) / a.length,
   first: (a) => a[0],
 });
+/** `agg` values a windowed check may use: the reducers above plus 'cross' (first crossing day). */
+const ENGINE_AGG_KEYS = Object.freeze([...Object.keys(ENGINE_AGGS), 'cross']);
 /** Species keys the stat paths reserve (species.total & co. would be shadowed). */
 const ENGINE_RESERVED_SPECIES = Object.freeze(['total', 'fiberTotal', 'tissueTotal']);
 const ENGINE_FORMATS = Object.freeze(['fixed2', 'percent', 'cells', 'int', 'onoff']);
@@ -369,14 +393,17 @@ export class TissueEngine {
     this._lastFiber = fiberIdx.length ? fiberIdx[fiberIdx.length - 1] : -1;
     // OPT-IN species transport: D (L²/day) diffuses, sink (/day) drains the +z face layer
     this._isScaffold = new Uint8Array(this.nSpecies);
+    this._sCarryT = new Uint8Array(this.nSpecies).fill(1);   // fiber species: transport carries T (v0.4)
     this._sD = new Float64Array(this.nSpecies); this._sSink = new Float64Array(this.nSpecies);
-    const diffIdx = [], sinkIdx = [];
+    const diffIdx = [], sinkIdx = [], scafIdx = [];
     tissue.species.forEach((s, i) => {
-      if (s.kind === 'scaffold') this._isScaffold[i] = 1;
+      if (s.kind === 'scaffold') { this._isScaffold[i] = 1; scafIdx.push(i); }
+      if (s.carryTensor === false) this._sCarryT[i] = 0;
       if (s.D > 0) { this._sD[i] = s.D; diffIdx.push(i); }
       if (s.sink > 0) { this._sSink[i] = s.sink; sinkIdx.push(i); }
     });
     this._diffIdx = Int32Array.from(diffIdx); this._sinkIdx = Int32Array.from(sinkIdx);
+    this._scafIdx = Int32Array.from(scafIdx);
     // integration mode per diffusing species (A1): explicit while lam ≤ 1/6, then sub-cycled
     this._sMode = new Int8Array(this.nSpecies); this._sSub = new Int32Array(this.nSpecies).fill(1);
     this.speciesModes = tissue.species.map((sp, i) => {
@@ -387,10 +414,12 @@ export class TissueEngine {
     });
     this._anyTransport = diffIdx.length > 0 || sinkIdx.length > 0;
     this._anyFiberD = diffIdx.some((i) => this._isFiber[i]);
+    // a fiber species with `carryTensor: false` moves as a felt: the mass travels, T does not
+    this._anyFiberCarry = diffIdx.some((i) => this._isFiber[i] && this._sCarryT[i] === 1);
     this._anyFiberMoves = this._anyFiberD || sinkIdx.some((i) => this._isFiber[i]);
-    this._mob = diffIdx.length ? new Float64Array(NV).fill(1) : null;   // voxel hook out.mobility
+    this._mob = this._anyTransport ? new Float64Array(NV).fill(1) : null;   // voxel hook out.mobility (gates D AND sink)
     this._sDelta = diffIdx.length ? new Float64Array(NV) : null;
-    this._tDelta = this._anyFiberD ? new Float64Array(6 * NV) : null;   // 6 components per voxel, interleaved
+    this._tDelta = this._anyFiberCarry ? new Float64Array(6 * NV) : null;   // 6 components per voxel, interleaved
     this._fiberArrays = this._anyFiberMoves ? new Array(fiberIdx.length) : null;
     this._tScaf = 0;
 
@@ -529,7 +558,11 @@ export class TissueEngine {
     this._fromCache = new Map();
     this._warm = new Map();     // resumable init.from pre-runs (warmFrom / warmScenarios)
 
-    this.reset(tissue.scenarios[0].key);
+    // `_noReset` (internal, used by _makeWarm) leaves the instance unreset: the caller MUST call
+    // reset() before anything else.  It keeps a pre-run engine from running scenarios[0] first —
+    // which, if that scenario has its own init.from, would be a full synchronous pre-run inside
+    // what the app calls as a bounded idle slice.
+    if (!opts._noReset) this.reset(tissue.scenarios[0].key);
   }
 
   // ------------------------------------------------------------------ setup
@@ -752,7 +785,7 @@ export class TissueEngine {
   /** Fresh pre-run job for `from` (the engine plus the event cursor _preRunSlice advances). */
   _makeWarm(from) {
     if (this._depth >= 4) throw new Error(`init.from chain deeper than 4 (tissue '${this.tissue.key}')`);
-    const pre = new TissueEngine(this.tissue, { seed: (this.seed + 1) >>> 0, overrides: this._overrides, _depth: this._depth + 1 });
+    const pre = new TissueEngine(this.tissue, { seed: (this.seed + 1) >>> 0, overrides: this._overrides, _depth: this._depth + 1, _noReset: true });
     pre.reset(from.scenario, from.dials ? { dials: from.dials } : {});
     const withEvents = from.events === true;
     return {
@@ -925,6 +958,7 @@ export class TissueEngine {
     const P = this.P, dt = this.dt, N = this.N, NV = this.NV, L = this.L;
     const invh = 1 / this.h, Nm1 = N - 1, sqrtDt = Math.sqrt(dt);
     const nS = this.nSpecies, nF = this.nFields, species = this.species, isFiber = this._isFiber, fiberIdx = this._fiberIdx;
+    const isScaf = this._isScaffold, scafIdx = this._scafIdx;
     const Txx = this.Txx, Tyy = this.Tyy, Tzz = this.Tzz, Txy = this.Txy, Txz = this.Txz, Tyz = this.Tyz;
     const fiberTotal = this.fiberTotal, fa = this.fa, fx = this.fx, fy = this.fy, fz = this.fz, E = this.E;
     const fields = this.fields, fieldSrc = this._fieldSrc, accs = this._acc, acc0 = accs[0], cellCount = this._cellCount;
@@ -1107,10 +1141,16 @@ export class TissueEngine {
                   const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
                   if (d2 >= d02 || d2 === 0) continue;
                   const d = Math.sqrt(d2);
-                  const f = kRep * (d0 - d) / d * 0.5;
-                  // a non-motile cell is an obstacle: the pair force only moves the motile partner
+                  // The overlap correction is shared by the partners that can actually MOVE: two
+                  // motile cells take half each (share 2 reproduces the old ×0.5 bit-for-bit), a
+                  // motile cell against a `motile: false` anchor takes all of it, and a pair of
+                  // anchors is skipped. A non-motile cell is an obstacle, not a soft partner.
+                  const motj = allMotile || motile[tj] === 1;
+                  const share = (moti ? 1 : 0) + (motj ? 1 : 0);
+                  if (share === 0) continue;
+                  const f = kRep * (d0 - d) / d / share;
                   if (moti) { dxs[i3] -= f * ddx; dxs[i3 + 1] -= f * ddy; dxs[i3 + 2] -= f * ddz; }
-                  if (allMotile || motile[tj] === 1) { dxs[j3] += f * ddx; dxs[j3 + 1] += f * ddy; dxs[j3 + 2] += f * ddz; }
+                  if (motj) { dxs[j3] += f * ddx; dxs[j3 + 1] += f * ddy; dxs[j3 + 2] += f * ddz; }
                 }
               }
             }
@@ -1159,17 +1199,28 @@ export class TissueEngine {
       rules.voxel(vctx);
 
       // --- integrate species (clamp ≥ 0); new fiber total
-      let tot1 = 0;
+      let tot1 = 0, scafCut = false;
       for (let s = 0; s < nS; s++) {
         let r = vRho[s] + dRho[s] * dt;
-        if (r < 0 || r !== r) r = 0;
+        if (r < 0 || r !== r) { r = 0; if (isScaf[s]) scafCut = true; }
         species[s][v] = r;
         if (isFiber[s]) tot1 += species[s][v];
       }
       const loss = vout.loss;
       if (loss > 0) degTotal += loss;
       const sLoss = vout.scaffoldLoss;
-      if (sLoss > 0) scafTotal += sLoss;
+      if (sLoss > 0) {
+        // report what the voxel ACTUALLY gave up: when the ≥ 0 clamp above truncated a scaffold
+        // species, the hook's rate would over-report the third flux bar (and would keep reporting
+        // dissolution after the last of the network has gone)
+        if (!scafCut) scafTotal += sLoss;
+        else {
+          let gone = 0;
+          for (let q = 0; q < scafIdx.length; q++) { const d = vRho[scafIdx[q]] - species[scafIdx[q]][v]; if (d > 0) gone += d; }
+          const cap = gone / dt;
+          scafTotal += sLoss < cap ? sLoss : cap;
+        }
+      }
       if (wantMob) { const mb = vout.mobility; mob[v] = mb > 1 ? 1 : (mb > 0 ? mb : 0); }
       for (let f = 0; f < nF; f++) fieldSrc[f][v] += vSrc[f];
 
@@ -1257,12 +1308,12 @@ export class TissueEngine {
     const Txx = this.Txx, Tyy = this.Tyy, Tzz = this.Tzz, Txy = this.Txy, Txz = this.Txz, Tyz = this.Tyz;
     const ft = this.fiberTotal, fa = this.fa, fx = this.fx, fy = this.fy, fz = this.fz;
     const idx = this._diffIdx, mob = this._mob, delta = this._sDelta, dT = this._tDelta;
-    const withT = this._anyFiberD;
+    const withT = this._anyFiberCarry, carryT = this._sCarryT;
     if (withT) dT.fill(0);
     const dtH2 = dt / (this.h * this.h), lamMax = 1 / 6;
 
     for (let q = 0; q < idx.length; q++) {
-      const s = idx[q], arr = species[s], fib = withT && isFiber[s] === 1;
+      const s = idx[q], arr = species[s], fib = withT && isFiber[s] === 1 && carryT[s] === 1;
       // A1: explicit while lam = D·dt/h² ≤ 1/6, otherwise nSub explicit sub-steps of dt/nSub
       const nSub = this._sSub[s], kD = this._sD[s] * (nSub === 1 ? dtH2 : (dt / nSub) / (this.h * this.h));
       const face = (v, w) => {
@@ -1308,7 +1359,8 @@ export class TissueEngine {
         for (let j = 0; j < N; j++) {
           const v = (i * N + j) * N + Nm1, r = arr[v];
           if (r <= 0) continue;
-          let l = kS * r * dt;
+          // the mesh gates the leak just as it gates diffusion: mobility 0 seals the face layer
+          let l = kS * r * dt * mob[v];
           if (l > r) l = r;
           arr[v] = r - l; sum += l;
         }
@@ -1442,8 +1494,9 @@ export class TissueEngine {
     const kHold = face > 0 ? Nm1 : (face < 0 ? 0 : -1);
     if (theta < 1) prev.set(g);
     if (kHold >= 0) for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) g[(i * N + j) * N + kHold] = bath;
+    let prevWorst = 0;
     for (let sweep = 0; sweep < ENGINE_QS_SWEEPS; sweep++) {
-      let worst = 0;
+      let worst = 0, mag = kHold >= 0 ? bath : 0;
       for (let i = 0; i < N; i++) {
         const im = i > 0, ip = i < Nm1;
         for (let j = 0; j < N; j++) {
@@ -1466,11 +1519,19 @@ export class TissueEngine {
             if (ng < 0) ng = 0;
             const d = ng > gv ? ng - gv : gv - ng;
             if (d > worst) worst = d;
+            if (ng > mag) mag = ng;
             g[v] = ng;
           }
         }
       }
-      if (worst < ENGINE_QS_TOL) break;
+      // One sweep's INCREMENT is not an error bound: an iteration that contracts by rho leaves
+      // ~increment·rho/(1 − rho) behind, and a diffusion-dominated problem has rho close to 1 — an
+      // absolute increment test then stops far from the solution (and its meaning changes with the
+      // size of the field).  Estimate rho from consecutive sweeps and stop on the estimated error,
+      // measured against the magnitude of the field.  The first sweep never stops (rho unknown).
+      const rho = prevWorst > 0 ? Math.max(om - 1, Math.min(0.99, worst / prevWorst)) : 1;
+      prevWorst = worst;
+      if (worst === 0 || worst * rho / (1 - rho) < ENGINE_QS_TOL * (mag > 1 ? mag : 1)) break;
     }
     // The hook's sources were computed from the field as it was at the START of the step, so a
     // source that depends on the field (Michaelis-Menten uptake, say) makes this a lagged
@@ -1680,9 +1741,13 @@ export class TissueEngine {
     return { species, fraction, fields, fa: cnt ? sF / cnt : 0, nVox: cnt, cells: { n: nc, a: nc ? sA / nc : 0, b: nc ? sB / nc : 0, c: nc ? sC / nc : 0 } };
   }
 
-  /** One frame of the format-2 export (EXTENDING.md §5): plain arrays, rounded. */
-  snapshot() {
-    const NV = this.NV, n = this.nCells, nS = this.nSpecies;
+  /**
+   * One frame of the format-2 export (EXTENDING.md §5): plain arrays, rounded.
+   * `opts.fields = false` leaves the per-field grids out of the frame (they are the biggest part
+   * of it — 26-38 % of a frame's JSON — and §5 says a reader must tolerate a frame without them).
+   */
+  snapshot(opts = {}) {
+    const NV = this.NV, n = this.nCells, nS = this.nSpecies, withFields = opts.fields !== false;
     const f = new Float32Array(3 * NV);
     for (let v = 0; v < NV; v++) { f[3 * v] = this.fx[v]; f[3 * v + 1] = this.fy[v]; f[3 * v + 2] = this.fz[v]; }
     const phi = new Float32Array(NV);
@@ -1693,9 +1758,9 @@ export class TissueEngine {
     const species = {};
     for (let s = 0; s < nS; s++) species[this.speciesKeys[s]] = tmRoundArray(this.species[s], 3);
     const fields = {};                                   // E1: diffusible fields travel with the frame
-    for (let f = 0; f < this.nFields; f++) fields[this.fieldKeys[f]] = tmRoundArray(this.fields[f], 4);
+    if (withFields) for (let f = 0; f < this.nFields; f++) fields[this.fieldKeys[f]] = tmRoundArray(this.fields[f], 4);
     const a = tmRoundArray(this._ca.subarray(0, n), 3);
-    return {
+    const frame = {
       t: Math.round(this.time * 1000) / 1000,
       species,
       fields,
@@ -1711,6 +1776,8 @@ export class TissueEngine {
         alpha: a,                               // format-1 readers
       },
     };
+    if (!withFields) delete frame.fields;
+    return frame;
   }
 
   /**
@@ -1735,7 +1802,16 @@ export class TissueEngine {
       loadRange: this._loadDial >= 0 ? [t.dials[this._loadDial].min, t.dials[this._loadDial].max] : null,
       cellCountDial: this._cellDial >= 0 ? this.dialKeys[this._cellDial] : null,
       species: t.species.map((s) => ({ key: s.key, label: s.label, kind: s.kind, color: s.color })),
-      fields: t.fields.map((f) => ({ key: f.key, label: f.label, color: f.color })),
+      // A field's render hints travel with it when the definition sets them, so an offline
+      // renderer draws the haze the browser drew (blender/import_tissue.py already reads
+      // `pointScale`).  Emitted only when declared, so an export is byte-identical for a
+      // definition that sets neither.
+      fields: t.fields.map((f) => {
+        const m = { key: f.key, label: f.label, color: f.color };
+        if (+f.pointScale > 0) m.pointScale = +f.pointScale;
+        if (typeof f.style === 'string' && f.style) m.style = f.style;
+        return m;
+      }),
       cellTypes: t.cellTypes.map((c) => {
         const meta = { key: c.key, label: c.label, colors: c.colors.slice(), shape: Object.assign({}, c.shape), radius: c.radius };
         if (c.radius && typeof c.radius === 'object') { meta.radius = c.radius.min; meta.radiusBy = Object.assign({}, c.radius); }
@@ -1820,27 +1896,40 @@ export class TissueEngine {
     const at0 = (c) => (Array.isArray(c.at) ? c.at[0] : c.at);
     return checks.map((check) => {
       let value;
+      let crossed;
       if (Array.isArray(check.at)) {
-        const vals = [];
+        const vals = [], days = [];
         for (let q = g(check.at[0]); q <= g(check.at[1]); q++) {
           const s = rec.get(q);
           const x = s === undefined ? undefined : engineStatFrom(s, check.stat);
-          if (x !== undefined) vals.push(x);
+          if (x !== undefined) { vals.push(x); days.push(q / 2); }
         }
-        value = vals.length ? ENGINE_AGGS[check.agg](vals) : undefined;
+        if (check.agg === 'cross') {
+          // "when does it first happen?": the first sample in the window where stat op threshold
+          const op = ENGINE_OPS[check.op];
+          let k = -1;
+          for (let z = 0; z < vals.length; z++) if (op(vals[z], check.threshold)) { k = z; break; }
+          crossed = k < 0 ? null : { day: days[k], stat: vals[k] };
+          value = crossed ? crossed.day : undefined;                // the VALUE of a cross check is the DAY
+        } else value = vals.length ? ENGINE_AGGS[check.agg](vals) : undefined;
       } else {
         value = engineStatFrom(rec.get(g(check.at)), check.stat);
       }
       let pass, ref;
-      if (check.rel) {
+      if (check.agg === 'cross') {
+        ref = check.threshold;
+        pass = crossed !== null && crossed !== undefined;           // a crossing was found in range
+      } else if (check.rel) {
         const at = check.rel.at === undefined ? at0(check) : check.rel.at;
-        ref = engineStatFrom(rec.get(g(at)), check.rel.stat) + (check.value === undefined ? 0 : check.value);
+        const base = engineStatFrom(rec.get(g(at)), check.rel.stat);
+        // reference = rel.stat(rel.at) · factor + value  (factor defaults to 1, value to 0)
+        ref = base * (check.rel.factor === undefined ? 1 : check.rel.factor) + (check.value === undefined ? 0 : check.value);
         pass = ENGINE_OPS[check.rel.op](value, ref);
       } else {
         ref = check.value;
         pass = ENGINE_OPS[check.op](value, check.value);
       }
-      return { check, value, ref, pass: !!pass };
+      return crossed === undefined ? { check, value, ref, pass: !!pass } : { check, value, ref, pass: !!pass, crossed };
     });
   }
 
@@ -1879,6 +1968,10 @@ export class TissueEngine {
       if (s.boundary !== undefined && s.boundary !== 'face:+z') err.push(`species '${s.key}' boundary must be 'face:+z' (the only species boundary)`);
       if (s.mode !== undefined && !['auto', 'explicit', 'subcycled'].includes(s.mode)) {
         err.push(`species '${s.key}' mode must be auto|explicit|subcycled (transport moves mass, so there is no quasiSteady)`);
+      }
+      if (s.carryTensor !== undefined) {
+        if (typeof s.carryTensor !== 'boolean') err.push(`species '${s.key}' carryTensor must be a boolean`);
+        else if (s.kind !== 'fiber') err.push(`species '${s.key}' carryTensor only applies to a kind:'fiber' species`);
       }
     });
     if (!Array.isArray(t.fields)) err.push('fields must be an array');
@@ -1991,16 +2084,29 @@ export class TissueEngine {
           const w = `scenario '${s.key}' checks[${j}]`;
           if (Array.isArray(c.at)) {
             if (c.at.length !== 2 || !c.at.every(isNum) || c.at[0] < 0 || c.at[1] < c.at[0]) err.push(`${w}: at [from, to] needs 0 ≤ from ≤ to`);
-            if (!(c.agg in ENGINE_AGGS)) err.push(`${w}: at [from, to] needs agg min|max|mean|first`);
+            if (!ENGINE_AGG_KEYS.includes(c.agg)) err.push(`${w}: at [from, to] needs agg min|max|mean|first|cross`);
           } else {
             if (!isNum(c.at) || c.at < 0) err.push(`${w}: at must be a day ≥ 0 (or [from, to] with agg)`);
             if (c.agg !== undefined) err.push(`${w}: agg only applies to at [from, to]`);
           }
           checkPath(c.stat, w);
-          if (c.rel) {
+          if (c.threshold !== undefined && c.agg !== 'cross') err.push(`${w}: threshold only applies to agg 'cross' (a plain check compares with 'value')`);
+          if (c.agg === 'cross') {
+            // { at: [from, to], agg: 'cross', stat, op, threshold } — the first day stat op threshold
+            // holds; the check passes when that day exists inside the window, and the reported
+            // `value` IS that day (so `value` as a level would be ambiguous and is rejected).
+            if (c.rel) err.push(`${w}: agg 'cross' reports the crossing DAY, so it takes no rel reference`);
+            if (c.value !== undefined) err.push(`${w}: agg 'cross' uses 'threshold' for the level and the 'at' range as the deadline; drop 'value'`);
+            if (c.op === 'between') {
+              if (!Array.isArray(c.threshold) || c.threshold.length !== 2 || !c.threshold.every(isNum) || c.threshold[0] > c.threshold[1]) err.push(`${w}: cross with between needs threshold [lo, hi]`);
+            } else if (c.op === 'gt' || c.op === 'lt') {
+              if (!isNum(c.threshold)) err.push(`${w}: agg 'cross' needs a numeric threshold`);
+            } else err.push(`${w}: op must be gt|lt|between`);
+          } else if (c.rel) {
             checkPath(c.rel.stat, `${w}.rel`);
             if (!['gt', 'lt'].includes(c.rel.op)) err.push(`${w}.rel.op must be gt|lt`);
             if (c.rel.at !== undefined && (!isNum(c.rel.at) || c.rel.at < 0)) err.push(`${w}.rel.at must be a day ≥ 0`);
+            if (c.rel.factor !== undefined && !isNum(c.rel.factor)) err.push(`${w}.rel.factor must be a number`);
             if (c.value !== undefined && !isNum(c.value)) err.push(`${w}: value (offset) must be a number`);
           } else if (c.op === 'between') {
             if (!Array.isArray(c.value) || c.value.length !== 2 || !c.value.every(isNum) || c.value[0] > c.value[1]) err.push(`${w}: between needs value [lo, hi]`);
@@ -2052,7 +2158,8 @@ export class TissueEngine {
     if (t.copy !== undefined && (typeof t.copy !== 'object' || t.copy === null)) err.push('copy must be an object');
     if (t.copy && t.copy.vocabulary) for (const k of ['matrix', 'cellsActive', 'cellsQuiet']) if (!isStr(t.copy.vocabulary[k])) err.push(`copy.vocabulary.${k} missing`);
     if (!err.length) {
-      const warn = TissueEngine.warnings(t, opts);
+      // only the ACTIONABLE notes are printed; TissueEngine.notes() has the rest (§7.1)
+      const warn = TissueEngine.notes(t, opts).filter((n) => n.actionable).map((n) => n.text);
       if (warn.length && typeof console !== 'undefined' && console.warn) {
         let seen = ENGINE_WARNED.get(t);
         if (!seen) { seen = new Set(); ENGINE_WARNED.set(t, seen); }
@@ -2063,28 +2170,29 @@ export class TissueEngine {
   }
 
   /**
-   * Non-fatal notes about a VALID definition (docs/EXTENDING.md §7.1).  Each is something the
-   * engine works around silently but an author should know about:
-   *   - a field or species whose diffusion number lam = D·dt/h² is above the explicit limit 1/6,
-   *     naming the field, lam and the integration mode the engine picked (A1);
-   *   - a repulsion range 2·max(rCell) that is not smaller than a voxel, which the 27-bin
-   *     neighbour search assumes;
-   *   - cell seeding with neither a role:'cellCount' dial nor any cellTypes[].count, or with both.
-   * `opts.overrides` are the constructor's engine overrides. Pure: returns the strings, prints nothing.
+   * Non-fatal notes about a VALID definition (docs/EXTENDING.md §7.1), as
+   * `[{ text, actionable }]`.  `actionable` marks the ones that describe a WORK-AROUND — something
+   * the engine is doing differently from what the definition asks for, or a setup that will not do
+   * what it looks like.  validate() prints only those; the rest are data for a tool
+   * (`engine.fieldModes` / `speciesModes` report the same modes) and would otherwise train a
+   * reader to ignore the console on a correctly-integrated tissue.
    */
-  static warnings(t, opts = {}) {
+  static notes(t, opts = {}) {
     const out = [];
     if (!t || typeof t !== 'object' || !Array.isArray(t.fields) || !Array.isArray(t.species) || !Array.isArray(t.cellTypes) || !Array.isArray(t.dials)) return out;
     const P = Object.assign({}, ENGINE_DEFAULTS, t.engine || {}, opts.overrides || {});
     const h = P.L / (P.N | 0), h2 = h * h;
+    const note = (actionable, text) => ({ text, actionable });
     const say = (what, lam, r, steady) => {
       const head = `${what}: lam = D·dt/h² = ${engineFmt(lam)}`;
-      if (r.mode === 0) return `${head} > 1/6 but mode is 'explicit' — the diffusion number is CLAMPED at 1/6, so it integrates as if D were ${engineFmt(ENGINE_LAM_STABLE * h2 / P.dt)}`;
-      if (r.mode === 2) return `${head} → mode 'quasiSteady' (steady solve, ≤ ${ENGINE_QS_SWEEPS} sweeps to ${ENGINE_QS_TOL})`;
+      // clamped explicit: the engine is running a different D from the one the definition declares
+      if (r.mode === 0) return note(true, `${head} > 1/6 but mode is 'explicit' — the diffusion number is CLAMPED at 1/6, so it integrates as if D were ${engineFmt(ENGINE_LAM_STABLE * h2 / P.dt)}`);
+      if (r.mode === 2) return note(false, `${head} → mode 'quasiSteady' (steady solve, ≤ ${ENGINE_QS_SWEEPS} sweeps to ${ENGINE_QS_TOL})`);
+      if (r.nSub === 1) return note(false, `${head} ≤ 1/6, so the requested mode 'subcycled' runs as ONE sub-step — identical arithmetic to 'explicit'`);
       let msg = `${head} > 1/6 → mode 'subcycled' (${r.nSub} explicit sub-steps per step)`;
       if (r.capped) msg += `; ${r.nWant} would be needed, capped at ${ENGINE_SUB_MAX}${steady ? " — set mode: 'quasiSteady'" : ' — this field has no steady state (no Dirichlet face, kBath or decay), so it is integrated in time'}`;
       else if (r.fellBack) msg += " — mode 'quasiSteady' needs a Dirichlet face, kBath > 0 or decay > 0";
-      return msg;
+      return note(!!(r.capped || r.fellBack), msg);
     };
     for (const f of t.fields) {
       const lam = (f.D || 0) * P.dt / h2, steady = TissueEngine._steadySolvable(f);
@@ -2101,11 +2209,38 @@ export class TissueEngine {
     let rMax = P.rCell;
     for (const c of t.cellTypes) if (typeof c.rCell === 'number' && c.rCell > rMax) rMax = c.rCell;
     if (2 * rMax >= h) {
-      out.push(`repulsion range 2·max(rCell) = ${engineFmt(2 * rMax)} is not smaller than a voxel (h = ${engineFmt(h)}): the 27-bin neighbour search can miss overlapping cells — lower rCell or raise N`);
+      out.push(note(true, `repulsion range 2·max(rCell) = ${engineFmt(2 * rMax)} is not smaller than a voxel (h = ${engineFmt(h)}): the 27-bin neighbour search can miss overlapping cells — lower rCell or raise N`));
     }
     const hasDial = t.dials.some((d) => d.role === 'cellCount'), hasCount = t.cellTypes.some((c) => Number.isInteger(c.count));
-    if (hasDial && hasCount) out.push("both a role:'cellCount' dial and cellTypes[].count: the dial sets the TOTAL, the counted types are seeded first and the rest share what is left by `fraction`");
-    if (!hasDial && !hasCount) out.push("no role:'cellCount' dial and no cellTypes[].count: the tissue starts with no cells (unless a scenario's init.from brings some)");
+    if (hasDial && hasCount) out.push(note(false, "both a role:'cellCount' dial and cellTypes[].count: the dial sets the TOTAL, the counted types are seeded first and the rest share what is left by `fraction`"));
+    if (!hasDial && !hasCount) out.push(note(true, "no role:'cellCount' dial and no cellTypes[].count: the tissue starts with no cells (unless a scenario's init.from brings some)"));
+    if (hasCount && !hasDial) {
+      const bare = t.cellTypes.filter((c) => !Number.isInteger(c.count)).map((c) => c.key);
+      if (bare.length) {
+        out.push(note(true, `cellTypes[].count without a role:'cellCount' dial: the tissue seeds Σ count cells, so the types that declare no count (${bare.join(', ')}) get a share of nothing and are NEVER seeded — give them a count too, or add a role:'cellCount' dial`));
+      }
+    }
+    // a windowed check that compares its own aggregate with its own first sample can be trivially false
+    for (const s of (Array.isArray(t.scenarios) ? t.scenarios : [])) {
+      const checks = Array.isArray(s.checks) ? s.checks : [];
+      checks.forEach((c, j) => {
+        if (!Array.isArray(c.at) || !c.rel || c.rel.stat !== c.stat) return;
+        if (c.rel.at !== undefined && c.rel.at !== c.at[0]) return;
+        if (c.rel.factor !== undefined && c.rel.factor !== 1) return;
+        const off = c.value === undefined ? 0 : c.value;
+        const dead = (c.agg === 'max' && c.rel.op === 'lt' && off <= 0) || (c.agg === 'min' && c.rel.op === 'gt' && off >= 0);
+        if (dead) {
+          out.push(note(true, `scenario '${s.key}' checks[${j}]: agg '${c.agg}' of '${c.stat}' compared '${c.rel.op}' with the SAME stat at the start of its range can never pass — the ${c.agg} includes the reference sample. Use agg '${c.agg === 'max' ? 'min' : 'max'}', put rel.at before the range, or start half a day later.`));
+        }
+      });
+    }
     return out;
   }
+
+  /**
+   * The notes of TissueEngine.notes() as plain strings (docs/EXTENDING.md §7.1).
+   * `opts.overrides` are the constructor's engine overrides, so the reported diffusion numbers are
+   * the ones this engine will really run with.  Pure: returns the strings, prints nothing.
+   */
+  static warnings(t, opts = {}) { return TissueEngine.notes(t, opts).map((n) => n.text); }
 }

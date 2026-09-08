@@ -228,6 +228,16 @@ total degradation rate this step, rendered as a two-sided bar
   frame; must avoid per-instance allocations (reuse Matrix4/Quaternion/Color).
 - Expose `render.screenshot()` returning a data URL (used by tests).
 
+> **v0.3+:** the numbers above are the **v0.1** laws and no longer describe either renderer.
+> The fiber layout (offsets, jitter, direction, length, radius, the density fade that replaced
+> the hard `rho < 0.03` cut) lives in [`src/recipe.js`](../src/recipe.js), shared byte-for-byte
+> with `blender/import_tissue.py` and guarded by `blender/test_recipe_parity.py`; the colour
+> ramps, the gel/scaffold/field layers and the tone curve live in
+> [`src/render.js`](../src/render.js), and the renderer contract is
+> [`docs/EXTENDING.md`](EXTENDING.md) §4. Colours come from the tissue definition, not from this
+> section. What survives here is the visual *language* — what a fiber, a cell and a field are
+> meant to read as.
+
 ### 1.10 Export JSON (for Blender)
 ```
 { "meta": {"N":12, "L":1, "K":3, "dtDays":0.02, "scenario":"...", "dials":{...}},

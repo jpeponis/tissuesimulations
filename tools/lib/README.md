@@ -8,20 +8,12 @@ plain ES modules with ordinary imports.
 |---|---|
 | `browser.mjs` | the Playwright harness plumbing: find Playwright, serve a directory, launch Chromium with software WebGL, answer the CDN origins from a cache, and always clean both up again |
 
-## `browser.mjs` — migration note for `screenshot_app.mjs` and `render_smoke.mjs`
+## `browser.mjs`
 
-Both harnesses grew their own copy of the same four things, and each copy has a bug the other does
-not (docs/REVIEW.md **D9**). `browser.mjs` is the single version; adopting it is a mechanical
-edit, and it is deliberately left to the owners of those two files:
-
-| what the tool does today | replace with | what that fixes |
-|---|---|---|
-| its own `loadPlaywright()` (bare import → `npm root -g`) | `loadPlaywright()` | one copy; also tries `playwright-core` |
-| `spawn('python3', ['-m', 'http.server', …])` + `await sleep(700)` (`screenshot_app.mjs`) | `await serveDir(root, { port: 0 })` | no python dependency, no sleep race, a free port every time, and `server.close()` instead of `server.kill()` |
-| `startServer()` (`render_smoke.mjs`) | `await serveDir(root, { port })` | same code, one place; `port: 0` picks a free port |
-| `chromium.launch({ args: [swiftshader…] })` + `newContext({ viewport })` | `await launchChromium(null, { width, height })` | identical flags in both harnesses; closes the browser if the context throws |
-| `cached(url)` / `cdnCached(url)` + `context.route(origin + '/**', …)` | `await routeCdnCache(context, { cacheDir })` | `curl --fail` (a 404 page can no longer be cached and served as JavaScript), download to `<file>.part` and rename only on success, and the cache lives in `os.tmpdir()` instead of `dist/cdn-cache` |
-| `await browser.close(); server.kill();` at the end of the script | wrap the run in `await withHarness({ root, width, height }, async ({ page, url }) => { … })` | an exception anywhere in the middle no longer leaks a browser process and a listening socket |
+`tools/screenshot_app.mjs` and `tools/render_smoke.mjs` both drive a real headless Chromium, and
+each of them used to carry its own copy of the same four things — with a different bug in each
+(docs/REVIEW.md **D9**). This module is the single version they now share; `tests/tools.test.mjs`
+checks that they still import it and that neither has grown its own server again.
 
 ```js
 import { withHarness } from './lib/browser.mjs';
@@ -34,20 +26,26 @@ const failures = await withHarness({ root: repoRoot, width: 1440, height: 900 },
 process.exit(failures.length ? 1 : 0);
 ```
 
-Notes for the migration:
+| export | what it does |
+|---|---|
+| `loadPlaywright()` | the `playwright` module: the bare import first, then the global install (`npm root -g`), then `playwright-core` |
+| `serveDir(root, { port })` | a static server over `root`, resolved once the socket is listening (no sleep race, no `python3` dependency); `port: 0` picks a free port. Returns `{ url, port, close() }`, and `close()` is idempotent |
+| `launchChromium(pw, { width, height, … })` | Chromium with SwiftShader WebGL plus one context; closes the browser if the context throws. Remaining options go to `newContext` (`reducedMotion`, `deviceScaleFactor`, `proxy`, …) |
+| `fetchCached(url, { cacheDir })` | one cached download: `curl --fail` into `<file>.part`, renamed only on success — a CDN error page can never be cached and later served to the browser as JavaScript, and an interrupted run leaves no half file |
+| `routeCdnCache(context, { cacheDir, onMiss })` | serve `cdn.jsdelivr.net` and Google Fonts from that cache. Returns `{ hits, misses }`; a miss means the asset was neither cached nor reachable, so report it rather than let the page load half-dressed |
+| `withHarness(opts, fn)` | serve + launch + route, run `fn({ server, browser, context, page, url })`, and close everything in a `finally` — the one place that owns the cleanup, so no harness can leak a browser process and a listening socket on an early failure. `{ page: false }` when the tool opens its own pages |
+| `cdnCacheDir()`, `CDN_ORIGINS`, `BROWSER_MIME`, `BROWSER_UA` | the defaults the above use |
 
-- `serveDir` sets `cache-control: no-store` and serves `index.html` for a directory, like both
-  current servers do. It refuses paths that escape the served root.
-- `routeCdnCache` returns `{ hits, misses }`. A miss means the asset was neither cached nor
-  reachable — report it rather than letting the page load half-dressed. Pass `onMiss` to collect
-  them into the harness's own problem list instead of `console.error`.
-- The default cache is `os.tmpdir()/tissue-weather-cdn-cache`. Pass
-  `cacheDir: join(root, 'dist', 'cdn-cache')` to keep using the in-repo cache (it is git-ignored,
-  and `tools/build_single.mjs --vendor` reads it as one of its sources for the offline page).
-- `launchChromium` takes the remaining `newContext` options through (`reducedMotion`,
-  `deviceScaleFactor`, `proxy`, …), so a harness that needs `--proxy` or reduced motion keeps
-  passing exactly what it passes today.
-- `withHarness({ page: false })` when the tool wants to open several pages itself.
+Notes:
+
+- The default cache is `os.tmpdir()/tissue-weather-cdn-cache`, so a harness never writes into the
+  repository. Pass `cacheDir: join(root, 'dist', 'cdn-cache')` to use the in-repo cache instead (it
+  is git-ignored, and `tools/build_single.mjs --vendor` reads it as one of its sources for the
+  offline page).
+- `serveDir` sets `cache-control: no-store`, serves `index.html` for a directory, and refuses paths
+  that escape the served root.
+- A new tool that needs a browser should start from `withHarness` rather than a fifth copy of
+  `chromium.launch`.
 
 `tests/tools.test.mjs` covers the parts that need no browser: `serveDir` (serves, refuses
-traversal, closes) and `fetchCached` (caches, never keeps a failed download).
+traversal, closes twice) and `fetchCached` (caches, never keeps a failed download).

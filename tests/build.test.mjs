@@ -108,18 +108,27 @@ describe('single-file build (tools/build_single.mjs)', () => {
   });
   after(() => { if (tmp) rmSync(tmp, { recursive: true, force: true }); });
 
+  // `<body>` appears twice as PROSE — once in an HTML comment in index.html and once in a JS
+  // comment in src/app.js, both explaining the same focus rule — so the tag scans below run on the
+  // page with its comments and its raw-text (script/style) contents removed. Counting tags in text
+  // that only looks like markup is how a scanner reports a page it has misread.
+  const markupOnly = (s) => s
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(script|style|textarea|title)\b[^>]*>[\s\S]*?<\/\1>/gi, (m) => `${m.slice(0, m.indexOf('>') + 1)}${m.slice(m.lastIndexOf('</'))}`);
+
   test('the page parses as HTML: doctype, one html/head/body, every tag closed', () => {
     assert.match(full, /^<!doctype html>/i);
+    const markup = markupOnly(full);
     for (const tag of ['html', 'head', 'body']) {
-      assert.equal((full.match(new RegExp(`<${tag}[\\s>]`, 'gi')) || []).length, 1, `exactly one <${tag}>`);
-      assert.equal((full.match(new RegExp(`</${tag}>`, 'gi')) || []).length, 1, `exactly one </${tag}>`);
+      assert.equal((markup.match(new RegExp(`<${tag}[\\s>]`, 'gi')) || []).length, 1, `exactly one <${tag}>`);
+      assert.equal((markup.match(new RegExp(`</${tag}>`, 'gi')) || []).length, 1, `exactly one </${tag}>`);
     }
     const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
     const RAW = new Set(['script', 'style', 'textarea', 'title']);
     const stack = [];
     const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*?)(\/?)>/g;
     let m;
-    while ((m = tagRe.exec(full))) {
+    while ((m = tagRe.exec(markup))) {
       const [, close, rawName, , selfClose] = m;
       const name = rawName.toLowerCase();
       if (close) {
@@ -129,7 +138,7 @@ describe('single-file build (tools/build_single.mjs)', () => {
       }
       if (VOID.has(name) || selfClose === '/') continue;
       if (RAW.has(name)) {                                     // skip raw text: no markup inside
-        const end = full.toLowerCase().indexOf(`</${name}>`, tagRe.lastIndex);
+        const end = markup.toLowerCase().indexOf(`</${name}>`, tagRe.lastIndex);
         assert.ok(end > 0, `<${name}> is never closed`);
         tagRe.lastIndex = end + name.length + 3;
         continue;
@@ -171,7 +180,8 @@ describe('single-file build (tools/build_single.mjs)', () => {
   });
 
   test('the artifact fragment is the same page without the document skeleton', () => {
-    for (const tag of ['<!doctype', '<html', '<head>', '<body>']) assert.ok(!fragment.toLowerCase().includes(tag), `fragment still contains ${tag}`);
+    const bare = markupOnly(fragment).toLowerCase();
+    for (const tag of ['<!doctype', '<html', '<head>', '<body>']) assert.ok(!bare.includes(tag), `fragment still contains ${tag}`);
     assert.match(fragment, /^<title>/);
     assert.equal((fragment.match(/<script\s+type="module"/g) || []).length, 1);
     assert.ok(fragment.length > 0.5 * full.length, 'the fragment should carry the whole app');
@@ -197,11 +207,13 @@ describe('the build refuses to write a broken bundle (docs/REVIEW.md D1)', () =>
       mkdirSync(join(dir, 'tools'), { recursive: true });
       cpSync(join(root, 'tools', 'build_single.mjs'), join(dir, 'tools', 'build_single.mjs'));
       if (mutate) mutate(dir);
+      const out = join(dir, 'dist', 'tissue-weather.html');
+      const read = () => (existsSync(out) ? readFileSync(out, 'utf8') : '');
       try {
         const stdout = execFileSync(process.execPath, [join(dir, 'tools', 'build_single.mjs')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-        return { status: 0, stdout, stderr: '', dir, wrote: existsSync(join(dir, 'dist', 'tissue-weather.html')) };
+        return { status: 0, stdout, stderr: '', dir, wrote: existsSync(out), page: read() };
       } catch (e) {
-        return { status: e.status ?? 1, stdout: (e.stdout || '').toString(), stderr: (e.stderr || '').toString(), dir, wrote: existsSync(join(dir, 'dist', 'tissue-weather.html')) };
+        return { status: e.status ?? 1, stdout: (e.stdout || '').toString(), stderr: (e.stderr || '').toString(), dir, wrote: existsSync(out), page: read() };
       }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
@@ -271,6 +283,53 @@ describe('the build refuses to write a broken bundle (docs/REVIEW.md D1)', () =>
     const r = buildIn(null);
     assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
     assert.ok(r.wrote);
+  });
+
+  // The strip is line-based, so it used to rewrite `import` / `export` lines inside STRINGS too:
+  // the line vanished from the copy (hoisted or dropped) or lost its keyword, and the build still
+  // said "built … 434 KB". A teaching app whose copy quotes JavaScript is exactly where such a
+  // line appears, so the build now tokenizes each file first and only touches real statements.
+  test('an `import` / `export` line inside a literal or a comment is text, not a statement', () => {
+    const snippet = [
+      '',
+      'export const COPY_SNIPPET_DEMO = `<pre>',
+      "import * as THREE from 'three';",
+      'export const example = 1;',
+      '</pre>`;',
+      "const COPY_TRICKY_DEMO = { a: 'a backtick ` and a quote \"', b: /[\"\\'`\\/]+/.test('x') };",
+      "function copyTrickyQuote(s) { return /[\"'`]/.test(s); }        // a regex right after `return`",
+      '/* a block comment that says',
+      'export default nothing;',
+      "import { x } from './nope.js';",
+      '*/',
+      'export const COPY_TRICKY_AFTER = COPY_TRICKY_DEMO.b ? 3 : 4;',
+      '',
+    ].join('\n');
+    const r = buildIn((dir) => {
+      const p = join(dir, 'src', 'copy.js');
+      writeFileSync(p, `${readFileSync(p, 'utf8')}${snippet}`);
+    });
+    assert.equal(r.status, 0, `the snippet is data, so the build must succeed\n${r.stdout}${r.stderr}`);
+    assert.ok(r.page.includes("import * as THREE from 'three';\nexport const example = 1;\n</pre>`;"),
+      'the quoted import/export lines must reach the bundle unchanged');
+    assert.ok(r.page.includes("export default nothing;\nimport { x } from './nope.js';"),
+      'so must the ones inside the block comment');
+    assert.ok(!/from 'nowhere'|from '\.\/nope\.js'/.test(r.page.slice(r.page.indexOf('<script type="module">'), r.page.indexOf('<script type="module">') + 400)),
+      'nothing from a literal may be hoisted into the import block at the top');
+    // …and the scanner must find its way back to code: the declaration AFTER the literal is stripped
+    assert.ok(r.page.includes('const COPY_TRICKY_AFTER = '), 'the declaration after the literal is still in the bundle');
+    assert.ok(!r.page.includes('export const COPY_TRICKY_AFTER'), '`export ` after a template literal must still be stripped');
+  });
+
+  test('a file the tokenizer cannot follow to the end is an error, not a guess', () => {
+    const r = buildIn((dir) => {
+      const p = join(dir, 'src', 'copy.js');
+      writeFileSync(p, `${readFileSync(p, 'utf8')}\nconst COPY_UNTERMINATED = \`oops;\n`);
+    });
+    assert.equal(r.status, 1, 'an unterminated template literal must stop the build');
+    assert.match(r.stderr, /src\/copy\.js: this file could not be tokenized/);
+    assert.match(r.stderr, /template literal/);
+    assert.ok(!r.wrote, 'nothing may be written when the scan fails');
   });
 });
 

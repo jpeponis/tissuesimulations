@@ -152,12 +152,14 @@ for (const [regKey, t] of Object.entries(CONFORMANCE)) {
   });
 }
 
-// ---------------------------------------------------------------- golden regression (fibrous, seed 7)
-// Two files, two jobs (docs/REVIEW.md D2):
-//   golden/fibrous.json         recorded from v0.1 model.js — "still the same MODEL", 3 % / 0.01
-//   golden/fibrous.engine.json  recorded from this engine (tools/make_golden.mjs) — "still the same
-//                               ARITHMETIC", 1e-5 relative / 1e-7 absolute on every recorded stat path
-const goldenSuite = (file, label, tolOf) => describe(`golden regression: fibrous vs tests/golden/${file} (${label})`, () => {
+// ---------------------------------------------------------------- golden regression (seed 7)
+// Two kinds of file, two jobs (docs/REVIEW.md D2):
+//   golden/fibrous.json           recorded from v0.1 model.js — "still the same MODEL", 3 % / 0.01
+//   golden/<tissue>.engine.json   recorded from this engine (tools/make_golden.mjs) — "still the same
+//                                 ARITHMETIC", 1e-5 relative / 1e-7 absolute on every recorded path.
+// The suite is tissue-agnostic: a format-2 golden names its own tissue and carries its own runs, so
+// recording one for a new tissue is `make_golden --tissue <key> --out …` plus one line below.
+const goldenSuite = (file, label, tolOf) => describe(`golden regression: tests/golden/${file} (${label})`, () => {
   const golden = JSON.parse(readFileSync(new URL(`./golden/${file}`, import.meta.url), 'utf8'));
   // v0.1 stats names → stat paths; format-2 goldens already use stat paths
   const LEGACY = { meanRho: 'species.total', meanRhoMat: 'species.mat', meanFA: 'fa', meanAlpha: 'cells.a' };
@@ -170,14 +172,15 @@ const goldenSuite = (file, label, tolOf) => describe(`golden regression: fibrous
     const init = r.init && r.init.rho0 !== undefined ? { species: { new: r.init.rho0, mat: r.init.phiMat0 ? r.init.rho0 * r.init.phiMat0 : 0 } } : r.init;
     return { scenario: r.scenario, days: r.days, dials: r.dials, init, events };
   };
-  const tissue = TISSUES.fibrous;
-  assert.ok(tissue, 'fibrous must be registered');
+  const tissueKey = golden.tissue || 'fibrous';                 // the v0.1 file predates the key
+  const tissue = TISSUES[tissueKey];
+  assert.ok(tissue, `${tissueKey} must be registered`);
   const M = new TissueEngine(tissue, { seed: golden.seed });
   const spd = Math.round(1 / M.dt);
   const summary = {};
 
   for (const [key, raw] of Object.entries(golden.runs)) {
-    test(`run '${key}': ${raw.scenario}, ${raw.days} d, ${raw.rows.length} recorded days`, () => {
+    test(`${tissue.key} run '${key}': ${raw.scenario}, ${raw.days} d, ${raw.rows.length} recorded days`, () => {
       const r = normalise(raw);
       M.reset(r.scenario, { dials: r.dials, init: r.init });
       const fire = (d) => { for (const e of r.events) if (e.at === d) { if (e.dials) M.setDials(e.dials); if (e.injure) M.injure(e.injure.center, e.injure.radius); } };
@@ -216,6 +219,7 @@ const goldenSuite = (file, label, tolOf) => describe(`golden regression: fibrous
 });
 goldenSuite('fibrous.json', 'v0.1 model.js, 3 %', (gv) => Math.max(0.01, 0.03 * Math.abs(gv)));
 goldenSuite('fibrous.engine.json', 'this engine, 1e-5', (gv) => Math.max(1e-7, 1e-5 * Math.abs(gv)));
+goldenSuite('cartilage.engine.json', 'this engine, 1e-5', (gv) => Math.max(1e-7, 1e-5 * Math.abs(gv)));
 
 // ---------------------------------------------------------------- engine API (using fibrous)
 describe('engine API', () => {
@@ -503,17 +507,78 @@ describe('engine v0.3: species transport, per-species orientation, accumulators'
     for (let v = 0; v < M.NV; v++) assert.ok(g[v] >= 0 && g[v] <= 1, `bounded at ${v}: ${g[v]}`);
   });
 
-  test('species sink: the +z layer loses sink·rho·dt and it counts as degradation', () => {
-    const M = labBare({}, 0);                         // mobility 0 → sink only, no diffusion
-    const N = M.N, iGag = M.speciesIndex.gag;
-    M.species[iGag].fill(0.5);
-    M.step(5);
-    const g = M.species[iGag];
-    assert.ok(Math.abs(g[(N - 1)] - 0.5 * (1 - 0.8 * M.dt) ** 5) < 1e-6, `top layer ${g[N - 1]}`);
+  test('species sink: the +z layer loses sink·rho·dt·mobility and it counts as degradation', () => {
+    // The mesh gates the leak exactly as it gates diffusion. Sink without D, so the closed form
+    // is exact: a mobility of m loses (1 − m·sink·dt) of the face layer per step, and nothing else.
+    const t = Object.assign({}, LAB, { species: LAB.species.map((s) => (s.key === 'gag' ? Object.assign({}, s, { D: 0 }) : s)) });
+    assert.deepEqual(TissueEngine.validate(t), [], 'fixture valid');
+    const dt = LAB.engine.dt;
+    const top = (mob) => {
+      const M = new TissueEngine(t, { seed: 3 });
+      M.reset('grow', { dials: { nCells: 40 } });
+      M.species.forEach((a) => a.fill(0));
+      M.rules.cell = () => {};
+      M.rules.voxel = (ctx) => { ctx.out.E = 1; ctx.out.mobility = mob; };
+      M.species[M.speciesIndex.gag].fill(0.5);
+      M.step(5);
+      return { g: M.species[M.speciesIndex.gag], s: M.stats(), N: M.N };
+    };
+    const sealed = top(0);                            // a sealed mesh keeps the aggrecan in
+    assert.equal(sealed.g[sealed.N - 1], 0.5, 'mobility 0 holds the face layer');
+    assert.equal(sealed.s.degradation, 0, 'and nothing reaches the flux gauge');
+    const open = top(1);                              // mobility 1 (the default) → the v0.3 arithmetic
+    const N = open.N, g = open.g;
+    assert.ok(Math.abs(g[N - 1] - 0.5 * (1 - 0.8 * dt) ** 5) < 1e-6, `top layer ${g[N - 1]}`);
     assert.equal(g[0], 0.5, 'every other layer is untouched');
-    const s = M.stats();
+    const s = open.s;
     assert.ok(s.degradation > 0 && s.cumDegradation > 0, 'sink loss reaches the flux gauge');
-    assert.ok(Math.abs(s.cumDegradation - s.degradation * 5 * M.dt) / s.cumDegradation < 0.05, 'cumDegradation is its integral');
+    assert.ok(Math.abs(s.cumDegradation - s.degradation * 5 * dt) / s.cumDegradation < 0.05, 'cumDegradation is its integral');
+    const half = top(0.5);
+    assert.ok(Math.abs(half.g[N - 1] - 0.5 * (1 - 0.5 * 0.8 * dt) ** 5) < 1e-6, `half-open mesh: ${half.g[N - 1]}`);
+  });
+
+  test('a fiber species with carryTensor: false travels as a felt (T is not carried)', () => {
+    const build = (carryTensor) => {
+      const sp = LAB.species.map((s) => (s.key === 'felt' ? Object.assign({}, s, { carryTensor }) : s));
+      const t = Object.assign({}, LAB, { species: sp });
+      assert.deepEqual(TissueEngine.validate(t), [], 'fixture valid');
+      const M = new TissueEngine(t, { seed: 3 });
+      M.reset('grow', { dials: { nCells: 40, load: 0 } });     // load 0: no passive alignment
+      M.species.forEach((a) => a.fill(0));
+      M.rules.cell = () => {};
+      M.rules.voxel = (ctx) => { ctx.out.E = 1; };
+      const N = M.N, v = ((3 * N) + 3) * N + 3, w = v + 1;
+      for (const k of ['Txx', 'Tyy', 'Tzz', 'Txy', 'Txz', 'Tyz']) M[k].fill(0);
+      M.species[M.speciesIndex.felt][v] = 1; M.Tzz[v] = 1;      // one voxel of z-aligned fiber
+      M._derived();
+      M.step(10);
+      const trW = M.Txx[w] + M.Tyy[w] + M.Tzz[w];
+      return { M, v, w, trW, fzShare: trW > 0 ? M.Tzz[w] / trW : 0, mass: M.species[M.speciesIndex.felt][w] };
+    };
+    const carried = build(true), felt = build(false);
+    assert.ok(Math.abs(carried.mass - felt.mass) < 1e-9, 'the same mass moves either way');
+    assert.ok(Math.abs(felt.trW - felt.mass) < 1e-5, 'trace(T) still equals the fiber total');
+    assert.ok(carried.fzShare > 0.9, 'carried: it arrives aligned');
+    assert.ok(Math.abs(felt.fzShare - 1 / 3) < 1e-3, `felt: it arrives isotropic (${felt.fzShare})`);
+    assert.ok(felt.M.fa[felt.w] < 0.05, 'and adds no anisotropy to the neighbour');
+    assert.equal(felt.M._tDelta, null, 'no tensor-flux buffer is allocated when nothing carries T');
+    assert.ok(TissueEngine.validate(Object.assign({}, LAB, {
+      species: LAB.species.map((s) => (s.key === 'gag' ? Object.assign({}, s, { carryTensor: false }) : s)),
+    })).some((e) => /carryTensor only applies to a kind:'fiber' species/.test(e)));
+  });
+
+  test("out.scaffoldLoss is clamped to what the voxel actually gave up", () => {
+    const M = labBare({}, 0);
+    const iScaf = M.speciesIndex.scaf;
+    M.species[iScaf].fill(0.01);
+    // a hook that asks for far more dissolution than there is scaffold left
+    M.rules.voxel = (ctx) => { ctx.out.E = 1; ctx.out.mobility = 0; ctx.out.dRho[iScaf] = -50; ctx.out.scaffoldLoss = 50; };
+    M.step(1);
+    const s = M.stats();
+    assert.equal(s.scaffold, 0, 'the scaffold is gone');
+    assert.ok(Math.abs(s.scaffoldFlux - 0.01 / M.dt) < 1e-6, `the flux bar reports 0.01/dt, not 50 (${s.scaffoldFlux})`);
+    M.step(1);
+    assert.equal(M.stats().scaffoldFlux, 0, 'and nothing at all once the network has gone');
   });
 
   test('a fiber species carries the orientation tensor with it (trace stays exact)', () => {
@@ -871,26 +936,74 @@ describe('engine A1: the field solver picks an integration mode instead of clamp
     assert.ok(col[0] < 0.01 * bath, `the deep half is starved (${col[0]})`);
   });
 
-  test('validate() warns once, naming the field, its lam and the mode it chose', () => {
+  test('validate() prints only the notes with an action attached; warnings() still has them all', () => {
     const warned = [];
     const real = console.warn;
     console.warn = (...a) => warned.push(a.join(' '));
     try {
+      // a healthy quasi-steady field: correctly integrated, nothing to do about it → not printed
       const t = bench({ fields: [{ key: 'o2', label: 'O₂', color: '#6f9ce8', D: 5, bath: 'bath', kBath: 0, decay: 0, boundary: 'face:+z' }], engine: { N: 16, dt: 0.05 } });
       assert.deepEqual(TissueEngine.validate(t), []);
-      assert.deepEqual(TissueEngine.validate(t), [], 'validating again is silent');
       new TissueEngine(t, { seed: 1 });
-      assert.equal(warned.length, 1, `warned once, got ${warned.length}: ${warned.join(' | ')}`);
-      assert.match(warned[0], /field 'o2'/); assert.match(warned[0], /lam = D·dt\/h² = 64/); assert.match(warned[0], /quasiSteady/);
-      // a definition that asks for 'explicit' above the limit is told that D is being clamped
+      assert.deepEqual(warned, [], `a clean quasiSteady field prints nothing: ${warned.join(' | ')}`);
+      const note = TissueEngine.warnings(t)[0];
+      assert.match(note, /field 'o2'/); assert.match(note, /lam = D·dt\/h² = 64/); assert.match(note, /quasiSteady/);
+      assert.equal(TissueEngine.notes(t)[0].actionable, false);
+      // a clean sub-cycle is the same: cartilage's o2 must not warn on every load (it is correct)
+      const sub = bench({ fields: [{ key: 'o2', label: 'O₂', color: '#6f9ce8', D: 0.06, bath: 'bath', kBath: 0, decay: 0, boundary: 'face:+z' }], engine: { N: 12, dt: 0.02 } });
+      TissueEngine.validate(sub); new TissueEngine(sub, { seed: 1 });
+      assert.deepEqual(warned, [], 'a clean sub-cycle prints nothing either');
+      assert.match(TissueEngine.warnings(sub)[0], /subcycled/);
+      assert.deepEqual(TissueEngine.warnings(TISSUES.cartilage).filter((w) => /field 'o2'/.test(w)).length, 1, 'but it is on record as a note');
+      // …while a definition that asks for 'explicit' above the limit IS running a different D
       const clamp = bench({ fields: [{ key: 'g', label: 'G', color: '#3fd6c4', D: 5, bath: null, kBath: 0, decay: 1, mode: 'explicit' }], engine: { N: 16, dt: 0.05 } });
+      assert.deepEqual(TissueEngine.validate(clamp), []);
+      assert.equal(warned.length, 1, `warned once, got ${warned.length}: ${warned.join(' | ')}`);
+      assert.match(warned[0], /CLAMPED at 1\/6/);
       TissueEngine.validate(clamp);
-      assert.match(warned[1], /CLAMPED at 1\/6/);
+      assert.equal(warned.length, 1, 'validating the same definition again is silent');
+      // so is a capped sub-cycle and a quasiSteady request that could not be honoured
+      const capped = bench({ fields: [{ key: 'g', label: 'G', color: '#3fd6c4', D: 0.5, bath: null, kBath: 0, decay: 0 }], engine: { N: 16, dt: 0.05 } });
+      TissueEngine.validate(capped);
+      assert.match(warned[1], /capped at 20/);
+      const fell = bench({ fields: [{ key: 'g', label: 'G', color: '#3fd6c4', D: 0.05, bath: null, kBath: 0, decay: 0, mode: 'quasiSteady' }], engine: { N: 16, dt: 0.05 } });
+      TissueEngine.validate(fell);
+      assert.match(warned[2], /needs a Dirichlet face/);
       // and the overrides the engine will really run with are the ones reported
       const w = TissueEngine.warnings(TISSUES.fibrous, { overrides: { dt: 0.2 } });
       assert.ok(w.some((x) => /field 'g'.*subcycled/.test(x)), w.join(' | '));
       assert.deepEqual(TissueEngine.warnings(TISSUES.fibrous), [], 'fibrous as built is quiet');
     } finally { console.warn = real; }
+  });
+
+  test("a mode: 'subcycled' below the stability limit is reported as it was asked for", () => {
+    // one sub-step of dt IS an explicit step, so the arithmetic is identical — but `fieldModes` is
+    // the only way an author can confirm the engine honoured the definition, so it must not lie.
+    const fld = (mode) => ({ key: 'g', label: 'G', color: '#3fd6c4', D: 0.01, bath: null, kBath: 0, decay: 1, mode });
+    const M = (mode) => new TissueEngine(bench({ fields: [fld(mode)], engine: { N: 16, dt: 0.05, L: 1 } }), { seed: 1 });
+    const auto = M(undefined), asked = M('subcycled');
+    assert.deepEqual(pick(auto.fieldModes[0]), { mode: 'explicit', nSub: 1 }, 'lam 0.128: auto stays explicit');
+    assert.deepEqual(pick(asked.fieldModes[0]), { mode: 'subcycled', nSub: 1 }, 'and a request for sub-cycling reads back as sub-cycled');
+    auto.rules.voxel = (ctx) => { ctx.out.E = 1; ctx.out.fieldSrc[0] = ctx.v % 16 === 0 ? 100 : 0; };
+    asked.rules.voxel = auto.rules.voxel;
+    auto.step(50); asked.step(50);
+    for (let v = 0; v < auto.NV; v++) assert.equal(auto.fields[0][v], asked.fields[0][v], 'the arithmetic is identical');
+    assert.equal(TissueEngine.notes(bench({ fields: [fld('subcycled')], engine: { N: 16, dt: 0.05 } }))[0].actionable, false);
+  });
+
+  test('the quasi-steady solve reaches a decay-only uniform steady state, not just a small increment', () => {
+    // src/decay everywhere is the exact solution of the discrete problem too (∇²g = 0), and this is
+    // the configuration where the per-sweep increment is LEAST like an error bound: the constant
+    // mode is nearly singular, so a fixed 1e-4 increment test stops ~100× short of it.
+    const N = 12, dt = 0.05, D = 5, decay = 4, src = 8;
+    const M = fieldBench({ key: 'g', label: 'G', color: '#3fd6c4', D, bath: null, kBath: 0, decay },
+      { N, dt, L: 1 }, (ctx) => { ctx.out.fieldSrc[0] = src; });
+    assert.equal(M.fieldModes[0].mode, 'quasiSteady');
+    M.step(50);
+    const col = zColumn(M), exact = src / decay;
+    for (const v of col) assert.ok(Math.abs(v - exact) < 1e-3, `after 50 steps: ${v} vs ${exact}`);
+    M.step(350);
+    assert.ok(Math.abs(zColumn(M)[N >> 1] - exact) < 1e-4, 'and it keeps closing on it');
   });
 });
 
@@ -1075,6 +1188,142 @@ describe('engine A4/A5/B1/E1/E5: load mode, cell types, revision, export', () =>
     assert.deepEqual(Object.keys(meta.cellTypes[0]).sort(), ['colors', 'key', 'label', 'radius', 'shape']);
     const T = new TissueEngine(TISSUE_TEMPLATE, { seed: 1 }).exportMeta();
     assert.ok(Array.isArray(T.fields) && T.loadRange !== undefined);
+  });
+});
+
+// ---------------------------------------------------------------- v0.4 round 4: contract follow-ups
+describe('engine round 4: repulsion share, warm slices, seeding notes, snapshot options, checks', () => {
+  const anchorPair = (motile) => {
+    // two cells 0.01 apart, contact distance 2·rCell = 0.06, kRep 0.5, nothing else moving
+    const types = [
+      { key: 'walker', label: 'Walker', colors: ['#000000', '#ffffff'], shape: { by: 'a', aspectMin: 1, aspectMax: 1 }, radius: 0.02, motile: true, fraction: 1 },
+      { key: 'anchor', label: 'Anchor', colors: ['#000000', '#ffffff'], shape: { by: 'a', aspectMin: 1, aspectMax: 1 }, radius: 0.02, motile, fraction: 1 },
+    ];
+    const M = new TissueEngine(bench({ cellTypes: types }), { seed: 4 });
+    M.reset('run', { dials: { nCells: 2 } });
+    M.rules.cell = (ctx) => { ctx.out.speed = 0; ctx.out.noise = 0; };
+    M._cx.set([0.5, 0.5, 0.5, 0.51, 0.5, 0.5]);
+    M.step(1);
+    return { gap: Math.abs(M.state.cx[3] - M.state.cx[0]), cx: Array.from(M.state.cx), types: Array.from(M.state.ctype) };
+  };
+
+  test('repulsion is shared by the partners that can move: an obstacle pushes the walker all the way', () => {
+    const both = anchorPair(true), one = anchorPair(false);
+    assert.ok(Math.abs(both.gap - 0.035) < 1e-6, `two motile cells split the correction: ${both.gap}`);
+    assert.ok(Math.abs(one.gap - both.gap) < 1e-6, `an anchor gives the walker the whole correction: ${one.gap}`);
+    const anchor = one.types[0] === 1 ? 0 : 1;
+    assert.equal(one.cx[3 * anchor], Math.fround(anchor === 0 ? 0.5 : 0.51), 'and the anchor itself has not moved');
+  });
+
+  test('warmFrom does not build a whole nested pre-run in its first slice (A2 / A9)', () => {
+    let calls = 0;
+    const sc = (key, init, extra) => Object.assign({ key, title: key, goal: 'g', steps: ['a'], question: 'q', expect: 'e', dials: {}, init, checks: [{ at: 1, stat: 'fa', op: 'lt', value: 2 }] }, extra);
+    const t = bench({
+      scenarios: [
+        sc('matured', { from: { scenario: 'seed', days: 30 } }),      // scenarios[0] itself pre-runs
+        sc('seed', { species: { x: 0.1 } }),
+        sc('later', { from: { scenario: 'seed', days: 4 } }),
+      ],
+      makeRules: () => ({ cell(ctx) { ctx.out.speed = 0; }, voxel(ctx) { calls++; ctx.out.E = 1; ctx.out.dRho[0] = 0.01; } }),
+    });
+    const M = new TissueEngine(t, { seed: 1 });                       // the host pays for scenarios[0] once
+    M.reset('seed');
+    const from = t.scenarios[2].init.from;
+    calls = 0;
+    const first = M.warmFrom(from, 5);
+    assert.equal(first.done, false, 'a 5-step slice of a 200-step pre-run is not done');
+    assert.ok(calls <= 7 * M.NV, `the slice runs 5 steps, not a nested pre-run of scenarios[0] (${calls / M.NV} voxel passes)`);
+    while (!M.warmFrom(from, 37).done);                               // finish it in odd slices
+    M.reset('later');
+    const F = new TissueEngine(t, { seed: 1 });
+    F.reset('later');                                                 // the synchronous path
+    assert.deepEqual(Array.from(M.species[0]), Array.from(F.species[0]), 'sliced == synchronous');
+    assert.deepEqual(M.stats(), F.stats());
+  });
+
+  test("cellTypes[].count without a cellCount dial: the types that declare none are never seeded", () => {
+    const typed = (count) => ({ key: count === undefined ? 'rest' : 'pinned', label: 'T', colors: ['#000000', '#ffffff'], shape: { by: 'a', aspectMin: 1, aspectMax: 1 }, radius: 0.01, motile: true, count });
+    const t = bench({
+      cellTypes: [typed(10), typed(undefined)],
+      dials: [{ key: 'bath', label: 'Bath', min: 0, max: 1, step: 0.01, default: 1, format: 'fixed2' }],   // no role:'cellCount'
+      scenarios: [{ key: 'run', title: 'Run', goal: 'g', steps: ['a'], question: 'q', expect: 'e', dials: {}, init: { species: {} }, checks: [{ at: 1, stat: 'cells.n', op: 'gt', value: 0 }] }],
+    });
+    assert.deepEqual(TissueEngine.validate(t), [], 'it is a legal definition');
+    const M = new TissueEngine(t, { seed: 1 });
+    const b = M.stats().cells.byType;
+    assert.deepEqual([b.pinned.n, b.rest.n], [10, 0], 'the fraction-only type gets a share of nothing');
+    const notes = TissueEngine.notes(t);
+    const seeded = notes.find((n) => /NEVER seeded/.test(n.text));
+    assert.ok(seeded && seeded.actionable, `it is an actionable warning: ${notes.map((n) => n.text).join(' | ')}`);
+    assert.match(seeded.text, /rest/, 'and it names the type');
+  });
+
+  test('snapshot({ fields: false }) leaves the per-field grids out of a frame (A2 export size)', () => {
+    const M = new TissueEngine(TISSUES.fibrous, { seed: SEED });
+    M.reset('maturation'); M.step(10);
+    const full = M.snapshot(), lean = M.snapshot({ fields: false });
+    assert.ok(full.fields && Object.keys(full.fields).length === M.nFields, 'the default is unchanged');
+    assert.equal('fields' in lean, false, 'and the opt-out drops the key entirely (§5: a reader tolerates it)');
+    assert.deepEqual(Object.keys(lean), Object.keys(full).filter((k) => k !== 'fields'));
+    for (const k of Object.keys(lean)) assert.deepEqual(lean[k], full[k], `${k} is untouched`);
+    assert.ok(JSON.stringify(lean).length < 0.8 * JSON.stringify(full).length, 'and it is materially smaller');
+  });
+
+  test("checks: rel gains a factor, and agg 'cross' reports the first day a condition holds", () => {
+    // one species grown at a flat 0.1 / day by the voxel hook: x(t) = 0.1·t everywhere
+    const t = bench({
+      scenarios: [{ key: 'run', title: 'Run', goal: 'g', steps: ['a'], question: 'q', expect: 'e',
+        dials: {}, init: { species: {} },
+        checks: [
+          { at: [0, 10], agg: 'cross', stat: 'species.x', op: 'gt', threshold: 0.47 },
+          { at: [0, 3], agg: 'cross', stat: 'species.x', op: 'gt', threshold: 0.47 },
+          { at: 10, stat: 'species.x', rel: { stat: 'species.x', at: 5, factor: 1.9, op: 'gt' } },
+          { at: 10, stat: 'species.x', rel: { stat: 'species.x', at: 5, factor: 2.1, op: 'gt' } },
+          { at: 10, stat: 'species.x', rel: { stat: 'species.x', at: 5, factor: 2, op: 'gt' }, value: -0.05 },
+          { at: 10, stat: 'species.x', rel: { stat: 'species.x', at: 5, op: 'gt' }, value: 0.4 },
+        ] }],
+      makeRules: () => ({ cell(ctx) { ctx.out.speed = 0; }, voxel(ctx) { ctx.out.E = 1; ctx.out.dRho[0] = 0.1; } }),
+    });
+    assert.deepEqual(TissueEngine.validate(t), []);
+    const r = TissueEngine.checkScenario(t, 'run', { seed: 1 });
+    assert.equal(r[0].value, 5, `the crossing DAY is the value (${r[0].value})`);
+    assert.equal(r[0].ref, 0.47, 'and the threshold is the reference');
+    assert.ok(r[0].pass && Math.abs(r[0].crossed.stat - 0.5) < 1e-3, `crossed carries the stat too: ${JSON.stringify(r[0].crossed)}`);
+    assert.equal(r[1].value, undefined, 'no crossing inside the window');
+    assert.equal(r[1].pass, false); assert.equal(r[1].crossed, null);
+    assert.ok(r[2].pass && Math.abs(r[2].ref - 0.95) < 1e-3, `factor 1.9 × x(5): ${r[2].ref}`);
+    assert.ok(!r[3].pass && Math.abs(r[3].ref - 1.05) < 1e-3, 'factor 2.1 is out of reach');
+    assert.ok(r[4].pass && Math.abs(r[4].ref - 0.95) < 1e-3, 'factor and offset compose: ref = x(at)·factor + value');
+    assert.ok(r[5].pass && Math.abs(r[5].ref - 0.9) < 1e-3, 'no factor is still factor 1 (v0.3 shape unchanged)');
+    // the schema knows the new keys
+    const chk = (c) => TissueEngine.validate(bench({ scenarios: [{ key: 'run', title: 'R', goal: 'g', steps: ['a'], question: 'q', expect: 'e', dials: {}, init: { species: {} }, checks: [c] }] }));
+    assert.ok(chk({ at: [0, 5], agg: 'cross', stat: 'fa', op: 'gt', threshold: 1, value: 2 }).some((e) => /drop 'value'/.test(e)));
+    assert.ok(chk({ at: [0, 5], agg: 'cross', stat: 'fa', op: 'gt', threshold: 1, rel: { stat: 'fa', op: 'gt' } }).some((e) => /takes no rel reference/.test(e)));
+    assert.ok(chk({ at: [0, 5], agg: 'cross', stat: 'fa', op: 'gt' }).some((e) => /needs a numeric threshold/.test(e)));
+    assert.ok(chk({ at: 5, stat: 'fa', op: 'gt', value: 1, threshold: 2 }).some((e) => /threshold only applies/.test(e)));
+    assert.ok(chk({ at: [0, 5], agg: 'cross', stat: 'fa', op: 'between', threshold: [0.1, 0.2] }).length === 0);
+    assert.ok(chk({ at: 5, stat: 'fa', rel: { stat: 'fa', at: 0, op: 'gt', factor: 'twice' } }).some((e) => /factor must be a number/.test(e)));
+    assert.ok(chk({ at: [0, 5], agg: 'sometimes', stat: 'fa', op: 'gt', value: 1 }).some((e) => /min\|max\|mean\|first\|cross/.test(e)));
+  });
+
+  test('a range check that compares its own aggregate with its own first sample is flagged', () => {
+    const withCheck = (c) => bench({ scenarios: [{ key: 'run', title: 'R', goal: 'g', steps: ['a'], question: 'q', expect: 'e', dials: {}, init: { species: {} }, checks: [c] }] });
+    const dead = withCheck({ at: [10, 20], agg: 'max', stat: 'fa', rel: { stat: 'fa', op: 'lt' } });
+    assert.deepEqual(TissueEngine.validate(dead), [], 'it is legal, just never true');
+    const n = TissueEngine.notes(dead).find((x) => /can never pass/.test(x.text));
+    assert.ok(n && n.actionable, TissueEngine.warnings(dead).join(' | '));
+    // and the idioms that DO work are quiet
+    for (const ok of [
+      { at: [10, 20], agg: 'min', stat: 'fa', rel: { stat: 'fa', op: 'lt' } },                 // "it dips below where it started"
+      { at: [10, 20], agg: 'max', stat: 'fa', rel: { stat: 'fa', at: 0, op: 'lt' } },          // reference before the window
+      { at: [10, 20], agg: 'max', stat: 'fa', rel: { stat: 'cells.a', op: 'lt' } },            // a different stat
+      { at: [10, 20], agg: 'max', stat: 'fa', rel: { stat: 'fa', op: 'lt' }, value: 0.1 },     // a real head-room
+      { at: [10, 20], agg: 'max', stat: 'fa', rel: { stat: 'fa', op: 'lt', factor: 1.5 } },    // …or a factor
+    ]) assert.deepEqual(TissueEngine.warnings(withCheck(ok)), [], JSON.stringify(ok));
+    // the shipped tissues and the starter are clean
+    for (const [key, tis] of Object.entries(CONFORMANCE)) {
+      assert.deepEqual(TissueEngine.notes(tis).filter((x) => /can never pass/.test(x.text)), [], key);
+    }
   });
 });
 

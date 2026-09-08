@@ -99,6 +99,47 @@ describe('the vocabulary slots a second tissue needs (C15)', () => {
     assert.match(copyEquilibriumSentence(Object.assign({}, stats, { logE: 0.5 }), soft), /the chondrocytes are working, and the gel is still soft\.$/);
   });
 
+  // A tissue that starts as a bare hydrogel trellis has species.total ≈ 1 on day 0 while the cells
+  // have built nothing at all, so "empty" measured on the total could never fire and the sentence
+  // talked about "the matrix around them" when there was no matrix. The engine already separates
+  // the two (species.tissueTotal = total − every scaffold species), and the sentence keys off that.
+  describe('an undissolved scaffold is not matrix (docs/EXTENDING.md §3 species.tissueTotal)', () => {
+    const day0 = { t: 0, deposition: 0, degradation: 0, cells: { a: 0.1 }, species: { total: 0.98, tissueTotal: 0.003 }, logE: 1.6 };
+
+    test('a cube full of undissolved scaffold still reads as empty', () => {
+      assert.match(copyEquilibriumSentence(day0, {}), /there is hardly any matrix yet/);
+      // and the tissue's own words for both halves come through
+      assert.match(copyEquilibriumSentence(day0, { matrix: 'proteoglycan and collagen' }), /hardly any proteoglycan and collagen yet/);
+      assert.match(copyEquilibriumSentence(day0, { stillHint: 'the gel is still a bare trellis; press Play.' }), /the gel is still a bare trellis; press Play\.$/);
+    });
+
+    test('without tissueTotal the total is used, so nothing about the v0.1 or the fibrous shape moves', () => {
+      const noSplit = { deposition: 0, degradation: 0, cells: { a: 0.1 }, species: { total: 0.98 }, logE: 1.6 };
+      assert.match(copyEquilibriumSentence(noSplit, {}), /almost nothing is being built or removed/);
+      assert.match(copyEquilibriumSentence({ deposition: 0, degradation: 0, meanAlpha: 0.1, meanRho: 0.98, meanLogE: 1.6 }, {}), /almost nothing is being built or removed/);
+      // a tissue with no scaffold species reports tissueTotal === total: byte-identical either way
+      for (const [, stats, want] of FIBROUS_CASES) {
+        const sp = stats.species ? { species: Object.assign({}, stats.species, { tissueTotal: stats.species.total }) } : {};
+        assert.equal(copyEquilibriumSentence(Object.assign({}, stats, sp), FIBROUS_V), want);
+      }
+    });
+
+    test('nothing "is already stiff" while there is no matrix to be stiff', () => {
+      // a fresh hydrogel is 30–60 kPa on the undissolved trellis alone, with the cells working
+      const fresh = { deposition: 0.04, degradation: 0.01, cells: { a: 0.9 }, species: { total: 0.97, tissueTotal: 0.02 }, logE: 1.6 };
+      assert.ok(!/already stiff/.test(copyEquilibriumSentence(fresh, {})), copyEquilibriumSentence(fresh, {}));
+      assert.match(copyEquilibriumSentence(fresh, {}), /thickening and stiffening as they go\.$/);
+      // …and once the cells have built something, the stiff branch is back
+      const built = Object.assign({}, fresh, { species: { total: 0.97, tissueTotal: 0.4 } });
+      assert.match(copyEquilibriumSentence(built, {}), /already stiff\.$/);
+    });
+
+    test('a scaffold that has dissolved into real matrix stops reading as empty', () => {
+      const later = { deposition: 0, degradation: 0, cells: { a: 0.1 }, species: { total: 0.7, tissueTotal: 0.4 }, logE: 1.6 };
+      assert.match(copyEquilibriumSentence(later, {}), /almost nothing is being built or removed/);
+    });
+  });
+
   test('stillHint replaces the "add cells, growth factor or load" advice', () => {
     const empty = { deposition: 0, degradation: 0, cells: { a: 0 }, species: { total: 0 }, logE: -1 };
     assert.match(copyEquilibriumSentence(empty, { stillHint: 'the well is empty; seed it.' }), /the cloud is still; the well is empty; seed it\.$/);
@@ -216,4 +257,76 @@ describe('every registered tissue gets a sentence it can live with', () => {
       assert.ok(seen.size >= 8, `only ${seen.size} distinct sentences over 12 states — a slot is probably shadowing another`);
     });
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// `copy.vocabulary.equilibrium` — the one piece of EXECUTABLE copy a tissue definition can carry.
+// Cartilage uses it to say the thing the shared sentence structurally cannot: the hydrogel is a
+// third rate, neither deposition nor degradation, and for the first three weeks of the race it is
+// what the stiffness trace is doing. Nothing exercised the override until this block: the sweep
+// above feeds states with no `scaffold`, where cartilage's override correctly returns null.
+describe('vocabulary.equilibrium (whole-sentence override)', () => {
+  const V = TISSUES.cartilage.copy.vocabulary;
+  const M = COPY_VOCABULARY_DEFAULT.metaphor;         // cartilage does not override the four words
+  /** A cartilage-shaped stats object; the defaults are the race at about day 10. */
+  const st = (o = {}) => ({
+    deposition: 0.03, degradation: 0.01, scaffold: 0.5, scaffoldFlux: 0.04,
+    cells: { a: 0.9 }, species: { total: 1.0, tissueTotal: 0.5 }, logE: 1.5, ...o,
+  });
+
+  test('while the trellis is there and draining, all three rates are in the sentence', () => {
+    const out = copyEquilibriumSentence(st(), V);
+    assert.match(out, /^Deposition 0\.03\/d, degradation 0\.01\/d, hydrogel draining 0\.04\/d — /);
+    assert.match(out, /the chondrocytes are pumping out aggrecan/);
+    assert.ok(out.endsWith('.'), `not a sentence: ${out}`);
+    assert.ok(!/undefined|null|NaN|\{|\}/.test(out), `placeholder leaked into: ${out}`);
+  });
+
+  test('the race clause turns over when deposition passes the drain', () => {
+    assert.match(copyEquilibriumSentence(st({ scaffoldFlux: 0.04, deposition: 0.03 }), V),
+      /the trellis is going faster than they can fill in\.$/);
+    assert.match(copyEquilibriumSentence(st({ scaffoldFlux: 0.01, deposition: 0.03 }), V),
+      /they are filling in faster than the trellis goes\.$/);
+  });
+
+  test('the override and copyTrend never name different weather', () => {
+    const cases = [
+      st(),                                                            // condensing
+      st({ deposition: 0.005, degradation: 0.05 }),                    // evaporating
+      st({ deposition: 0.01, degradation: 0.01 }),                     // steady
+      st({ deposition: 0, degradation: 0 }),                           // still
+    ];
+    const seen = new Set();
+    for (const s of cases) {
+      const out = copyEquilibriumSentence(s, V);
+      const word = M[copyTrend(s, V)];
+      assert.ok(out.includes(word), `copyTrend says "${word}" but the sentence reads: ${out}`);
+      seen.add(word);
+    }
+    assert.equal(seen.size, 4, 'the four states should produce four different trend words');
+  });
+
+  test('it hands back to the shared sentence once the trellis has gone, or is not moving', () => {
+    for (const s of [st({ scaffold: 0 }), st({ scaffold: 0.02 }), st({ scaffoldFlux: 0 })]) {
+      const out = copyEquilibriumSentence(s, V);
+      assert.ok(!/hydrogel draining/.test(out), `the override should have declined: ${out}`);
+      assert.match(out, /^Deposition .* (outpaces|trails|matches) degradation .* — /);
+    }
+  });
+
+  test('a partial, empty or null stats object falls back instead of throwing', () => {
+    for (const s of [null, undefined, {}, { deposition: NaN, scaffold: NaN, scaffoldFlux: NaN }]) {
+      const out = copyEquilibriumSentence(s, V);
+      assert.equal(typeof out, 'string');
+      assert.ok(out.length > 40 && !/undefined|NaN/.test(out), `bad fallback: ${out}`);
+    }
+  });
+
+  test('a throwing or non-string override is ignored, not propagated', () => {
+    const boom = { ...V, equilibrium() { throw new Error('nope'); } };
+    assert.match(copyEquilibriumSentence(st(), boom), /^Deposition /);
+    for (const bad of [() => '', () => null, () => 42, () => ({})]) {
+      assert.match(copyEquilibriumSentence(st(), { ...V, equilibrium: bad }), /^Deposition /);
+    }
+  });
 });

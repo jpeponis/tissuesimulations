@@ -1,6 +1,9 @@
 // Records reference statistics of a tissue for the golden regression test (tests/engine.test.mjs).
-//   node tools/make_golden.mjs [--tissue fibrous] [--out FILE] [--seed 7]     (default FILE: tests/golden/<tissue>.json)
+//   node tools/make_golden.mjs [--tissue fibrous] --out tests/golden/<tissue>.engine.json [--seed 7]
 // Re-run DELIBERATELY when the model changes on purpose.
+//
+// `--out` is effectively required: the default path (tests/golden/<tissue>.json) is the v0.1
+// reference for fibrous and this tool refuses to write it (exit 2, --force overrides).
 //
 // TWO KINDS OF GOLDEN, two tolerances (docs/REVIEW.md D2):
 //   tests/golden/fibrous.json         recorded from v0.1 model.js. "Is this still the same MODEL?"
@@ -13,6 +16,14 @@
 //                                     commit message) whenever a change to the engine or to the
 //                                     tissue's parameters is meant to move the numbers.
 //     node tools/make_golden.mjs --tissue fibrous --out tests/golden/fibrous.engine.json
+//     node tools/make_golden.mjs --tissue cartilage --out tests/golden/cartilage.engine.json
+//
+// Recorded so far:
+//   fibrous.engine.json    round 3; unchanged since (round 4 verified it byte-for-byte).
+//   cartilage.engine.json  round 4, once cartilage's o2 solver mode had settled (subcycled, nSub 2)
+//                          and the round-4 engine changes that touch it had landed: species `sink`
+//                          is gated by out.mobility, and out.scaffoldLoss is capped by what the
+//                          voxel actually gave up. Both move cartilage by ~1-3 % on the flux stats.
 //
 // Protocol (shared with the test): reset(scenario, { dials, init }); record at t = 0; then for each
 // day: step one day, fire the run's events whose `at` equals that day (dial changes / injury), and
@@ -20,9 +31,12 @@
 // per-tissue overrides in GOLDEN_VARIANTS merged in (the fibrous sandbox run starts from new = 0.15
 // with all dials at 0 so that "evaporation" is on record).
 //
-// Columns are stat paths (docs/EXTENDING.md §1), including the v0.3 additions
-// species.tissueTotal / cumDeposition / cumDegradation / scaffoldFlux; the test compares every
-// recorded path of a format-2 golden, so re-recording widens what is guarded.
+// Columns are stat paths (docs/EXTENDING.md §1): the per-species and per-field means, the v0.3
+// additions (species.tissueTotal / cumDeposition / cumDegradation / scaffoldFlux) and, since
+// round 4, the headline alignment readout globalFA plus fz / E / ratio / cells.c / cells.n and
+// every cells.byType.<key>.{n,a,b,c}. The test compares every recorded path of a format-2 golden,
+// so re-recording widens what is guarded. A non-finite value (ratio is Infinity when there is
+// deposition and no degradation at all) is left out of the row rather than written as JSON null.
 //
 // Note: tests/golden/fibrous.json was recorded by the v0.1 make_golden (model.js), whose loop fired
 // the day-d event BEFORE stepping day d (i.e. at t = d − 1) and described it as { injureAt, at: {d: dials} }.
@@ -60,15 +74,22 @@ for (const sc of tissue.scenarios) {
 }
 
 const M = new TissueEngine(tissue, { seed: SEED });
-const cols = ['species.total', 'species.tissueTotal', ...tissue.species.map((s) => `species.${s.key}`), 'fa', 'logE', 'cells.a', 'cells.b',
-  ...tissue.fields.map((f) => `fields.${f.key}`), 'deposition', 'degradation', 'cumDeposition', 'cumDegradation', 'scaffoldFlux'];
+const cols = ['species.total', 'species.tissueTotal', ...tissue.species.map((s) => `species.${s.key}`),
+  'fa', 'globalFA', 'fz', 'logE', 'E', 'cells.a', 'cells.b', 'cells.c', 'cells.n',
+  ...tissue.cellTypes.flatMap((c) => ['n', 'a', 'b', 'c'].map((k) => `cells.byType.${c.key}.${k}`)),
+  ...tissue.fields.map((f) => `fields.${f.key}`), 'deposition', 'degradation', 'ratio',
+  'cumDeposition', 'cumDegradation', 'scaffoldFlux'];
 const golden = { seed: SEED, tissue: TISSUE_KEY, tissueVersion: tissue.version, engine: ENGINE_VERSION, format: 2,
   params: tissue.params, engineParams: M.P, every: EVERY, runs: {} };
 for (const [key, r] of Object.entries(runs)) {
   M.reset(r.scenario, { dials: r.dials, init: r.init });
   const stepsPerDay = Math.round(1 / M.dt);
   const rows = [];
-  const rec = () => { const s = M.stats(), row = { t: +s.t.toFixed(2) }; for (const c of cols) row[c] = TissueEngine.statFrom(s, c); rows.push(row); };
+  const rec = () => {
+    const s = M.stats(), row = { t: +s.t.toFixed(2) };
+    for (const c of cols) { const v = TissueEngine.statFrom(s, c); if (Number.isFinite(v)) row[c] = v; }
+    rows.push(row);
+  };
   const fire = (d) => { for (const e of r.events || []) if (e.at === d) { if (e.dials) M.setDials(e.dials); if (e.injure) M.injure(e.injure.center ?? null, e.injure.radius); } };
   fire(0); rec();
   for (let d = 1; d <= r.days; d++) {

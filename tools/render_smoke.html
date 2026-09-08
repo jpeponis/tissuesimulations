@@ -437,6 +437,72 @@ function bufferVersions() {
   return out;
 }
 
+// Full-resolution readback of the CURRENT frame (no downsampling, unlike probePixels): a
+// 1-device-pixel line covers too few pixels to survive a 200 px-wide resize, and the wound
+// outline check below is exactly a thin-line check. Same trick as renderer.screenshot():
+// draw the WebGL canvas into a 2D canvas in the same task, before the buffer is cleared.
+function grabFrame() {
+  renderer.render();
+  const src = renderer.canvas;
+  const cv = document.createElement('canvas'); cv.width = src.width; cv.height = src.height;
+  cv.getContext('2d').drawImage(src, 0, 0);
+  return { w: cv.width, h: cv.height, data: cv.getContext('2d').getImageData(0, 0, cv.width, cv.height).data };
+}
+
+/**
+ * How many pixels a LAYER actually paints: render the current state with `layers[key]` off, then
+ * with it on, and count the pixels that changed by at least each threshold (0-255 per channel).
+ * B4's acceptance criterion is "the outline shows"; this is that criterion as a number.
+ */
+function layerPixelImpact(key, thresholds = [2, 8, 20]) {
+  const L = Object.assign({}, layers, { fields: Object.assign({}, layers.fields) });
+  const grab = (on) => { renderer.markDirty(); renderer.update(state, Object.assign({}, L, { [key]: on })); return grabFrame(); };
+  const off = grab(false), on = grab(true);
+  const counts = thresholds.map(() => 0);
+  let maxDelta = 0;
+  for (let i = 0; i < off.data.length; i += 4) {
+    const d = Math.max(Math.abs(on.data[i] - off.data[i]), Math.abs(on.data[i + 1] - off.data[i + 1]), Math.abs(on.data[i + 2] - off.data[i + 2]));
+    if (d > maxDelta) maxDelta = d;
+    for (let t = 0; t < thresholds.length; t++) if (d >= thresholds[t]) counts[t]++;
+  }
+  renderer.markDirty(); renderer.update(state, L);
+  const out = { w: off.w, h: off.h, pixels: off.data.length / 4, maxDelta, changed: {} };
+  thresholds.forEach((t, i) => { out.changed[t] = counts[i]; });
+  return out;
+}
+
+/**
+ * What the B1 dirty check is worth, measured as two BATCHES rather than two single frames:
+ * `n` updates that the revision check should skip, then `n` that markDirty() forces to rebuild.
+ * Chromium quantises performance.now() to 100 µs, so a single skipped update() reads as 0.0 or
+ * 0.1 ms and a wall-clock bound on it is a coin flip; a batch mean is well clear of the tick.
+ * `skipped`/`rebuilt` say how many updates really took each path, so the comparison cannot be
+ * fooled by a state the renderer decided to rebuild anyway.
+ */
+function updateCost(n = 20) {
+  const before = { u: renderer.stats.updates, s: renderer.stats.skipped };
+  const t0 = performance.now();
+  for (let i = 0; i < n; i++) renderer.update(state, layers);
+  const skipMs = (performance.now() - t0) / n;
+  const mid = { u: renderer.stats.updates, s: renderer.stats.skipped };
+  const t1 = performance.now();
+  for (let i = 0; i < n; i++) { renderer.markDirty(); renderer.update(state, layers); }
+  const fullMs = (performance.now() - t1) / n;
+  return { n, skipMs: +skipMs.toFixed(4), fullMs: +fullMs.toFixed(4),
+    skipped: mid.s - before.s, rebuilt: renderer.stats.updates - mid.u };
+}
+
+// Per-field haze layers: which style each is drawn in, and the size knob of that style
+// (uSize for the sprite cloud, the value-1 sphere radius for the instanced spheres).
+function fieldState() {
+  return (renderer.fields || []).map((L) => ({
+    key: L.key, style: L.style, visible: L.obj.visible,
+    size: L.style === 'points' ? +L.mat.uniforms.uSize.value.toFixed(6) : +(2 * L.radius).toFixed(6),
+    instances: L.style === 'points' ? L.geo.getAttribute('position').count : L.mesh.count,
+    pointScale: L.def.pointScale,
+  }));
+}
+
 function cameraState() {
   const c = renderer.camera, t2 = renderer.controls.target;
   return { pos: [+c.position.x.toFixed(6), +c.position.y.toFixed(6), +c.position.z.toFixed(6)],
@@ -506,6 +572,7 @@ function glInfo() {
 window.__smoke = {
   ready, renderer, makeFakeState, errors, tissues: TISSUES, autoRotateEvents,
   bufferVersions, cameraState, woundState, toneCurveCheck,
+  layerPixelImpact, updateCost, fieldState,
   focusCanvas: () => canvas.focus(),
   bumpRevision: () => { revision++; if (state) state.revision = revision; },
   setRevisionMode: (on) => { revisionOn = !!on; if (!on && state) delete state.revision; },

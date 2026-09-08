@@ -30,7 +30,8 @@
  *           dedifferentiated one a spindle. Both the renderer and the Blender
  *           importer compute aspect = aspectMin + (aspectMax − aspectMin)·s
  *           linearly, so aspectMin > aspectMax is legal and does the right thing
- *           (verified: src/render.js:1051, blender/import_tissue.py:583; the
+ *           (verified: src/render.js `_updateCells`, blender/import_tissue.py
+ *           `cell_transforms()`; line numbers deliberately omitted — the
  *           engine's validator only requires two numbers). radius follows a the
  *           same way: { by: 'a', min: 0.032, max: 0.0416 } = the spec's
  *           rCell·(1 + 0.3·phi).
@@ -134,12 +135,27 @@
  *    pericellular islands of scenario 3 never formed).
  *  NO Da      Oxygen is an ordinary engine field with a Dirichlet medium face,
  *    integrated in time rather than solved as the spec's quasi-steady Gauss–Seidel
- *    problem, so at D = 0.06 L²/d the profile takes ~1 d to form instead of
- *    minutes. The steady profile is what matters and is tuned through
- *    the consumption kO2 instead of a Damköhler number — if the contract ever
- *    offers a quasi-steady field solve, this is the field that wants it, and kO2
- *    would have to be re-tuned against the profile it produces: 5 % in the bath gives
- *    5 % at the medium face and ≈ 1 % at the deep face, 21 % gives 21 → 12 %.
+ *    problem. The STEADY profile is the spec's and is what the phenotype rule reads:
+ *    it is set by the ratio kO2 : D — the spec's Damköhler number — and 5 % in the
+ *    bath gives 5 % at the medium face and ≈ 1 % at the deep face, 21 % gives 21 → 12 %.
+ *    What is wrong is the TIME the profile takes to get there. Measured (race, seed 7,
+ *    mean of each z-layer): the deep layer falls 0.240 → 0.194 by day 1, 0.086 by day 5,
+ *    0.054 by day 10 and settles at 0.048 by day 20. A 300 µm construct equilibrates in
+ *    ~4 minutes; here it takes a fortnight, so for the first two weeks of every run the
+ *    cube is less hypoxic than it should be. See DECLINED, below.
+ *  DECLINED (round 4): raising D toward the physiological 360 L²/d (3.8 × 10⁻¹⁰ m²/s over
+ *    300 µm) and kO2 with it — the ratio, hence the steady profile, is unchanged — makes
+ *    engine v0.4 pick mode 'quasiSteady' and the gradient forms inside one step. Verified:
+ *    the day-56 z-profile is identical to 4 decimals (deep 0.0482 vs 0.0481) and all 66
+ *    scenario checks still pass, with day-56 outcomes moving < 0.3 % on race, toodense and
+ *    inflamed. It is not in because of the step cost: the steady solve is Gauss-Seidel
+ *    sweeps, and the conformance measurement (N = 12, 160 cells, node) goes 0.584 →
+ *    0.93 ms/step on race and 0.58 → 1.53 ms/step on drift, against a suite limit of
+ *    1 ms/step. Sub-cycling instead of solving is no cheaper: D × 5 (nSub 6) is already
+ *    0.96 ms/step, because one field sweep over 12³ voxels costs ≈ 0.11 ms and the whole
+ *    baseline step is 0.58 ms. Revisit when a sweep is cheaper or the quasi-steady stopping
+ *    rule needs fewer of them; the change itself is two numbers (D 0.06 → 360, kO2 0.7 →
+ *    4200) plus a re-record of tests/golden/cartilage.engine.json.
  *  NO mesh-hindered field D   A field's D is a constant of the definition (species
  *    transport takes a mobility, fields do not), so the spec's D_m·(1 − 0.8·conf)
  *    for the protease is folded into its source (kMxl: tight gels make ~25× more
@@ -251,11 +267,21 @@
  * ---------------------------------------------------------------------------
  */
 
+// The one shared helper this definition uses: the live sentence's rate formatter, so the
+// scaffold rate in `copy.vocabulary.equilibrium` below is printed exactly as src/copy.js prints
+// the other two. Single-line local import (docs/EXTENDING.md §0); copy.js is first in the bundle.
+import { copyFormatRate } from '../copy.js';
+
 export const TISSUE_CARTILAGE = {
   key: 'cartilage',
   name: 'Articular cartilage in a hydrogel',
   short: 'Chondrocytes race a dissolving gel to build aggrecan and collagen II',
-  version: '0.2.0',        // 0.2: engine v0.3 contract (species transport, polS, vox, scaffold flux)
+  version: '0.2.0',        // 0.2: engine v0.3 contract (species transport, polS, vox, scaffold flux);
+                           // since taken v0.4's optional slots (domainMicrons, copy.gauge, patterns,
+                           // vocabulary.equilibrium), none of which changes a number the goldens hold
+  domainMicrons: 300,      // the cube is 300 µm on a side, the number docs/SPEC.md and the whole
+                           // conversion table in docs/MODEL.md are written against (rCell 0.03 L =
+                           // 9 µm). The app's colour key prints "Cube edge ≈ 300 µm" from this.
 
   // ---- matrix species
   species: [
@@ -301,13 +327,13 @@ export const TISSUE_CARTILAGE = {
       watch: 'The teal haze thickens within a day; the GAG band starts climbing about a week later. Two weeks of it is usually enough.' },
     { key: 'amp', label: 'Dynamic compression', min: 0, max: 0.2, step: 0.01, default: 0, format: 'percent', role: 'load',
       metaphor: 'Pressure: a steady squeeze, on and off, three hours a day.',
-      biology: 'Peak-to-peak strain of a 1 Hz squeeze. Around 10 % it stimulates synthesis; past 15 % it injures cells; inside a still-dense gel it does harm instead of good.',
-      watch: 'Started after the gel has opened, stiffness and GAG climb faster. Started too early, or turned past 15 %, both fall.' },
+      biology: 'Peak-to-peak strain of a 1 Hz squeeze. Around 10 % it stimulates synthesis most; past 15 % the injury term grows fast, and at 20 % it wrecks the construct. Squeezing a still-dense gel does blunt the stimulus for the first days — but the squeeze also opens the mesh sooner, and here that is the bigger of the two, so this model does not punish early loading the way a real construct does (Mauck 2000).',
+      watch: 'Stiffness and GAG climb faster whenever it is on, and the earlier the better here: hold the first scenario\'s dials, turn it on at day 0, and the cube ends about 40 % stiffer than with no squeeze at all. The two effects cancel at about 16 %, and past that both fall away.' },
     { key: 'o2Ext', label: 'Oxygen tension', min: 0.05, max: 1, step: 0.01, default: 0.24,
       format: (v) => `${Math.round(v * 21)} %`,
       metaphor: 'Altitude: thin air — except that up here the cloud forms better.',
       biology: 'Oxygen in the medium, 1–21 %. Cartilage is avascular; 5 % keeps cells chondrogenic, 21 % pushes them toward collagen I and hypertrophy, and under 1 % they starve.',
-      watch: 'Switch on the oxygen layer: the medium face stays bright and the deep half goes dark. Phenotype follows the deep value, not the dial.' },
+      watch: 'Switch on the oxygen layer: the medium face stays bright and the deep half goes dark. Phenotype follows the deep value, not the dial. Give it a fortnight — a real 300 µm construct settles its gradient in minutes, this one integrates it in time and needs about two weeks.' },
     { key: 'infl', label: 'Inflammation (IL-1)', min: 0, max: 1, step: 0.01, default: 0, format: 'fixed2',
       metaphor: 'Temperature: heat turns droplets back into vapor.',
       biology: 'IL-1β in the medium (1 ≈ 10 ng/mL). It switches on aggrecanase and MMP-13 and shuts synthesis down, and the cells stay suppressed after it is gone.',
@@ -323,7 +349,7 @@ export const TISSUE_CARTILAGE = {
     { key: 'serum', label: 'Serum', min: 0, max: 1, step: 1, default: 0, format: 'onoff',
       metaphor: 'Smog: extra stuff in the air that fouls the droplets.',
       biology: '10 % fetal bovine serum. It carries mitogens that push chondrocytes toward a fibroblast-like state and blunt the TGF-β3 response; defined serum-free medium works better.',
-      watch: 'Cells drift orange and stretch out, the amber collagen I band appears, and the teal GAG band stalls.' },
+      watch: 'Cells drift orange and stretch out, the amber collagen I band appears, and the teal GAG band climbs at about half speed (0.54 against 0.95 by week eight). Add room air and a thin growth-factor trickle — the Fibrocartilage drift preset — and it stops climbing altogether.' },
   ],
 
   // ---- scenarios
@@ -332,7 +358,7 @@ export const TISSUE_CARTILAGE = {
       goal: 'Watch a synthetic gel dissolve on its own clock while the cells inside it try to build cartilage before the gel is gone.',
       steps: [
         'Press Play and watch the grey lattice fade while the teal haze grows.',
-        'At day 14 the TGF-β3 comes down and the squeezing starts: keep an eye on the stiffness trace.',
+        'At day 14, drop the TGF-β3 bath to 0.10 and turn dynamic compression up to 10 % — do it yourself without pausing, or switch on Auto-apply scripted events and the app does it on the day. The numbers below assume it happens.',
         'Run to eight weeks and watch where the stiffness trace goes: down through the first week, back past the fresh gel in week two, and on up from there.',
       ],
       question: 'The stiffness dips before it climbs. What is handing over to what during that first fortnight, and what would make the handover fail?',
@@ -369,10 +395,11 @@ export const TISSUE_CARTILAGE = {
       steps: [
         'Press Play; the lattice is gone inside nine days.',
         'Watch the flux gauge: deposition is high but so is loss to the medium.',
+        'At day 14 make the same change as in the first scenario — TGF-β3 bath to 0.10, dynamic compression to 10 % — by hand, or with Auto-apply scripted events on.',
         'Run to eight weeks and compare the final GAG band and stiffness with the first scenario.',
       ],
       question: 'The cells here synthesise more than in the first scenario, not less. Where does the matrix go, and which readout shows it leaving?',
-      expect: 'The grey band is gone by day 9 with almost nothing behind it — aggrecan under a third of native and no pericellular island. It climbs a little further to day 14 and then goes backwards: with no mesh and no collagen net to catch it, new aggrecan washes out as fast as it is made, and the squeezing from day 14 makes that worse. The cube ends nearly empty at about 2 kPa, a fifth of the gel it started as, and from day 14 the flux gauge sits on evaporating.',
+      expect: 'The grey band is gone by day 9 with almost nothing behind it — aggrecan under a third of native and no pericellular island. It climbs a little further to day 14 and then goes backwards: with no mesh and no collagen net to catch it, new aggrecan washes out as fast as it is made, and the squeezing from day 14 makes that worse. The cube ends nearly empty at about 2 kPa, a fifth of the gel it started as. For the fortnight after day 14 the flux gauge sits on evaporating; by week five it is level again, because the cells are still working and everything they make washes straight back out.',
       dials: { tgfExt: 0.5, amp: 0, o2Ext: 0.24, infl: 0, xl: 0.1, nCells: 160, serum: 0 },
       init: { species: { scaf: 1 }, jitter: 0.12 },
       events: [{ at: 14, dials: { tgfExt: 0.1, amp: 0.1 } }],
@@ -384,6 +411,9 @@ export const TISSUE_CARTILAGE = {
         { at: [9, 21], agg: 'first', stat: 'cells.c', op: 'lt', value: 0.3 },       // … and no islands either
         { at: 21, stat: 'logE', rel: { stat: 'logE', at: 9, op: 'lt' } },    // from t* the modulus goes backwards
         { at: [14, 28], agg: 'mean', stat: 'ratio', op: 'lt', value: 0.87 }, // the gauge sits on evaporating
+        // …for a fortnight, and no longer: the ratio is back inside the "holds its shape" band
+        // (≥ 0.87) from about day 30 and reaches 1.0 by day 42, which is what the card now says.
+        { at: [35, 56], agg: 'min', stat: 'ratio', op: 'gt', value: 0.87 },
         // cumulative loss > 60 % of synthesis by day 28 (offset = −0.4 × cumDeposition ≈ 1.24; see the race)
         { at: 28, stat: 'cumDegradation', rel: { stat: 'cumDeposition', op: 'gt' }, value: -0.5 },
         { at: [0, 56], agg: 'min', stat: 'logE', rel: { stat: 'logE', at: 0, op: 'lt' }, value: -0.523 },  // min E < 0.3·E(0)
@@ -398,6 +428,7 @@ export const TISSUE_CARTILAGE = {
       goal: 'Crosslink the gel as tightly as it will go and watch the matrix get stuck around the cells that made it.',
       steps: [
         'Press Play and watch the cells, not the cube: a pale ring builds around each one.',
+        'At day 14 make the same change as in the first scenario — TGF-β3 bath to 0.10, dynamic compression to 10 % — by hand, or with Auto-apply scripted events on.',
         'Follow the pericellular trace — it fills up and stays full.',
         'Run to ten weeks: the lattice is still half there at six, and the stiffness trace slides all the way to week seven before the released islands finally lift it.',
       ],
@@ -422,10 +453,10 @@ export const TISSUE_CARTILAGE = {
       steps: [
         'Press Play and watch the cell colour and shape rather than the matrix.',
         'By four weeks the cells are orange spindles and amber fibres are appearing.',
-        'At day 56 the medium is corrected back to 5 % oxygen, serum-free, full TGF-β3. Run four more weeks and see what comes back.',
+        'At day 56, correct the medium yourself — TGF-β3 bath 0.50, oxygen 5 %, serum Off — or switch on Auto-apply scripted events. Run four more weeks and see what comes back.',
       ],
       question: 'The phenotype recovers after you fix the medium, but the tissue does not. What does that tell you about scar in a joint?',
-      expect: 'The teal aggrecan band never gets going. Cells drift orange, stretch into spindles, start crawling, and lay down aligned amber collagen I (alignment reaches 0.4, which cartilage never does). Correcting the medium at day 56 brings the phenotype most of the way back within a month — but the collagen I they already made is still there, and there is more of it.',
+      expect: 'The teal aggrecan band never gets going. Cells drift orange, stretch into spindles, start crawling, and lay down amber collagen I that lines up inside each patch — local anisotropy reaches 0.4 by four weeks, which cartilage never does — while the cube as a whole still points nowhere: whole-tissue coherence never gets above 0.03, about a twentieth of the local number. Neither of the two has a trace on this tissue; judge it from the amber rods in the 3D view. Correcting the medium at day 56 brings the phenotype most of the way back within a month — but the collagen I they already made is still there, and there is more of it.',
       dials: { tgfExt: 0.2, amp: 0, o2Ext: 1, infl: 0, xl: 0.3, nCells: 160, serum: 1 },
       init: { species: { scaf: 1 }, jitter: 0.12 },
       events: [{ at: 56, dials: { tgfExt: 0.5, o2Ext: 0.24, serum: 0 } }],
@@ -438,6 +469,10 @@ export const TISSUE_CARTILAGE = {
         { at: 56, stat: 'species.gag', op: 'lt', value: 0.3 },
         { at: 56, stat: 'logE', op: 'between', value: [1, 1.9] },            // 10–80 kPa: fibrocartilage
         { at: [42, 84], agg: 'min', stat: 'fa', op: 'gt', value: 0.3 },      // collagen I is aligned, and stays
+        // …LOCALLY. The card says the cube as a whole still points nowhere, and this is the pin for
+        // it: globalFA (the anisotropy of the SUMMED tensor) peaks at 0.023 on day 21. Without this
+        // the two measures could drift together and the card would be teaching a contradiction.
+        { at: [0, 84], agg: 'max', stat: 'globalFA', op: 'lt', value: 0.05 },
         { at: 84, stat: 'cells.a', op: 'gt', value: 0.6 },                   // phenotype comes back …
         { at: 84, stat: 'cells.a', rel: { stat: 'cells.a', at: 56, op: 'gt' }, value: 0.3 },
         { at: [56, 84], agg: 'min', stat: 'species.col1', rel: { stat: 'species.col1', at: 56, op: 'gt' }, value: -0.02 },
@@ -447,7 +482,7 @@ export const TISSUE_CARTILAGE = {
       goal: 'Take the finished construct from the first scenario, drop IL-1 into the medium for two weeks, and see what breaks first and what comes back.',
       steps: [
         'Press Play: within days the teal GAG band melts while the ivory collagen II band barely moves.',
-        'At day 14 the IL-1 is washed out. Watch the protease haze clear within a week.',
+        'At day 14, wash the IL-1 out yourself — Inflammation back to 0.00 — or switch on Auto-apply scripted events. Watch the protease haze clear within a week.',
         'Run to eight weeks and compare GAG and collagen II with where they started.',
       ],
       question: 'The collagen II ends up past where it started and the aggrecan does not. Which of the two is carrying the modulus here — and which one would a real joint never get back?',
@@ -478,8 +513,14 @@ export const TISSUE_CARTILAGE = {
     { key: 'density', label: 'Matrix composition', unit: 'relative (1 ≈ native cartilage)',
       meaning: 'What the cube is made of: the hydrogel scaffold draining away, and the aggrecan, collagen II and collagen I the cells put in its place.',
       type: 'stack', domain: [0, 1.5],
+      // The hydrogel and collagen II swatches are luminance twins — 187 and 191 on a 0–255 grey
+      // scale — and they are the two bands a student most needs to tell apart (one is the trellis
+      // going, the other is the tissue arriving). Hatching the hydrogel separates them without
+      // colour and carries the meaning too: the hatched band is the one that is NOT tissue, the one
+      // species.tissueTotal leaves out. Declaring `pattern` here turns off the app's default, which
+      // would have hatched the top band (collagen I) — already the most distinct of the four.
       series: [
-        { stat: 'species.scaf', label: 'hydrogel', color: '#9ec5d8' },
+        { stat: 'species.scaf', label: 'hydrogel', color: '#9ec5d8', pattern: 'hatch' },
         { stat: 'species.gag', label: 'aggrecan', color: '#4cc4ae' },
         { stat: 'species.col2', label: 'collagen II', color: '#c9bfa8' },
         { stat: 'species.col1', label: 'collagen I', color: '#e0a24a' },
@@ -487,14 +528,18 @@ export const TISSUE_CARTILAGE = {
     { key: 'state', label: 'Phenotype, oxygen and the pericellular pool', unit: '0–1',
       meaning: 'Phenotype is 1 for a round chondrocyte and 0 for a fibroblast-like cell. Oxygen is the mean through the cube, 1 ≡ 21 %. The pericellular pool is how full the halo around each cell is.',
       type: 'lines', domain: [0, 1],
+      // Phenotype (#3fb8b0) and catabolic memory (#e05bd0) are luminance twins — 147 and 144 on a
+      // 0–255 grey scale — and they are the pair the inflammation scenario asks a student to read
+      // against each other. The app's default marker cycle happens to separate them today; pinning
+      // the two ends of the cycle keeps them separated if a series is ever added or reordered.
       series: [
-        { stat: 'cells.a', label: 'phenotype', color: '#3fb8b0', unit: '0–1 (mean over cells)',
+        { stat: 'cells.a', label: 'phenotype', color: '#3fb8b0', unit: '0–1 (mean over cells)', marker: 'circle',
           meaning: '1 = chondrogenic (aggrecan and collagen II), 0 = fibroblastic (collagen I).' },
         { stat: 'fields.o2', label: 'oxygen', color: '#6f9ce8', unit: '0–1 (1 ≡ 21 %)',
           meaning: 'Mean oxygen. The medium face is held at the dial; the deep half is whatever is left after the cells have breathed.' },
         { stat: 'cells.c', label: 'pericellular pool', color: '#b9a4e0', unit: '0–1 (1 = full)',
           meaning: 'Matrix made but trapped by the mesh around the cell. It empties into the cube as the gel clears.' },
-        { stat: 'cells.b', label: 'catabolic memory', color: '#e05bd0', unit: '0–1 (mean over cells)',
+        { stat: 'cells.b', label: 'catabolic memory', color: '#e05bd0', unit: '0–1 (mean over cells)', marker: 'triangle',
           meaning: 'How far the cells are into an IL-1 programme. It outlasts the IL-1 itself.' },
       ] },
     { key: 'stiff', label: 'Stiffness', unit: 'kPa (log scale)',
@@ -511,7 +556,7 @@ export const TISSUE_CARTILAGE = {
     intro: {
       tagline: 'A gel that has to disappear, and cells racing to replace it.',
       paragraphs: [
-        'You are looking at a cube of synthetic hydrogel about a third of a millimetre across, with chondrocytes photo-encapsulated in it. The grey lattice is the gel. The teal haze is aggrecan: sugar-coated protein that pulls water in and holds the swelling pressure. The pale ivory felt is collagen II, the net that stops the aggrecan from simply swelling away. Amber fibres are collagen I, and they are bad news here.',
+        'You are looking at a cube of synthetic hydrogel about 300 µm across, with chondrocytes photo-encapsulated in it. The grey lattice is the gel. The teal haze is aggrecan: sugar-coated protein that pulls water in and holds the swelling pressure. The pale ivory felt is collagen II, the net that stops the aggrecan from simply swelling away. Amber fibres are collagen I, and they are bad news here.',
         'Unlike fibroblasts, these cells do not crawl and do not pull. A chondrocyte sits in the hole it was cast into, round and teal, and secretes. Everything it makes has to fit through the mesh of the gel; while the mesh is tight, the matrix stays pinned around the cell as a pericellular island. That is why the crosslink dial matters as much as the growth factor: it sets how long the trellis takes to rot, and nothing becomes bulk tissue until it does.',
         'The lesson is a race, not a balance. Dissolve the gel too fast and there is nothing to hold the new matrix, so it washes into the medium. Dissolve it too slowly and the matrix never leaves the cells that made it. In between, the construct hands stiffness over from gel to tissue, dips in the middle, and comes out stiffer than it started.',
       ],
@@ -540,11 +585,66 @@ export const TISSUE_CARTILAGE = {
       },
       load: 'Translucent arrows on the top and bottom faces: dynamic compression, three hours a day. Longer arrows, bigger squeeze.',
     },
+    // The flux gauge in this tissue's own words (docs/EXTENDING.md §1 `copy.gauge`). `left` and
+    // `right` stay the weather words, because the live sentence beside the gauge uses them too and
+    // this tissue's metaphorBreaks already say that here evaporation is literal. What is worth
+    // renaming is the ratio caption (three long words on a narrow canvas) and the third bar.
+    gauge: { ratio: 'made / lost', scaffold: 'hydrogel dissolving' },
     vocabulary: {
       matrix: 'proteoglycan and collagen',
       cellsActive: 'the chondrocytes are pumping out aggrecan',
       cellsQuiet: 'the chondrocytes have stopped making cartilage matrix',
+      cellsMid: 'the chondrocytes are turning into fibroblasts',  // `a` is a phenotype axis, not a switch
+      // The generic continuations are written for a tissue whose only stiffness is the matrix its
+      // cells built. Here the cube STARTS at 5–65 kPa of hydrogel and the modulus FALLS through the
+      // first week while aggrecan piles up, so the default 30 kPa fires on day 14 of the race — at
+      // 36.8 kPa, 1.4 kPa above the 35.4 the cube was cast as and a fifth of it still trellis — and
+      // calls that "already stiff" on a readout whose own caption says a fresh gel is 5–65 kPa and a
+      // good construct a few hundred.
+      activeStiff: 'and their matrix is stiffening the cube',
+      stiffHigh: 'past anything the gel could have done',
+      activeSoftening: 'and what they make is not holding the cube up yet',
+      stillHint: 'the cube is all hydrogel so far — give the chondrocytes a day and the first aggrecan appears.',
+      // stiffKPa 90: the stiffest fresh gel this tissue can be cast as is 65 kPa (xl 1), so past 90
+      //   the two clauses above are literally true; in the race the switch lands on day 22 (94 kPa),
+      //   the day the equilibrium() override below hands back, so the two never leave a gap.
+      // quiet 0.12: a low phenotype here does not mean an idle cell, it means a fibroblast-like one
+      //   that is making collagen I hard. The generic "quiet" tail ("slow basal deposition") is only
+      //   true at the very bottom of the axis, which is where the drift scenario finally lands.
+      // still 5e-4: the rate at which copyFormatRate() itself starts printing "0/d", so neither the
+      //   sentence nor the trend dot says a cube is condensing while both of its numbers read zero.
+      thresholds: { stiffKPa: 90, quiet: 0.12, still: 5e-4 },
       scaffoldNoun: 'hydrogel dissolving',            // the third flux bar (stats().scaffoldFlux)
+      /**
+       * The one thing the shared sentence cannot say about this cube: the trellis. deposition and
+       * degradation are matrix rates and the scaffold is neither (it is the gauge's third bar), so
+       * for the first three weeks of every run the generic sentence reports a cube that is
+       * condensing while the student watches the stiffness trace go DOWN — the handover the race
+       * scenario is entirely about. While the hydrogel is still there and still draining, say all
+       * three rates and which way the race is going; everywhere else return null and let
+       * src/copy.js build the sentence, so the two can never disagree about the rest.
+       *
+       * Pure: same stats in, same string out. Thresholds and metaphor words come from V, so the
+       * dot beside the sentence (copyTrend) and this text always name the same trend.
+       */
+      equilibrium(stats, V) {
+        const s = stats || {};
+        const scaf = Number.isFinite(s.scaffold) ? s.scaffold : 0;
+        const drain = Number.isFinite(s.scaffoldFlux) ? s.scaffoldFlux : 0;
+        if (!(scaf > 0.05 && drain > 1e-4)) return null;          // no trellis, or it is not moving
+        const T = V.thresholds, m = V.metaphor;
+        const dep = s.deposition > 0 ? s.deposition : 0, deg = s.degradation > 0 ? s.degradation : 0;
+        const ratio = deg > T.still ? dep / deg : dep > T.still ? Infinity : 1;
+        const trend = dep < T.still && deg < T.still ? m.still
+          : ratio > T.condensing ? m.condensing : ratio < T.evaporating ? m.evaporating : m.steady;
+        const a = Number.isFinite(s.cells ? s.cells.a : s.meanAlpha) ? (s.cells ? s.cells.a : s.meanAlpha) : 0;
+        const who = a > T.active ? V.cellsActive : a < T.quiet ? V.cellsQuiet : V.cellsMid;
+        const race = drain > dep
+          ? 'and the trellis is going faster than they can fill in'
+          : 'and they are filling in faster than the trellis goes';
+        return `Deposition ${copyFormatRate(dep)}, degradation ${copyFormatRate(deg)}, hydrogel draining `
+          + `${copyFormatRate(drain)} — ${trend}; ${who}, ${race}.`;
+      },
     },
   },
 

@@ -30,6 +30,8 @@ const APP_FLASH_MS = 3200;
 const APP_STATUS_MS = 15000;    // screen-reader status: at most one routine announcement per 15 s
 const APP_TREND_MS = 5000;      // …and at most one "the balance turned" announcement per 5 s
 const APP_TREND_HOLD_MS = 1000; // a new trend must hold this long before it is worth saying
+const APP_STATUS_FLOOR_MS = 10000;  // …and nothing the CLOCK causes ever lands within 10 s of the last
+const APP_HOVER_SAY_MS = 220;   // the keyboard crosshair speaks once the arrow key comes to rest
 const APP_STEP_BUDGET_MS = 8;   // wall-clock stepping budget per frame (A3); always ≥ 1 step
 const APP_SLOW_MS = 1500;       // how long "sim slowed" stays in #fps after a dropped backlog
 const APP_WARM_MS = 5;          // idle-frame budget for engine.warmScenarios (A2)
@@ -38,15 +40,36 @@ const APP_GHOST_MIN_DAYS = 0.5; // a run shorter than this is not worth keeping 
 const APP_SPEED_DEFAULT = 5;    // days per second — the number the teaching copy quotes
 const APP_SPEEDS = [['Watch', 1], ['Weeks', 5], ['Months', 20]];  // labelled presets next to the speed slider
 const APP_WEEK_JUMP = 7;        // the "+7 days" button, run (not stepped) to a stopAt
-const APP_MARKERS = ['circle', 'square', 'diamond'];  // endpoint glyphs: identity never by colour alone (B5)
+// endpoint glyphs: identity never by colour alone (B5). Five of them, so a readout with four or
+// five series never repeats one — the cartilage phenotype/memory pair are luminance twins, and a
+// repeated circle left them differing by hue alone.
+const APP_MARKERS = ['circle', 'square', 'diamond', 'triangle', 'cross'];
 const APP_PRESENT_FONT = 14;    // readout font in presentation mode (11 px normally)
 const APP_EVENTS_KEY = 'tw.autoEvents';
+const APP_HINT_KEY = 'tw.hintDismissed';    // the first-run card, dismissed for this session
+const APP_SHORTCUT_KEY = 'tw.shortcuts';    // single-key shortcuts on/off, remembered between visits
+const APP_LEGEND_MIN_H = 132;   // px of stage left under the HUD before the legend moves into the console
 const APP_KEYS = [
   ['Space', 'play / pause'], ['R', 'reset the scenario (previous run stays dashed)'], ['I', 'injure (when the tissue supports it)'],
   ['1 – 9', 'pick a scenario'], ['P', 'presentation mode (bigger sentence and clock)'],
   ['← →', 'nudge the focused dial (Home / End for the extremes); on a focused chart, move the crosshair (Esc drops it)'],
   ['Tab', 'move between controls; the 3D view and every chart are focusable and describe themselves'],
 ];
+/**
+ * The camera chips under the layer chips: [id, glyph, accessible name, renderer method, args].
+ * Each is checked against the renderer before it is built, so a renderer without the camera API
+ * (or none at all, when WebGL failed) simply has no camera row.
+ */
+const APP_CAMERA = [
+  ['cam-left', '◀', 'Orbit the view left', 'orbit', (s) => [-s.rot, 0]],
+  ['cam-right', '▶', 'Orbit the view right', 'orbit', (s) => [s.rot, 0]],
+  ['cam-up', '▲', 'Orbit the view up', 'orbit', (s) => [0, -s.rot]],
+  ['cam-down', '▼', 'Orbit the view down', 'orbit', (s) => [0, s.rot]],
+  ['cam-in', '+', 'Zoom in', 'dolly', (s) => [1 / s.dolly]],
+  ['cam-out', '−', 'Zoom out', 'dolly', (s) => [s.dolly]],
+  ['cam-home', '⌂', 'Recentre the camera on the default framing', 'resetView', () => []],
+];
+const APP_CAMERA_STEP = { rot: 0.26, dolly: 1.15 };   // one chip press ≈ one arrow-key press (render.js)
 /** The one line of orientation under the intro paragraph in the first-run hint (C13). */
 const APP_HINT_CONTROLS = 'Press Play to start the clock, drag a dial to change the weather, and drag the 3D view to look around. Everything works from the keyboard too — Space plays, 1–9 pick a scenario.';
 const APP_OFFLINE_HTML = 'To use this page offline: reload once with an internet connection so the browser caches the library, or download <code>three@0.160.0</code> (<code>build/three.module.min.js</code> and <code>examples/jsm/controls/OrbitControls.js</code>) next to this page and point the import map in the HTML at those files.';
@@ -142,6 +165,21 @@ function appSession(key, value) {
     return value;
   } catch (e) { return null; }
 }
+/** localStorage, same treatment: for the one preference worth keeping between visits. */
+function appLocal(key, value) {
+  try {
+    if (value === undefined) return window.localStorage.getItem(key);
+    window.localStorage.setItem(key, value);
+    return value;
+  } catch (e) { return null; }
+}
+/** Give a scroll container a tab stop only while it actually overflows (axe scrollable-region-focusable). */
+function appScrollable(el, axis) {
+  if (!el) return false;
+  const over = axis === 'y' ? el.scrollHeight > el.clientHeight + 2 : el.scrollWidth > el.clientWidth + 2;
+  el.tabIndex = over ? 0 : -1;
+  return over;
+}
 function appHasWebGL() {
   try { const c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); } catch (e) { return false; }
 }
@@ -173,12 +211,20 @@ export class TissueApp {
     // screen-reader status region (C3): routine announcements at most every APP_STATUS_MS,
     // plus one whenever the trend changes, the clock stops or a scenario loads
     this.statusText = ''; this.lastStatusAt = -1e9; this.lastTrend = null; this.statusFlip = false;
+    this.lastSaidSentence = '';            // the last equilibrium sentence announced (not re-said)
     this.lastRevision = undefined;         // engine.revision at the last stats sample (B1/A3)
     this.pendingTrend = null; this.pendingTrendAt = 0; this.lastTrendSaidAt = -1e9;
     this.stopAt = null;                    // "+7 days": pause when the clock reaches this day
     this.slowUntil = 0;                    // "sim slowed" in #fps while a backlog is being dropped
     this.warmDone = false; this.warmChunk = 16;   // idle-frame scenario warm-up (A2)
     this.present = false; this.autoRotate = true;
+    this.hoverTimer = null;                // the keyboard crosshair speaks once, after the key rests
+    this.legendDocked = false;             // the legend has moved into the console (short stage)
+    this.hintDismissed = appSession(APP_HINT_KEY) === '1';
+    // Single-character shortcuts need a way OFF (WCAG 2.1.4 Character Key Shortcuts): a speech-input
+    // user dictating anything with an "r" in it would otherwise destroy the run. Default on — they
+    // are what the classroom uses — remembered between visits, and Space is never gated.
+    this.shortcuts = appLocal(APP_SHORTCUT_KEY) !== '0';
     // scripted scenario events: off by default (the student does the protocol by hand),
     // remembered for the session so an instructor can leave hands-free mode on
     this.autoEvents = appSession(APP_EVENTS_KEY) === '1';
@@ -218,7 +264,12 @@ export class TissueApp {
     appEl('btn-copy-link').addEventListener('click', () => this.copyLink());
     appEl('btn-table').addEventListener('click', () => this.toggleTable());
     appEl('btn-clear-ref').addEventListener('click', () => this.clearReference(true));
-    appEl('hint-dismiss').addEventListener('click', () => { appEl('hint').hidden = true; appEl('btn-play').focus(); });
+    // dismissing the card means dismissed: buildHint re-derives visibility on every tissue switch,
+    // so without the flag the second tissue brought the card back
+    appEl('hint-dismiss').addEventListener('click', () => {
+      this.hintDismissed = true; appSession(APP_HINT_KEY, '1');
+      appEl('hint').hidden = true; appEl('btn-play').focus();
+    });
     appEl('btn-present').addEventListener('click', () => this.setPresent(!this.present, true));
     const speed = appEl('speed');
     speed.addEventListener('input', () => this.setSpeed(parseFloat(speed.value), true));
@@ -246,9 +297,21 @@ export class TissueApp {
     });
     // legend: open on wide screens, collapsed (but reachable) on narrow ones
     const legendBox = appEl('legend-box');
-    const applyLegend = () => { legendBox.open = !(this.narrowQuery && this.narrowQuery.matches); };
+    const applyLegend = () => { legendBox.open = !(this.narrowQuery && this.narrowQuery.matches); this.layoutLegend(); };
     applyLegend();
     if (this.narrowQuery && this.narrowQuery.addEventListener) this.narrowQuery.addEventListener('change', applyLegend);
+    legendBox.addEventListener('toggle', () => this.syncLegendScroll());
+    // Two measurements the layout cannot make on its own, both of which move with the tissue, the
+    // window and presentation mode: the sticky Run header's height (it becomes #panel's
+    // scroll-padding, so Shift+Tab never parks focus behind it) and the room the stage leaves
+    // under the HUD (the legend's cap).
+    const measure = () => { this.measureRun(); this.layoutLegend(); };
+    if (typeof ResizeObserver === 'function') {
+      this.sizeObserver = new ResizeObserver(measure);
+      for (const sel of ['.run', '#stage', '.hud-top']) { const el = document.querySelector(sel); if (el) this.sizeObserver.observe(el); }
+    }
+    window.addEventListener('resize', measure);
+    measure();
     if (this.motionQuery && this.motionQuery.addEventListener) {
       this.motionQuery.addEventListener('change', (e) => {
         this.reducedMotion = e.matches;
@@ -257,6 +320,48 @@ export class TissueApp {
     }
     window.addEventListener('keydown', (e) => this.onKey(e));
   }
+
+  /**
+   * The sticky Run header's height, as the console's scroll-padding. Chrome scrolls a focused
+   * element into view only when it is OUTSIDE the scrollport; one that is inside it but under the
+   * opaque sticky header is left where it is, so Shift+Tab up the console used to leave four or
+   * five controls focused and invisible (WCAG 2.4.11). The header is 241 px with four dials and
+   * 197 px with seven, so it is measured rather than guessed.
+   */
+  measureRun() {
+    const run = document.querySelector('.run'), panel = appEl('panel');
+    if (!run || !panel) return;
+    const h = Math.round(run.getBoundingClientRect().height);
+    if (h > 0) panel.style.setProperty('--run-h', `${h + 8}px`);
+  }
+
+  /**
+   * Where the legend may live (WCAG 1.4.4 Resize Text / 1.4.10 Reflow). The box is absolutely
+   * positioned in the stage and opens UPWARD, while its old cap was computed from the VIEWPORT —
+   * so at 200 % zoom, where the stage is 58vh of a 450 px-tall viewport, an open legend printed
+   * itself over the title, the clock and the live sentence. Cap it against what the stage
+   * actually leaves under the HUD; when that is less than can be read, move the whole disclosure
+   * into the console, where it is an ordinary block and covers nothing.
+   */
+  layoutLegend() {
+    const stage = appEl('stage'), hud = document.querySelector('.hud-top'), box = appEl('legend-box'), dock = appEl('legend-dock'), layers = appEl('layers');
+    if (!stage || !hud || !box || !dock) return;
+    const sr = stage.getBoundingClientRect(), hr = hud.getBoundingClientRect();
+    const room = Math.round(sr.bottom - hr.bottom - 26);   // 16 px bottom offset + 10 px clear of the HUD
+    const dockIt = !(room >= APP_LEGEND_MIN_H);
+    if (dockIt !== this.legendDocked) {
+      this.legendDocked = dockIt;
+      document.body.classList.toggle('legend-docked', dockIt);
+      dock.hidden = !dockIt;
+      if (dockIt) dock.append(box);
+      else if (layers) stage.insertBefore(box, layers); else stage.append(box);
+    }
+    if (dockIt) box.style.removeProperty('--legend-max');
+    else box.style.setProperty('--legend-max', `${Math.max(0, room)}px`);
+    this.syncLegendScroll();
+  }
+  /** A capped legend scrolls: give it a tab stop while it does, and none while it does not. */
+  syncLegendScroll() { appScrollable(appEl('legend'), 'y'); }
 
   onKey(e) {
     if (e.defaultPrevented || e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -269,6 +374,10 @@ export class TissueApp {
       if (interactive) return; // native activation (buttons, summary, checkbox) wins
       e.preventDefault(); this.togglePlay(); return;
     }
+    // WCAG 2.1.4 Character Key Shortcuts: everything below is a single printable character, so it
+    // is switchable (About → "Single-key shortcuts"). Space is not — it is the one key WCAG
+    // exempts as a standard activation key, and it stays whatever the switch says.
+    if (!this.shortcuts) return;
     const k = e.key.toLowerCase();
     if (k === 'p') { e.preventDefault(); this.setPresent(!this.present, true); return; }
     if (k === 'r') { e.preventDefault(); this.reset(); return; }
@@ -276,6 +385,34 @@ export class TissueApp {
     if (/^[1-9]$/.test(e.key) && this.tissue) {
       const sc = this.tissue.scenarios[parseInt(e.key, 10) - 1];
       if (sc) { e.preventDefault(); this.loadScenario(sc.key); }
+    }
+  }
+
+  /**
+   * The single-key shortcuts on or off (WCAG 2.1.4), from the About toggle, remembered between
+   * visits. Off, the page stops advertising them too: no aria-keyshortcuts, no kbd hints on the
+   * scenario chips — a promise the page is no longer keeping is worse than no promise.
+   */
+  setShortcuts(on, fromUi) {
+    this.shortcuts = !!on;
+    if (fromUi) appLocal(APP_SHORTCUT_KEY, this.shortcuts ? '1' : '0');   // …else this is only a re-sync
+    const b = appEl('opt-shortcuts');
+    if (b) b.setAttribute('aria-pressed', String(this.shortcuts));
+    for (const [id, key] of [['btn-reset', 'r'], ['btn-injure', 'i'], ['btn-present', 'p']]) {
+      const el = appEl(id);
+      if (el) { if (this.shortcuts) el.setAttribute('aria-keyshortcuts', key); else el.removeAttribute('aria-keyshortcuts'); }
+    }
+    if (this.tissue) this.tissue.scenarios.forEach((sc, i) => {
+      const chip = this.scenarioButtons[sc.key];
+      if (!chip || i >= 9) return;
+      if (this.shortcuts) chip.setAttribute('aria-keyshortcuts', String(i + 1)); else chip.removeAttribute('aria-keyshortcuts');
+      const kbd = chip.querySelector('kbd');
+      if (kbd) kbd.hidden = !this.shortcuts;
+    });
+    if (fromUi) {
+      this.announce(this.shortcuts
+        ? 'Single-key shortcuts on: R resets, I injures, P is presentation mode, 1 to 9 pick a scenario.'
+        : 'Single-key shortcuts off. Space still plays and pauses, and every control is still reachable with Tab.', true);
     }
   }
 
@@ -293,6 +430,7 @@ export class TissueApp {
   setTissue(key, opts = {}) {
     const tissue = TISSUES[key];
     if (!tissue) return;
+    const tok = this.focusToken();     // the dials, readouts and card below are all replaced
     this.setPlaying(false, true);
     this.tissueKey = key; this.tissue = tissue;
     const radio = appEl(`tissue-${key}`); if (radio) radio.checked = true;
@@ -309,6 +447,8 @@ export class TissueApp {
     this.voc = Object.assign({ cellStateNoun: this.stateNoun.noun }, (tissue.copy && tissue.copy.vocabulary) || {});
     if (this.renderer && typeof this.renderer.setTissue === 'function') this.renderer.setTissue(tissue);
     this.buildDials(); this.buildScenarios(); this.buildReadouts(); this.buildLayers(); this.buildLegend(); this.buildAbout(); this.buildHint();
+    this.restoreFocus(tok);
+    this.measureRun();                 // a tissue with seven dials has a taller sticky header
     appEl('btn-injure').hidden = !tissue.injury;
     this.engine = null; this.stats = null; this.ready = false;
     this.warmDone = false; this.lastTrend = null; this.stopAt = null;
@@ -320,6 +460,32 @@ export class TissueApp {
       catch (e) { this.busy(null); this.showNotice('The simulation could not start', String(e && e.message || e)); return; }
       this.loadScenario(sc, { dials: opts.dials, ghost: false, autoplay: false });
     }, 30);
+  }
+
+  /**
+   * Focus survival across a rebuild (WCAG 2.4.3). `replaceChildren` on the scenario card, and the
+   * whole-console rebuild behind a tissue switch, dropped focus to the document body — from which
+   * the next Tab restarts at the skip link, and a screen-reader user loses their place. Remember where
+   * focus was, and afterwards put it on the same control, or on the container that replaced it.
+   * Focus OUTSIDE the rebuilt regions (a scenario chip, the tissue radio) is left strictly alone,
+   * so nothing here can move focus for a mouse user.
+   */
+  focusToken() {
+    const el = document.activeElement;
+    if (!el || !el.closest || el === document.body) return null;
+    const box = el.closest('#scenario-card, #dials, #readouts, #layers');
+    return box ? { id: el.id || '', box: box.id } : null;
+  }
+  restoreFocus(tok) {
+    if (!tok) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement) return;  // something else took it
+    let el = tok.id ? appEl(tok.id) : null;                       // the same control, if the rebuild kept it
+    const box = appEl(tok.box);
+    if ((!el || !el.isConnected || el.offsetParent === null) && box) {
+      el = box.hasAttribute('tabindex') ? box : box.querySelector('button, [href], input, select, textarea, summary, [tabindex]:not([tabindex="-1"])');
+    }
+    if (el && typeof el.focus === 'function') { try { el.focus({ preventScroll: false }); } catch (e) { el.focus(); } }
   }
 
   scenario() { return this.tissue ? (this.tissue.scenarios.find((s) => s.key === this.scenarioKey) || this.tissue.scenarios[0]) : null; }
@@ -335,10 +501,12 @@ export class TissueApp {
       b.addEventListener('click', () => this.loadScenario(sc.key));
       this.scenarioButtons[sc.key] = b; box.append(b);
     });
+    this.setShortcuts(this.shortcuts, false);   // the new chips advertise the digits only if they work
   }
 
   renderScenarioCard(sc) {
     const card = appEl('scenario-card');
+    const tok = this.focusToken();
     const from = sc.init && sc.init.from;
     const events = this.describeEvents(sc);
     const toggle = appH('button', {
@@ -357,6 +525,7 @@ export class TissueApp {
       events ? appH('p', { class: 'note', id: 'events-note', text: this.eventsNote(events) }) : '',
       events ? appH('div', { class: 'tools-row' }, [toggle]) : '',
     );
+    this.restoreFocus(tok);
   }
 
   eventsNote(events) {
@@ -470,11 +639,17 @@ export class TissueApp {
       this.lastTrend = null;
       this.stopAt = null;
       this.sample(true, performance.now());
-      if (o.flash) this.flash(o.flash);
-      // a scenario swap is silent on screen apart from the card: say which one loaded (C3).
+      // A scenario swap is silent on screen apart from the card, so it says which one loaded (C3).
+      // The resume BELOW used to be the last word: setPlaying's own "Playing at N days per second"
+      // overwrote #status in the same task, so switching scenario or pressing Reset while the
+      // clock ran never reached a screen reader. The resume is quiet now and the play state is
+      // part of this one sentence instead.
       // No programmatic focus move — loadScenario also runs on page load and on a radio change.
-      else this.announce(`Scenario “${sc.title}” loaded, day 0. ${sc.goal ? appFirstSentence(sc.goal) : ''}`.trim(), true);
-      this.setPlaying(o.autoplay === undefined ? wasPlaying : o.autoplay);
+      const resume = o.autoplay === undefined ? wasPlaying : o.autoplay;
+      const said = o.flash || `Scenario “${sc.title}” loaded, day 0. ${sc.goal ? appFirstSentence(sc.goal) : ''}`.trim();
+      const withState = resume ? `${said} Still running at ${this.speed} simulated days per second.` : said;
+      if (o.flash) this.flash(withState); else this.announce(withState, true);
+      this.setPlaying(resume, true);
       this.scheduleUrl();
     }, 30);
   }
@@ -510,7 +685,10 @@ export class TissueApp {
       const id = `dial-${d.key}`;
       const txt = appFormatDial(d, d.default);
       const input = appH('input', { type: 'range', id, min: d.min, max: d.max, step: d.step, value: d.default, 'aria-valuetext': txt, 'aria-describedby': `${id}-hint` });
-      const out = appH('output', { for: id, text: txt });
+      // <output> maps to role=status, i.e. an implicit polite live region: without aria-live="off"
+      // one drag of this slider queues ~40 announcements on top of the value the slider itself
+      // already speaks, and the page has six or nine live regions instead of the one it claims.
+      const out = appH('output', { for: id, 'aria-live': 'off', text: txt });
       input.addEventListener('input', () => this.setDial(d.key, parseFloat(input.value), 'ui'));
       const m = String(d.metaphor || '');
       const ci = m.indexOf(':');
@@ -521,8 +699,13 @@ export class TissueApp {
       // fold into a details (C8) — seven cartilage dials with three lines each pushed Play and
       // the readouts more than a screen below the fold.
       const hint = appH('div', { class: 'hint', id: `${id}-hint` }, [d.biology ? appH('span', { text: d.biology }) : '']);
+      // the summary text is the same three words on every dial: four (seven, for cartilage)
+      // identically named disclosures in a row in a screen reader's elements list. The dial's own
+      // label goes in front of it in the accessible name — the visible words are kept verbatim,
+      // so the name still contains the label a voice user would say (WCAG 2.5.3).
+      const summaryText = rest && d.watch ? 'Metaphor & what to watch' : (rest ? 'Metaphor' : 'What to watch');
       const more = (rest || d.watch) ? appH('details', { class: 'dial-more' }, [
-        appH('summary', { text: rest && d.watch ? 'Metaphor & what to watch' : (rest ? 'Metaphor' : 'What to watch') }),
+        appH('summary', { text: summaryText, 'aria-label': `${appShortLabel(d.label)}: ${summaryText}` }),
         rest ? appH('p', { class: 'metaphor-note', text: `Like ${tag}: ${rest}` }) : '',
         d.watch ? appH('p', {}, [appH('b', { text: 'Watch: ' }), document.createTextNode(d.watch)]) : '',
       ]) : '';
@@ -614,8 +797,11 @@ export class TissueApp {
         role: 'img', tabindex: '0', 'aria-describedby': 'chart-keys-hint',
         'aria-label': `${r.label} chart over the last 90 days; focus it and use the arrow keys to read day by day`,
       });
+      // `background-color`, not the `background` shorthand: the shorthand resets background-image
+      // to none, and an inline declaration outranks any selector, so the hatch rule in index.html
+      // never applied — the chart drew a hatched band the key beside it did not (B5).
       const keys = appH('div', { class: 'keys' }, series.length > 1 ? series.map((s) => appH('span', {}, [
-        appH('i', { class: `key-mark ${s.marker}${s.pattern === 'hatch' ? ' hatch' : ''}`, style: `background:${s.color}` }), document.createTextNode(s.label),
+        appH('i', { class: `key-mark ${s.marker}${s.pattern === 'hatch' ? ' hatch' : ''}`, style: `background-color:${s.color}` }), document.createTextNode(s.label),
       ])) : []);
       const ghostKey = appH('span', { class: 'ghost-key', hidden: true }, [appH('i', { class: 'dash' }), document.createTextNode('previous run (dashed)')]);
       keys.append(ghostKey);
@@ -630,10 +816,18 @@ export class TissueApp {
     this.syncReferenceUI();
   }
 
-  /** The keyboard crosshair speaks: mirror the tooltip into the status region (C4). */
+  /**
+   * The keyboard crosshair speaks: mirror the tooltip into the status region (C4) — but only once
+   * the key comes to rest. Auto-repeat delivers ~30 keydowns a second and each one moved the
+   * crosshair one sample, so a held arrow rewrote the polite region 30 times a second with a
+   * four-to-six-line reading: a reader that queues rather than coalesces would still be talking
+   * long after the key was released.
+   */
   onPlotHover(readout, lines, source) {
     if (source !== 'key' || !lines || !lines.length) return;
-    this.announce(`${readout.label}, ${lines.join(', ')}`, true);
+    const text = `${readout.label}, ${lines.join(', ')}`;
+    clearTimeout(this.hoverTimer);
+    this.hoverTimer = setTimeout(() => this.announce(text, true), APP_HOVER_SAY_MS);
   }
 
   /** What the third flux bar and its table row are called: the tissue's word, else a neutral one. */
@@ -706,7 +900,10 @@ export class TissueApp {
     ]));
     // the last five days as numbers (C4): a chart is a picture, and "is it still rising?" needs
     // more than the latest value. Filled only while the details is open.
-    this.historyOut = appH('div', { class: 'history-out' });
+    // The box scrolls sideways (434 px of columns in a 355 px console), so it is a NAMED region
+    // and — while it actually overflows — a tab stop: without one, the last day is unreachable
+    // for a keyboard user in Firefox and Safari (WCAG 2.1.1, axe scrollable-region-focusable).
+    this.historyOut = appH('div', { class: 'history-out', role: 'region', tabindex: '-1', 'aria-label': 'Last five days, scroll sideways for the later days' });
     this.historyBox = appH('details', { class: 'history' }, [appH('summary', { text: 'Last five days as a table' }), this.historyOut]);
     this.historyBox.addEventListener('toggle', () => this.renderHistory());
     box.append(this.historyBox);
@@ -748,9 +945,11 @@ export class TissueApp {
       appH('thead', {}, [appH('tr', {}, [appH('th', { scope: 'col', text: 'Series' }), ...days.map((d) => appH('th', { scope: 'col', text: `d ${d}` }))])]),
       appH('tbody', {}, rows),
     ]));
+    appScrollable(out, 'x');
   }
   renderTable(now) {
     this.lastTableAt = now;
+    appScrollable(appEl('stats-table'), 'x');
     if (this.stats) this.tableCaption.textContent = `Latest values, day ${this.stats.t.toFixed(1)}`;
     for (const c of this.tableCells) {
       const v = c.getter();
@@ -810,15 +1009,51 @@ export class TissueApp {
     });
     rot.addEventListener('click', () => this.setAutoRotate(!this.autoRotate, true));
     this.layerButtons['auto-rotate'] = rot; box.append(rot);
+    this.buildCamera();
+  }
+
+  /**
+   * Orbit, zoom and recentre without dragging: the single-pointer alternative to the drag gesture
+   * the 3D view otherwise needs (WCAG 2.5.7 Dragging Movements), and the same moves the arrow
+   * keys make on the focused canvas. Rebuilt whenever the layer row is, and again once the
+   * renderer has loaded (initRenderer), because until then there is nothing to drive.
+   */
+  buildCamera() {
+    const box = appEl('layers');
+    if (!box) return;
+    const old = box.querySelector('.cam-group');
+    if (old) old.remove();
+    const r = this.renderer;
+    const items = APP_CAMERA.filter(([, , , method]) => r && typeof r[method] === 'function');
+    if (!items.length) return;
+    const row = appH('div', { class: 'cam-group', role: 'group', 'aria-label': '3D camera' });
+    for (const [id, glyph, name, method, args] of items) {
+      const b = appH('button', {
+        class: 'chip', type: 'button', id: `btn-${id}`, 'aria-label': name,
+        title: `${name}. With the 3D view focused the arrow keys, + and − and Home do the same.`,
+      }, [appH('span', { 'aria-hidden': 'true', text: glyph })]);
+      b.addEventListener('click', () => {
+        // a move the viewer asked for beats the rotation they did not: stop auto-rotate first,
+        // exactly as a drag or an arrow key on the canvas does
+        if (this.autoRotate) this.setAutoRotate(false, true);
+        try { this.renderer[method](...args(APP_CAMERA_STEP)); } catch (e) { /* renderer torn down */ }
+      });
+      row.append(b);
+    }
+    box.append(row);
   }
 
   /** Auto-rotate, from the chip or from the renderer (a drag or a key press stops it). */
   setAutoRotate(on, fromUi) {
+    const was = this.autoRotate;
     this.autoRotate = !!on;
     const b = this.layerButtons['auto-rotate'];
     if (b) b.setAttribute('aria-pressed', String(this.autoRotate));
     if (fromUi && this.renderer && typeof this.renderer.setAutoRotate === 'function') this.renderer.setAutoRotate(this.autoRotate);
     if (fromUi) this.scheduleUrl();
+    // a state change nobody asked for out loud: dragging or an arrow key on the canvas stops the
+    // rotation, and the chip's aria-pressed flips silently. Say it once.
+    else if (was && !this.autoRotate) this.announce('Automatic rotation stopped. The auto-rotate chip under the view turns it back on.', true);
   }
 
   defaultSwatches() {
@@ -839,6 +1074,9 @@ export class TissueApp {
     // optional scale cue (C13): a definition that knows how big its cube is says so
     const um = Number(t.domainMicrons);
     if (Number.isFinite(um) && um > 0) rows.push(appH('li', { class: 'legend-row legend-scale' }, [appH('span', { class: 'swatch scale-swatch', 'aria-hidden': 'true' }), appH('span', { text: `Cube edge ≈ ${um >= 1000 ? `${(um / 1000).toFixed(um % 1000 ? 1 : 0)} mm` : `${Math.round(um)} µm`}` })]));
+    // the legend is capped against the stage and scrolls inside that cap (layoutLegend), so it
+    // needs a name and — while it actually scrolls — a tab stop of its own
+    box.setAttribute('aria-label', 'Colour key and how to read the view');
     box.append(appH('ul', { class: 'legend-swatches', 'aria-label': 'Colour key' }, rows));
     // "How to read the view": every string the definition put in copy.legend, in its own
     // order — fibers, cells, scaffold, gel, load and each key under `fields` — not a fixed
@@ -855,6 +1093,7 @@ export class TissueApp {
     if (guide.length) {
       box.append(appH('details', { class: 'legend-guide' }, [appH('summary', { text: 'How to read the view' }), appH('ul', {}, guide.map((g) => appH('li', { text: g })))]));
     }
+    this.layoutLegend();
   }
 
   /**
@@ -883,7 +1122,9 @@ export class TissueApp {
       })]),
     ]);
     box.replaceChildren(body, dismiss || '');
-    box.hidden = this.hasPlayed;
+    // "Got it" means got it: this is re-derived on every tissue switch, so without the flag the
+    // card came back the moment the student tried the second tissue
+    box.hidden = this.hasPlayed || this.hintDismissed;
   }
 
   /** Open the About details and put it in view (the hint's "What am I looking at?" button). */
@@ -909,6 +1150,17 @@ export class TissueApp {
     }
     ab.append(appH('h3', { text: 'Keyboard' }));
     ab.append(appH('ul', { class: 'keys-list' }, APP_KEYS.map(([k, what]) => appH('li', {}, [appH('kbd', { text: k }), document.createTextNode(` ${what}`)]))));
+    // WCAG 2.1.4 asks for a way to turn single-character shortcuts off (dictation puts every
+    // spoken letter through as a keystroke: with focus on the page, an "r" restarts the run).
+    // Space is a standard activation key and is never gated.
+    const shortcutChip = appH('button', {
+      type: 'button', class: 'chip', id: 'opt-shortcuts', 'aria-pressed': String(this.shortcuts),
+      text: 'Single-key shortcuts',
+      title: 'R, I, P and 1–9. Turn them off if you use dictation or a switch that sends letters. Space always plays and pauses.',
+      onclick: () => this.setShortcuts(!this.shortcuts, true),
+    });
+    ab.append(appH('p', { class: 'note' }, [shortcutChip]));
+    ab.append(appH('p', { class: 'note', text: 'The single letters and digits above work while nothing is being typed into. Turn them off with the button and only Space, Tab and the arrow keys on a focused control stay.' }));
     ab.append(appH('p', { class: 'note', text: 'Drag the 3D view to orbit, scroll to zoom. With the view focused, the arrow keys orbit, + and − zoom and Home reframes it. Hover a chart for exact values, or focus it and walk the crosshair with the arrow keys; the Table button under the readouts lists the same numbers as text.' }));
     ab.append(appH('div', { class: 'tools' }, [
       appH('button', { type: 'button', text: 'Export trajectory (JSON for Blender)', onclick: () => this.exportJSON() }),
@@ -919,10 +1171,23 @@ export class TissueApp {
   }
 
   // ---------- renderer ----------
+  /**
+   * WebGL never arrived, so the canvas is a picture and nothing else: it must stop promising the
+   * camera keys it can no longer honour (4.1.2). The live description stays — it is the tissue's
+   * state in words, which is exactly what is left when the picture is gone.
+   */
+  viewIsInert() {
+    const c = appEl('view');
+    if (c) { c.removeAttribute('aria-describedby'); c.removeAttribute('aria-keyshortcuts'); }
+    const hint = appEl('view-keys-hint');
+    if (hint) hint.hidden = true;
+  }
+
   async initRenderer() {
     const canvas = appEl('view');
     if (!appHasWebGL()) {
       this.rendererState = 'failed';
+      this.viewIsInert();
       this.showNotice('3D view unavailable', 'This browser could not create a WebGL context, so the tissue cannot be drawn. The simulation, dials, readouts and values table still work. Try another browser, or enable hardware acceleration in the browser settings.');
       canvas.setAttribute('aria-label', '3D view unavailable: WebGL is not available in this browser. The readouts and values table still describe the tissue.');
       return;
@@ -931,6 +1196,7 @@ export class TissueApp {
     try { Ctor = await appLoadRenderer(); }
     catch (e) {
       this.rendererState = 'failed';
+      this.viewIsInert();
       this.showNotice('Could not load the 3D library', `Three.js did not load from cdn.jsdelivr.net (${(e && e.message) || 'network error'}). The simulation, dials and readouts still run.`, appH('p', { html: APP_OFFLINE_HTML }));
       canvas.setAttribute('aria-label', '3D view unavailable: the Three.js library did not load. The readouts and values table still describe the tissue.');
       this.flash('The 3D view could not load; the readouts still run.');
@@ -945,12 +1211,14 @@ export class TissueApp {
     }
     catch (e) {
       this.rendererState = 'failed';
+      this.viewIsInert();
       this.showNotice('3D view unavailable', `The WebGL renderer could not start (${(e && e.message) || 'unknown error'}). The simulation, dials and readouts still run.`);
       return;
     }
     if (this.tissue && typeof this.renderer.setTissue === 'function') this.renderer.setTissue(this.tissue);
     this.rendererState = 'ready';
     this.buildLegend();
+    this.buildCamera();          // the camera chips exist only once there is a camera to drive
     // the camera is keyboard-operable (B2); give the pointer the same way back to the default view
     if (typeof this.renderer.resetView === 'function') {
       const b = appEl('btn-view');
@@ -1191,11 +1459,24 @@ export class TissueApp {
     // trend has held for a second and not more often than every APP_TREND_MS, because the first
     // days of a run cross the thresholds several times — and otherwise at most once every
     // APP_STATUS_MS while the clock runs. Pauses, steps and scenario loads announce on their own.
+    // …and never within APP_STATUS_FLOOR_MS of ANY previous announcement while the clock runs: the
+    // trend path was gated only by its own 5 s timer, so a flip could land 1.1 s after "Playing at
+    // 20 days per second" or 2.5 s after a routine reading, repeating a sentence whose first
+    // seventy characters were identical. A sentence identical to the last one said is skipped
+    // outright — a threshold crossed and re-crossed is not news.
     if (trend !== this.pendingTrend) { this.pendingTrend = trend; this.pendingTrendAt = now; }
+    const floor = this.playing ? APP_STATUS_FLOOR_MS : 0;
     const turned = trend !== this.lastTrend && this.lastTrend !== null
-      && now - this.pendingTrendAt >= APP_TREND_HOLD_MS && now - this.lastTrendSaidAt >= APP_TREND_MS;
-    if (turned) { this.lastTrendSaidAt = now; this.announce(`Day ${s.t.toFixed(1)}. ${this.sentence(s)}`, true); }
-    else if (this.playing && now - this.lastStatusAt >= APP_STATUS_MS) this.announce(`Day ${s.t.toFixed(1)}. ${this.sentence(s)}`);
+      && now - this.pendingTrendAt >= APP_TREND_HOLD_MS && now - this.lastTrendSaidAt >= APP_TREND_MS
+      && now - this.lastStatusAt >= floor;
+    const line = this.sentence(s);
+    if (turned) {
+      this.lastTrendSaidAt = now;
+      if (line !== this.lastSaidSentence) { this.lastSaidSentence = line; this.announce(`Day ${s.t.toFixed(1)}. ${line}`, true); }
+    } else if (this.playing && now - this.lastStatusAt >= APP_STATUS_MS) {
+      this.lastSaidSentence = line;
+      this.announce(`Day ${s.t.toFixed(1)}. ${line}`);
+    }
     if (turned || this.lastTrend === null || now - this.pendingTrendAt >= APP_TREND_HOLD_MS) this.lastTrend = trend;
     if (force || now - this.lastLabelAt > APP_LABEL_MS) {
       appEl('view').setAttribute('aria-label', this.describe(s));
@@ -1204,16 +1485,13 @@ export class TissueApp {
     if (this.tableOn && (force || now - this.lastTableAt > APP_TABLE_MS)) { this.renderTable(now); this.renderHistory(); }
   }
 
-  /** The flux gauge as text for the value beside its title: "0.05/d vs 0.02/d · 2.50 ×". */
-  gaugeValueText() {
-    const s = this.stats;
-    if (!s) return '';
-    const ratio = (s.deposition + 1e-9) / (s.degradation + 1e-9);
-    const r = ratio > 99 ? '>99' : ratio.toFixed(2);
-    let out = `${copyFormatRate(s.deposition)} vs ${copyFormatRate(s.degradation)} · ${r} ×`;
-    if (Number.isFinite(s.scaffoldFlux) && s.scaffoldFlux > 0) out += ` · ${copyFormatRate(s.scaffoldFlux)}`;
-    return out;
-  }
+  /**
+   * The flux gauge as text for the value beside its title: "0.05/d vs 0.02/d · 2.50 ×". The gauge
+   * itself owns the wording, so the tissue's own word for a dissolving scaffold
+   * (`copy.gauge.scaffold`) reaches the DOM value and not only the canvas — this text is what a
+   * screen reader gets instead of the picture.
+   */
+  gaugeValueText() { return this.gauge && typeof this.gauge.describe === 'function' ? this.gauge.describe() : ''; }
 
   // ---------- screen-reader status region (C3) ----------
   /**
@@ -1291,6 +1569,9 @@ export class TissueApp {
     for (const p of this.plots) { p.plot.spec.fontPx = fontPx; p.plot.draw(); }
     if (this.gauge && typeof this.gauge.setFontPx === 'function') this.gauge.setFontPx(fontPx);
     if (this.renderer && typeof this.renderer.resize === 'function') this.renderer.resize();
+    // the sentence and the clock grow, so the HUD is taller and the legend has less room; the
+    // console's type grows too, so the sticky header is taller
+    this.measureRun(); this.layoutLegend();
     if (fromUi) {
       this.scheduleUrl();
       this.announce(this.present ? 'Presentation mode on: bigger sentence and clock, hints hidden.' : 'Presentation mode off.', true);

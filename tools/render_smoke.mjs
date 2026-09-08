@@ -23,19 +23,23 @@
 //       leaves Space / R / I / digits to the app (no preventDefault, no camera move)
 //   B3  a key press stops auto-rotate and fires opts.onAutoRotate
 //   B4  the wound marker follows state.wound, decays to a persistent outline, and hides when
-//       the state has no wound or the `wound` layer is off
-//   B5  fields[].pointScale and the species `render` hints (minDensity / radiusScale / opacity)
+//       the state has no wound or the `wound` layer is off — and, in pixels, the outline really
+//       reaches the screen, fresh AND after it has faded (the acceptance criterion itself)
+//   B5  fields[].pointScale / fields[].style and the species `render` hints (minDensity /
+//       radiusScale / opacity), including the warning for a hint key its kind cannot honour
+//   §5  the field haze is instanced spheres by default (no gl_PointSize, whose ceiling is the
+//       driver's), `opt.fieldStyle=points` still draws the v0.1 sprite cloud, and the two agree
+//       on the blob diameter up to the documented `fieldSphereDiameter` factor
 //   E2  renderer.layoutParams() is the src/recipe.js `meta.render` shape
 //   E4  saturation factors default to 1.0 and TissueRenderer.toneMap() matches the GPU tone
 //       curve (ACES / AgX / none) to ≤ 1/255 per channel, which is what legendSwatches() uses
-import { createServer } from 'node:http';
-import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { writeFile, mkdir } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { join, dirname, extname, resolve, normalize } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import os from 'node:os';
+import { withHarness, routeCdnCache } from './lib/browser.mjs';
 
 const execFileP = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -57,79 +61,19 @@ const extraScenes = opt('extra', null);
 const CDN_ORIGIN = 'https://cdn.jsdelivr.net';
 const CDN_PROBE = CDN_ORIGIN + '/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
-  '.json': 'application/json', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.md': 'text/plain; charset=utf-8' };
-
 // ----------------------------------------------------------------------------
-// tiny static server for the repo root
-function startServer(root, port) {
-  return new Promise((resolveP, rejectP) => {
-    const srv = createServer(async (req, res) => {
-      try {
-        const urlPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-        const rel = normalize(urlPath).replace(/^(\.\.[/\\])+/, '');
-        let file = join(root, rel);
-        if (!file.startsWith(root)) { res.writeHead(403); return res.end(); }
-        let st = await stat(file).catch(() => null);
-        if (st && st.isDirectory()) { file = join(file, 'index.html'); st = await stat(file).catch(() => null); }
-        if (!st) { res.writeHead(404); return res.end('not found'); }
-        res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' });
-        res.end(await readFile(file));
-      } catch (e) { res.writeHead(500); res.end(String(e)); }
-    });
-    srv.on('error', rejectP);
-    srv.listen(port, '127.0.0.1', () => resolveP({ srv, url: `http://127.0.0.1:${srv.address().port}` }));
-  });
-}
+const summary = { ok: true, startedAt: new Date().toISOString(), outDir, cdn: {}, gl: null, scenes: [], perf: null, problems: [] };
+const problem = (m) => { summary.problems.push(m); console.log('PROBLEM:', m); };
 
-// ----------------------------------------------------------------------------
-// playwright: bare import, else the global install (npm root -g)
-async function loadPlaywright() {
-  try { return await import('playwright'); } catch (e) { /* fall through */ }
-  const { stdout } = await execFileP('npm', ['root', '-g']);
-  const root = stdout.trim();
-  const candidates = [join(root, 'playwright', 'index.mjs'), join(root, 'playwright-core', 'index.mjs')];
-  for (const c of candidates) if (existsSync(c)) return import(pathToFileURL(c).href);
-  throw new Error('playwright not found: run `npm i playwright@1` or `npm i -g playwright`');
-}
-
-// CDN fallback cache: fetch with curl (honours HTTPS_PROXY + CA bundle) once, then serve locally.
-async function cdnCached(url) {
-  const u = new URL(url);
-  const file = join(cacheDir, u.hostname, u.pathname.replace(/[^A-Za-z0-9._@/-]/g, '_'));
-  if (!existsSync(file)) {
-    await mkdir(dirname(file), { recursive: true });
-    await execFileP('curl', ['-sSL', '--fail', '--max-time', '90', '-o', file, url]);
-  }
-  return readFile(file);
-}
-
-// ----------------------------------------------------------------------------
-async function main() {
-  await mkdir(outDir, { recursive: true });
-  const summary = { ok: true, startedAt: new Date().toISOString(), outDir, cdn: {}, gl: null, scenes: [], perf: null, problems: [] };
-  const problem = (m) => { summary.problems.push(m); console.log('PROBLEM:', m); };
-
-  let server = null, baseUrl = extUrl;
-  if (!baseUrl) { server = await startServer(repoRoot, port); baseUrl = server.url; }
-  console.log('serving', repoRoot, 'at', baseUrl);
-
-  const { chromium } = await loadPlaywright();
-  // Proxy: by default rely on Chromium's own pickup of HTTPS_PROXY/no_proxy from the
-  // environment. Playwright's `proxy` option would add `<-loopback>` to the bypass list and
-  // force 127.0.0.1 through the proxy too (which answers plain HTTP with 405). `--proxy`
-  // opts in to the explicit option with that forcing disabled.
-  const proxyServer = opt('proxy', null);
-  const launchOpts = {
-    args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
-  };
-  if (proxyServer) {
-    process.env.PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK = '1';
-    launchOpts.proxy = { server: proxyServer, bypass: 'localhost,127.0.0.1' };
-  }
-  const browser = await chromium.launch(launchOpts);
-  console.log('chromium', browser.version(), proxyServer ? `via --proxy ${proxyServer}` : `env proxy: ${process.env.HTTPS_PROXY || 'none'}`);
-  const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1, ignoreHTTPSErrors: true });
+/**
+ * The whole run, inside a harness that owns the file server and the browser: `withHarness`
+ * closes both whether this throws or not, so a failed assertion half-way down can no longer
+ * leave a listening socket and a headless Chromium behind (docs/REVIEW.md D9).
+ */
+async function runSmoke({ browser, context, url }) {
+  const baseUrl = extUrl || url;
+  console.log('serving', extUrl ? '(external)' : repoRoot, 'at', baseUrl);
+  console.log('chromium', browser.version(), opt('proxy', null) ? `via --proxy ${opt('proxy', null)}` : `env proxy: ${process.env.HTTPS_PROXY || 'none'}`);
 
   // --- 1. does jsdelivr load directly in this Chromium? --------------------------------
   let useCache = has('force-cache');
@@ -150,15 +94,6 @@ async function main() {
       if (!has('no-cache')) useCache = true;
     }
   }
-  const installCache = async (ctx) => {
-    await ctx.route(CDN_ORIGIN + '/**', async (route) => {
-      const url = route.request().url();
-      try {
-        const body = await cdnCached(url);
-        await route.fulfill({ status: 200, body, headers: { 'content-type': MIME[extname(new URL(url).pathname)] || 'text/javascript', 'access-control-allow-origin': '*' } });
-      } catch (e) { problem(`cache fetch failed for ${url}: ${e.message.split('\n')[0]}`); await route.abort(); }
-    });
-  };
   if (useCache) {
     // Prove the CDN is reachable through the proxy at all (curl), then serve cached copies.
     try {
@@ -168,7 +103,10 @@ async function main() {
     } catch (e) { summary.cdn.curl = { ok: false, error: e.message.split('\n')[0] }; }
     console.log('CDN via curl through proxy:', JSON.stringify(summary.cdn.curl));
     summary.cdn.mode = 'route-intercept-cache';
-    await installCache(context);
+    // tools/lib/browser.mjs owns the cache: curl --fail into `<file>.part` and rename on success,
+    // so a 404 page can never be served back as JavaScript (docs/REVIEW.md D9). `--cache-dir`
+    // still decides where it lives, and a miss is a problem rather than a half-dressed page.
+    await routeCdnCache(context, { origins: [CDN_ORIGIN], cacheDir, onMiss: (url, e) => problem(`cache fetch failed for ${url}: ${e.message.split('\n')[0]}`) });
   } else summary.cdn.mode = 'direct';
 
   // --- 2. scenes --------------------------------------------------------------------
@@ -181,6 +119,9 @@ async function main() {
     { name: 'fibrous_05_t40_cells_only', params: 'tissue=fibrous&t=40&fibers=0' },
     { name: 'fibrous_06_t6_wound_marker', params: 'tissue=fibrous&t=6' },
     { name: 'fibrous_07_t45_wound_faded', params: 'tissue=fibrous&t=45' },
+    // the same field haze in both styles, side by side: instanced spheres (the default) and the
+    // v0.1 gl_PointSize sprite cloud, whose size a driver may clamp (docs/REVIEW.md §5)
+    { name: 'fibrous_08_t25_fields_points', params: 'tissue=fibrous&t=25&fields=g,m&opt.fieldStyle=points' },
     // cartilage in a dissolving hydrogel: three times
     { name: 'cartilage_01_t0_scaffold', params: 'tissue=cartilage&t=0' },
     { name: 'cartilage_02_t20_dissolving', params: 'tissue=cartilage&t=20' },
@@ -189,6 +130,7 @@ async function main() {
     { name: 'cartilage_05_t20_gel_points', params: 'tissue=cartilage&t=20&opt.gelStyle=points' },
     { name: 'cartilage_06_t20_scaffold_only', params: 'tissue=cartilage&t=20&gel=0&fibers=0&cells=0' },
     { name: 'cartilage_07_t45_radius_by_state', params: 'tissue=cartilage&t=45&gel=0&scaffold=0&fibers=0&radiusByState=1' },
+    { name: 'cartilage_08_t30_fields_points', params: 'tissue=cartilage&t=30&fields=tgf,o2,cat&gel=0&scaffold=0&opt.fieldStyle=points' },
   ];
   if (extraScenes) for (const kv of extraScenes.split(',')) { const i = kv.indexOf('='); if (i > 0) scenes.push({ name: kv.slice(0, i), params: kv.slice(i + 1).replace(/;/g, '&') }); }
   scenes = scenes.filter((s) => !sceneFilter || sceneFilter.split(',').includes(s.name));
@@ -275,8 +217,8 @@ async function main() {
       out.fibrousHasNoGel = r.gel === null && r.scaffold === null;
       out.fibrousLoadVisible = r.load.group.visible;
       r.update(mk(12, 160, 20, {}, 'fibrous'), { fibers: false, cells: true, fields: { g: true, m: true } }); r.render();
-      out.fibersHidden = !r.fibers.mesh.visible; out.gVisible = r.fields[0].points.visible; out.mVisible = r.fields[1].points.visible;
-      r.update(mk(12, 160, 20, {}, 'fibrous')); r.render(); out.gHiddenAgain = !r.fields[0].points.visible;
+      out.fibersHidden = !r.fibers.mesh.visible; out.gVisible = r.fields[0].obj.visible; out.mVisible = r.fields[1].obj.visible;
+      r.update(mk(12, 160, 20, {}, 'fibrous')); r.render(); out.gHiddenAgain = !r.fields[0].obj.visible;
       out.legendFibrous = r.legendSwatches().map((s) => s.key);
       // switch tissue
       S.setTissue('cartilage');
@@ -412,9 +354,19 @@ async function main() {
     fn.dirty = { paused: b1, afterTime: b2, afterLayer: b3, skippedFrames: b1.skipped - b0.skipped, updatesWhilePaused: b1.updates - b0.updates };
     if (!(fn.dirty.skippedFrames >= 15) || fn.dirty.updatesWhilePaused !== 0 || b1.fibers !== b0.fibers || b1.cells !== b0.cells)
       problem('paused frames still rebuilt instance buffers: ' + JSON.stringify(fn.dirty));
-    // Chromium quantises performance.now() to 100 µs, so one tick is the floor a skipped
-    // update() can report; the buffer versions above are the exact proof that it did nothing.
-    if (!(b1.updateMs <= 0.15)) problem(`update() while paused took ${b1.updateMs} ms (expected ≈ 0)`);
+    // The buffer versions above are the EXACT proof that the skip path uploaded nothing; the
+    // timing below is only a sanity check, and it is deliberately loose. Chromium quantises
+    // performance.now() to 100 µs, so a skip reads as 0.0 or 0.1 ms and the old `<= 0.15` bound
+    // failed on the very next tick — a scheduler wobble on a loaded CI runner turned a required
+    // job red (round-3 review B, finding 6). A skip must simply cost less than a rebuild, and
+    // the comparison is only made when the rebuild is big enough for the clock to resolve.
+    fn.dirty.cost = await page.evaluate(() => window.__smoke.updateCost());
+    if (!(b1.updateMs <= 1)) problem(`update() while paused took ${b1.updateMs} ms (expected ≈ 0, hard cap 1 ms)`);
+    {
+      const c = fn.dirty.cost;
+      if (c.skipped !== c.n || c.rebuilt !== c.n) problem('updateCost() did not exercise both paths: ' + JSON.stringify(c));
+      else if (!(c.skipMs < 0.5 * c.fullMs)) problem(`the skip path (${c.skipMs} ms) is not materially cheaper than a rebuild (${c.fullMs} ms)`);
+    }
     if (b2.updates !== b1.updates + 1 || b2.fibers <= b1.fibers) problem('a new revision did not rebuild: ' + JSON.stringify([b1, b2]));
     if (b3.updates !== b2.updates + 1) problem('a layer change did not rebuild: ' + JSON.stringify([b2, b3]));
     // without `revision` (the default for this page) every frame must still update
@@ -440,37 +392,89 @@ async function main() {
     if (Object.values(fn.saturationDefaults).some((v) => v !== 1))
       problem('saturation factors must default to 1.0 so the definition hex is the colour: ' + JSON.stringify(fn.saturationDefaults));
 
-    // --- B5 / E2: field pointScale, species render hints, meta.render recipe ------------------
+    // --- B5 / E2: field pointScale + style, species render hints, meta.render recipe ----------
     fn.hints = await page.evaluate(() => {
       const S = window.__smoke, r = S.renderer, out = {};
       const T = JSON.parse(JSON.stringify(S.tissues.cartilage));
       r.setTissue(T);
       r.update(S.makeFakeState(12, 160, 20, {}, 'cartilage'), { fields: { tgf: true } });
-      out.sizeDefault = r.fields[0].mat.uniforms.uSize.value;
+      out.fieldsDefault = S.fieldState();
       out.gelMinDefault = r.opts.gelMin;
       T.fields[0].pointScale = 2.5;
+      T.fields[1].style = 'points';           // one field asks for the sprite cloud by itself
       T.species.find((s) => s.kind === 'gel').render = { minDensity: 0.4, radiusScale: 0.5, opacity: 0.5 };
       T.species.find((s) => s.kind === 'scaffold').render = { minDensity: 0.5 };
+      // Hint keys the kind cannot honour must be reported, not silently dropped (review B, #4).
+      // This is where the two `TissueRenderer: species 'col2' … is ignored` warnings in
+      // summary.consoleErrors come from — they are the check passing, not a page problem.
+      T.species.find((s) => s.kind === 'fiber').render = { opacity: 0.5, style: 'points', wobble: 3 };
       r.setTissue(T);
-      r.update(S.makeFakeState(12, 160, 20, {}, 'cartilage'), { fields: { tgf: true } });
-      out.sizeScaled = r.fields[0].mat.uniforms.uSize.value;
+      r.update(S.makeFakeState(12, 160, 20, {}, 'cartilage'), { fields: { tgf: true, o2: true } });
+      out.fieldsHinted = S.fieldState();
       out.gelOpacity = r.gelMat.uniforms.uOpacity.value;
+      out.fiberOpacity = r.fiberMat.opacity;
+      out.fiberTransparent = r.fiberMat.transparent;
+      out.hintWarnings = r.hintWarnings.slice();
       out.gelVisibleHinted = r.stats.gelVisible;
       out.strutsVisibleHinted = r.stats.strutsVisible;
       out.recipe = r.layoutParams();
       S.setTissue('fibrous');
       r.update(S.makeFakeState(12, 160, 20, {}, 'fibrous'));
       out.fibrousRecipe = r.layoutParams();
+      out.fibrousFiberOpaque = r.fiberMat.transparent === false && r.fiberMat.opacity === 1;
+      out.fibrousNoWarnings = r.hintWarnings.length === 0;
       return out;
     });
     {
-      const h = fn.hints;
-      if (Math.abs(h.sizeScaled - h.sizeDefault * 2.5) > 1e-9) problem('fields[].pointScale ignored: ' + JSON.stringify(h));
+      const h = fn.hints, f0 = h.fieldsDefault[0], g0 = h.fieldsHinted[0], g1 = h.fieldsHinted[1];
+      if (Math.abs(g0.size - f0.size * 2.5) > 1e-9) problem('fields[].pointScale ignored: ' + JSON.stringify([f0, g0]));
+      if (g1.style !== 'points' || g0.style !== f0.style) problem('fields[].style ignored: ' + JSON.stringify(h.fieldsHinted));
       if (Math.abs(h.gelOpacity - 0.28 * 0.5) > 1e-9) problem('species render.opacity ignored: ' + JSON.stringify(h));
       if (!(h.gelVisibleHinted < 1728) || !(h.strutsVisibleHinted < 5616)) problem('species render.minDensity ignored: ' + JSON.stringify(h));
+      // a fiber species' `opacity` is honoured; its `style` and an unknown key are reported
+      if (h.fiberTransparent !== true || Math.abs(h.fiberOpacity - 0.5) > 1e-9) problem('fiber render.opacity ignored: ' + JSON.stringify(h));
+      const warned = (k) => h.hintWarnings.some((w) => w.includes(`render.${k}`));
+      if (!warned('style') || !warned('wobble') || warned('opacity'))
+        problem('hintWarnings must name exactly the ignored keys: ' + JSON.stringify(h.hintWarnings));
+      if (!h.fibrousFiberOpaque || !h.fibrousNoWarnings) problem('a tissue with no render hints must be left alone: ' + JSON.stringify(h));
       if (h.fibrousRecipe.recipe !== 'fiber-v1' || h.fibrousRecipe.K !== 3 || h.fibrousRecipe.seed !== 90210
           || Math.abs(h.fibrousRecipe.fiber.radiusScale - 0.6) > 1e-9)
         problem('layoutParams() is not the src/recipe.js shape: ' + JSON.stringify(h.fibrousRecipe));
+    }
+
+    // --- §5: the field haze is instanced spheres by default, and `opt.fieldStyle=points`
+    // still draws the v0.1 sprite cloud (the size of which the driver may clamp) ---------------
+    await open('tissue=fibrous&t=25&fields=g,m');
+    fn.fieldStyleDefault = await page.evaluate(() => window.__smoke.fieldState());
+    await open('tissue=fibrous&t=25&fields=g,m&opt.fieldStyle=points');
+    fn.fieldStylePoints = await page.evaluate(() => window.__smoke.fieldState());
+    {
+      const d = fn.fieldStyleDefault, p2 = fn.fieldStylePoints;
+      if (!d.length || d.some((L) => L.style !== 'spheres' || !L.visible || L.instances !== 1728))
+        problem('fields are not instanced spheres by default: ' + JSON.stringify(d));
+      if (!p2.length || p2.some((L) => L.style !== 'points' || !L.visible))
+        problem('opt.fieldStyle=points did not select the sprite cloud: ' + JSON.stringify(p2));
+      // The sphere is `fieldSphereDiameter` × the sprite: the sprite's square quad paints its
+      // corners too, so an equal-width disc lays down less haze — 1.1 is the measured match
+      // (single field, cartilage IL-1: mean luminance 40.3 and lit fraction 0.265 either way).
+      fn.fieldSphereDiameter = await page.evaluate(() => window.__smoke.renderer.opts.fieldSphereDiameter);
+      const k = fn.fieldSphereDiameter;
+      if (Math.abs(d[0].size - p2[0].size * k) > 1e-9) problem('the two field styles disagree on the blob size: ' + JSON.stringify([d[0], p2[0], k]));
+    }
+
+    // --- B4 (pixels): the wound outline must actually reach the screen, faded or not ----------
+    // The marker's transform and opacity are checked above; this is the acceptance criterion
+    // itself ("the outline shows"): render the frame with the `wound` layer off and on and count
+    // the pixels that changed. The faded case (age 41 d, opacity 0.15) is the hard one, and the
+    // depth-test-off ghost pass with its opacity floor is what carries it (review B, finding 7).
+    await open('tissue=fibrous&t=6');
+    fn.woundPixels = { fresh: await page.evaluate(() => window.__smoke.layerPixelImpact('wound')) };
+    await open('tissue=fibrous&t=45');
+    fn.woundPixels.faded = await page.evaluate(() => window.__smoke.layerPixelImpact('wound'));
+    {
+      const w = fn.woundPixels;
+      if (!(w.fresh.changed[20] >= 1200)) problem('the fresh wound outline barely reaches the screen: ' + JSON.stringify(w.fresh));
+      if (!(w.faded.changed[8] >= 600) || !(w.faded.maxDelta >= 20)) problem('the healed wound outline is below the visibility floor: ' + JSON.stringify(w.faded));
     }
     await open('tissue=fibrous&t=20');
 
@@ -521,9 +525,22 @@ async function main() {
   summary.consoleErrors = consoleErrors;
   if (consoleErrors.some((l) => l.startsWith('[pageerror]') || /Failed to load|TypeError|ReferenceError|THREE\.WebGLProgram: Shader Error/.test(l))) problem('page reported errors: ' + consoleErrors.slice(0, 3).join(' | '));
   summary.ok = summary.problems.filter((p) => !p.startsWith('jsdelivr not reachable')).length === 0;
+}
 
-  await browser.close();
-  if (server) server.srv.close();
+async function main() {
+  await mkdir(outDir, { recursive: true });
+  // Proxy: by default rely on Chromium's own pickup of HTTPS_PROXY/no_proxy from the environment.
+  // `--proxy` passes an explicit one as Chromium's own `--proxy-server` flag, which (unlike
+  // playwright's `proxy` option) leaves loopback direct, so the local file server this harness
+  // runs is still reachable — playwright's option adds `<-loopback>` to the bypass list and sends
+  // 127.0.0.1 through the proxy too, which answers plain HTTP with 405.
+  const proxyServer = opt('proxy', null);
+  // cache: false — the CDN route is installed inside, and only when the direct probe failed.
+  await withHarness({
+    root: extUrl ? null : repoRoot, port, cache: false, page: false,
+    width, height, deviceScaleFactor: 1, ignoreHTTPSErrors: true,
+    args: proxyServer ? [`--proxy-server=${proxyServer}`] : [],
+  }, runSmoke);
   await writeFile(join(outDir, 'summary.json'), JSON.stringify(summary, null, 2));
   console.log('\nSUMMARY', JSON.stringify({ ok: summary.ok, cdn: summary.cdn, perf: summary.perf, problems: summary.problems }, null, 1));
   process.exit(summary.ok ? 0 : 1);

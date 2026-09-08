@@ -19,18 +19,34 @@
 //
 // Numbers are printed to six significant figures and compared numerically (1e-6 relative), so a
 // value like 1/14 reads as 0.0714286 in the document and still matches the code exactly.
-import { readFileSync, writeFileSync } from 'node:fs';
+//
+// EVERY registered tissue needs a block. The document is `docs/tissues/<key>.md` unless PARAMS_DOCS
+// says otherwise, so adding a tissue never means editing this file: write the tissue's document
+// with the two markers in it and run `--write` (docs/EXTENDING.md §8).
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TISSUES } from '../src/tissues/index.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** tissue key → the document that carries its as-built block. */
+/** tissue key → the document that carries its as-built block, where it is not docs/tissues/<key>.md. */
 export const PARAMS_DOCS = {
   fibrous: 'docs/MODEL.md',
   cartilage: 'docs/tissues/cartilage-hydrogel.md',
 };
+
+/**
+ * Which document carries a tissue's block. The table above is the exception list; by default it is
+ * `docs/tissues/<key>.md`, so ADDING A TISSUE never means editing this tool — write the tissue's
+ * document with the two markers in it and the checker finds it (docs/EXTENDING.md §8).
+ */
+export function paramsDocFor(key) {
+  if (PARAMS_DOCS[key]) return PARAMS_DOCS[key];
+  const rel = `docs/tissues/${key}.md`;
+  const file = join(root, rel);
+  return existsSync(file) && readFileSync(file, 'utf8').includes(MARK(key).open) ? rel : null;
+}
 
 const COLS = 4, PAD = 2;
 
@@ -102,8 +118,14 @@ const MARK = (key) => ({ open: `<!-- params:${key} -->`, close: `<!-- /params:${
 /** Compare one document with its tissue; returns { file, problems[], updated }. */
 export function paramsCheckTissue(key, { write = false } = {}) {
   const tissue = TISSUES[key];
-  const rel = PARAMS_DOCS[key];
+  const rel = paramsDocFor(key) || `docs/tissues/${key}.md`;
   const file = join(root, rel);
+  if (!existsSync(file)) {
+    return { file: rel, updated: false, problems: [
+      `no as-built block for tissue '${key}': write ${rel} and put the two markers in it —`,
+      `  ${MARK(key).open}   ${MARK(key).close}   — then run: node tools/check_params_doc.mjs --write`,
+      '  (docs/EXTENDING.md §8; the block is generated, everything around it is yours)'] };
+  }
   const text = readFileSync(file, 'utf8');
   const { open, close } = MARK(key);
   const i = text.indexOf(open), j = text.indexOf(close);
@@ -151,15 +173,15 @@ export function paramsCheckTissue(key, { write = false } = {}) {
 /** Check (or rewrite) every tissue that has a document. Returns a flat list of problems. */
 export function paramsCheckAll({ write = false, only = null } = {}) {
   const problems = [], written = [];
-  for (const key of Object.keys(PARAMS_DOCS)) {
+  if (only && !TISSUES[only]) return { problems: [`unknown tissue '${only}'; registered: ${Object.keys(TISSUES).join(', ')}`], written };
+  for (const key of Object.keys(TISSUES)) {                    // every REGISTERED tissue needs a block
     if (only && key !== only) continue;
-    if (!TISSUES[key]) { problems.push(`tools/check_params_doc.mjs: PARAMS_DOCS names tissue '${key}', which is not registered`); continue; }
     const r = paramsCheckTissue(key, { write });
     problems.push(...r.problems);
     if (r.updated) written.push(r.file);
   }
-  for (const key of Object.keys(TISSUES)) {
-    if (!PARAMS_DOCS[key] && !only) problems.push(`no as-built block for tissue '${key}': add one and list it in PARAMS_DOCS (tools/check_params_doc.mjs)`);
+  for (const key of Object.keys(PARAMS_DOCS)) {
+    if (!TISSUES[key] && !only) problems.push(`tools/check_params_doc.mjs: PARAMS_DOCS names tissue '${key}', which is not registered`);
   }
   return { problems, written };
 }
@@ -172,7 +194,7 @@ if (process.argv[1] && process.argv[1].endsWith('check_params_doc.mjs')) {
   const only = ti >= 0 ? argv[ti + 1] : null;
   if (argv.includes('--help')) {
     console.log('usage: node tools/check_params_doc.mjs [--write] [--tissue KEY]\n' +
-      `  documents: ${Object.entries(PARAMS_DOCS).map(([k, v]) => `${k} → ${v}`).join(', ')}`);
+      `  documents: ${Object.keys(TISSUES).map((k) => `${k} → ${paramsDocFor(k) || `docs/tissues/${k}.md (missing)`}`).join(', ')}`);
     process.exit(0);
   }
   const { problems, written } = paramsCheckAll({ write, only });
@@ -184,5 +206,5 @@ if (process.argv[1] && process.argv[1].endsWith('check_params_doc.mjs')) {
       (write ? '' : '\n\nFix: change the parameter in the tissue definition (it is the source of truth), then run\n  node tools/check_params_doc.mjs --write'));
     process.exit(1);
   }
-  if (!write) console.log(`check_params_doc: the as-built blocks match the code (${Object.keys(PARAMS_DOCS).join(', ')})`);
+  if (!write) console.log(`check_params_doc: the as-built blocks match the code (${(only ? [only] : Object.keys(TISSUES)).join(', ')})`);
 }

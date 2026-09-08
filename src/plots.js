@@ -9,7 +9,8 @@
 // to one redraw per animation frame.
 //
 // Not by colour alone (docs/REVIEW.md B5): a series may carry `marker`
-// ('circle' | 'square' | 'diamond', drawn at the endpoint and mirrored in the app's key row)
+// ('circle' | 'square' | 'diamond' | 'triangle' | 'cross', drawn at the endpoint and mirrored in
+// the app's key row)
 // and a stacked band may carry `pattern: 'hatch'`, so two series that are luminance twins are
 // still told apart in greyscale. Live series are never dashed — dashes mean "previous run".
 //
@@ -60,11 +61,18 @@ function plotSetupCanvas(canvas, size) {
   return { ctx, w, h };
 }
 
-/** One marker glyph, centred on (x, y): the shape a series is identified by without colour. */
+/**
+ * One marker glyph, centred on (x, y): the shape a series is identified by without colour.
+ * Five shapes, so a readout with five series never repeats one (a repeat would leave two curves
+ * differing by hue alone — the cartilage phenotype/memory pair are luminance twins).
+ * The app mirrors every shape in its key row (index.html `.readout .keys i`).
+ */
 function plotMarker(ctx, shape, x, y, r) {
   ctx.beginPath();
   if (shape === 'square') ctx.rect(x - r, y - r, 2 * r, 2 * r);
   else if (shape === 'diamond') { const d = r * 1.35; ctx.moveTo(x, y - d); ctx.lineTo(x + d, y); ctx.lineTo(x, y + d); ctx.lineTo(x - d, y); ctx.closePath(); }
+  else if (shape === 'triangle') { const d = r * 1.45; ctx.moveTo(x, y - d); ctx.lineTo(x + d * 0.92, y + d * 0.72); ctx.lineTo(x - d * 0.92, y + d * 0.72); ctx.closePath(); }
+  else if (shape === 'cross') { const d = r * 1.35, w = r * 0.46; ctx.rect(x - d, y - w, 2 * d, 2 * w); ctx.rect(x - w, y - d, 2 * w, 2 * d); }
   else ctx.arc(x, y, r, 0, Math.PI * 2);
 }
 
@@ -72,7 +80,7 @@ function plotMarker(ctx, shape, x, y, r) {
  * Rolling time-series strip.
  * spec = {
  *   series: [{ key, label, color, stack: bool,
- *              marker: 'circle'|'square'|'diamond',   // endpoint glyph (default circle)
+ *              marker: 'circle'|'square'|'diamond'|'triangle'|'cross',  // endpoint glyph (default circle)
  *              pattern: 'hatch' }],                   // stacked band overlaid with diagonals
  *   yDomain: [0, 1] | 'auto',
  *   yFormat: fn(v) -> string,
@@ -174,7 +182,6 @@ export class TimeSeriesPlot {
     if (this.marks.length > 64) this.marks.shift();
     return m;
   }
-  clearMarks() { this.marks.length = 0; }
 
   /** Latest value of a series (NaN if none). */
   last(key) { const a = this.data[key]; return a && a.length ? a[a.length - 1] : NaN; }
@@ -230,7 +237,6 @@ export class TimeSeriesPlot {
     }
     return changed;
   }
-  hasHover() { return this.hoverI != null; }
 
   /** The tooltip, as text: day, every series, the marks near it, and the ghost when it lines up. */
   hoverLines(i) {
@@ -467,8 +473,8 @@ export class TimeSeriesPlot {
  *
  * `labels` are the tissue's own words (docs/EXTENDING.md §1 `copy.gauge`): { left, right,
  * ratio (or caption), scaffold }, defaulting to the weather ones. `labels.fontPx` scales the
- * text for presentation mode. describe() is the same reading as text, for the DOM value beside
- * the title and for a screen-reader announcement (C4).
+ * text for presentation mode. describe() is the same reading as text; the app writes it into the
+ * DOM beside the readout title, which is what a screen reader gets instead of the picture (C4).
  */
 export class FluxGauge {
   constructor(canvas, theme, labels = {}) {
@@ -476,6 +482,9 @@ export class FluxGauge {
     const L = Object.assign({ left: 'evaporating', right: 'condensing', ratio: 'deposition / degradation', scaffold: 'scaffold dissolving' }, labels || {});
     if (L.caption && !(labels && labels.ratio)) L.ratio = L.caption;   // `caption` is the EXTENDING §1 name for it
     this.labels = L;
+    // a tissue that RENAMED the ratio gets its own words in the one-line reading too; the default
+    // name is three words long, so the default reading keeps the compact "2.50 ×"
+    this.ratioNamed = !!(labels && (labels.ratio || labels.caption));
     this.fontPx = Number.isFinite(L.fontPx) ? L.fontPx : PLOT_FONT_PX;
     this.size = { w: canvas.clientWidth || 0, h: canvas.clientHeight || 0 };
     this._tall = false;
@@ -488,12 +497,17 @@ export class FluxGauge {
   dispose() { this._unwatch(); }
   /** Text scale (presentation mode). */
   setFontPx(px) { if (Number.isFinite(px) && px !== this.fontPx) { this.fontPx = px; this.draw(); } }
-  /** The gauge as one line of text: "deposition 0.05/d vs degradation 0.02/d — ratio 2.50". */
+  /**
+   * The gauge as one compact line for the value beside the readout title (the app's only reader
+   * of it): "0.05/d vs 0.02/d · 2.50 ×", plus "· hydrogel dissolving 0.01/d" when a scaffold is
+   * dissolving — in the tissue's own words for both (`copy.gauge.scaffold`, `copy.gauge.ratio`),
+   * so the DOM value says what the canvas says.
+   */
   describe() {
     const ratio = (this.dep + 1e-9) / (this.deg + 1e-9);
     const r = ratio > 99 ? '>99' : ratio.toFixed(2);
-    let s = `deposition ${copyFormatRate(Math.max(0, this.dep))} vs degradation ${copyFormatRate(Math.max(0, this.deg))} — ${this.labels.ratio} = ${r}`;
-    if (this.scaf > 0) s += `; ${this.labels.scaffold} ${copyFormatRate(this.scaf)}`;
+    let s = `${copyFormatRate(Math.max(0, this.dep))} vs ${copyFormatRate(Math.max(0, this.deg))} · ${this.ratioNamed ? `${this.labels.ratio} ${r}` : `${r} ×`}`;
+    if (this.scaf > 0) s += ` · ${this.labels.scaffold} ${copyFormatRate(this.scaf)}`;
     return s;
   }
   update(dep, deg, scaffold) {

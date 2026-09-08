@@ -8,8 +8,10 @@ thickness follows density and whose colour is the density-weighted mix of the
 species colours; gel species as a translucent haze; scaffold species as a strut
 lattice that dissolves as it degrades; spindle- or sphere-shaped cells coloured
 by state, one look per cell type; a wire cube for the domain; load arrows on the
-z faces; a dark background. With `--all-frames` every trajectory frame becomes
-its own set of objects with visibility keyframes, so scrubbing the timeline
+z faces; a dark background. (The *language* is §1.9's; the numbers behind it have
+lived in `src/recipe.js` and `src/render.js` since v0.3, and where §1.9 still
+quotes v0.1 laws, those two are what both renderers follow.) With `--all-frames`
+every trajectory frame becomes its own set of objects with visibility keyframes, so scrubbing the timeline
 replays the simulation (and `--turntable` orbits the camera while it does).
 
 `blender/make_sample_trajectory.py` writes synthetic trajectories in the same
@@ -18,10 +20,16 @@ can be exercised without a browser or node.
 
 The importer is not a look-alike of the web renderer: where a number decides what is drawn,
 it uses the same number. The fiber layout and its per-frame laws come from `src/recipe.js`
-(one recipe, two implementations), and the cell colour ramp, the cell aspect law, the
-load-arrow normalisation and the camera direction from `src/render.js`.
+(one recipe, two implementations); the cell colour ramp, the cell aspect law, the load-arrow
+normalisation, the camera direction, the gel spheres' size/jitter/opacity laws, the scaffold's
+radius/opacity/break-up laws and the field haze's size, opacity and per-field jitter cloud from
+`src/render.js`. What is deliberately NOT shared is the pixel side of the picture -- the view
+transform, the volume-fog gel and the fact that a field blob here is a sphere and there a screen
+sprite; **section 5 lists every one of those**, and nothing else differs on purpose.
 `python3 blender/test_recipe_parity.py` runs `blender/recipe_dump.mjs` under node and compares
-the two, so a retune on the web side fails here instead of drifting quietly (section 7).
+the two, so a retune on the web side fails here instead of drifting quietly (section 6). It runs
+inside `npm test` as well (`tests/recipe.test.mjs` spawns it and skips when python3 is missing),
+so the drift it catches fails a build rather than waiting for someone to run it by hand.
 
 ## 1. Trajectory formats
 
@@ -33,11 +41,11 @@ the two, so a retune on the web side fails here instead of drifting quietly (sec
             "loadRange": [0, 0.2],                       // v0.4: [min, max] of that dial
             "tissueName": "...", "scenarioTitle": "...", // v0.4: display labels
             "species":   [{ "key", "label", "kind": "fiber" | "gel" | "scaffold", "color": "#rrggbb" }, ...],
-            "fields":    [{ "key", "label", "color": "#rrggbb" }, ...],   // v0.4: diffusible fields
+            "fields":    [{ "key", "label", "color": "#rrggbb", "pointScale"? }, ...],  // v0.4: diffusible fields
             "cellTypes": [{ "key", "label", "colors": ["#..", "#.."], "shape": { "by": "a" | "b", "aspectMin", "aspectMax" },
                             "radius", "radiusBy": { "by", "min", "max" } }, ...],   // radiusBy: v0.4, optional
             "render": { "recipe": "fiber-v1", "seed", "K", "fiber": {...} },        // v0.4, optional: src/recipe.js
-            "ramp":   { "mode", "lift", "mid", "saturation" },                      // optional: the cell ramp
+            "ramp":   { "mode", "lift", "mid", "saturation" },                      // optional, READ ONLY here
             "exportEveryDays": 5 },
   "frames": [ { "t": 0,
       "species": { "<key>": [N^3], ... },              // one density array per species
@@ -46,6 +54,14 @@ the two, so a retune on the web side fails here instead of drifting quietly (sec
       "rho": [N^3], "phiMat": [N^3],                   // duplicates for format-1 readers (ignored here)
       "cells": { "x": [3n], "p": [3n], "a": [n], "b": [n], "c": [n], "type": [n], "alpha": [n] } } ] }
 ```
+
+Three of those keys need a word on who writes them. `meta.render` is written by the app's
+export (it is the recipe the browser's renderer really used); a headless export has no renderer
+and omits it. `meta.ramp` and `fields[i].pointScale` are **read** here and written by nothing in
+this repo yet -- they are the hooks for a tissue that retunes the cell ramp or a field's blob
+size, and until a writer exists they only ever take their defaults. The normative description of
+the format is docs/EXTENDING.md section 5, which carries `render` and `ramp`; `pointScale` is so
+far only described here, because `engine.exportMeta()` does not emit it (section 5 below).
 
 The importer reads `meta.species` / `meta.fields` / `meta.cellTypes` and, per frame,
 `species[key]`, `fields[key]`, `fa`, `f`, `cells.a/b/c/type` (`c` is carried as a mesh attribute
@@ -93,7 +109,7 @@ tolerated, as are missing `fa` / `f` / `phiMat` / `cells`.
 
 ### Getting a file
 
-* **Web app**: open About (the "?" section at the bottom of the panel) and press
+* **Web app**: open the last panel section, **About -> "What am I looking at?"**, and press
   **Export trajectory (JSON for Blender)**. It writes format 2 with one frame every 2
   simulated days since the last reset.
 * **Headless**: `node tools/run_headless.mjs` writes the same format, one frame every
@@ -119,7 +135,7 @@ tolerated, as are missing `fa` / `f` / `phiMat` / `cells`.
 | file | what it is | regenerate with |
 |---|---|---|
 | `blender/sample_trajectory.json` | **a real engine export**: format 2, fibrous, the "Scaffold to tissue" scenario, 19 frames over 90 days at N=12, including the `g` and `m` field grids and `meta.loadRange` / `tissueName` / `scenarioTitle`. 2.2 MB. This is the importer's default input. | `node tools/run_headless.mjs --tissue fibrous --only maturation --blender blender/sample_trajectory.json` |
-| `blender/sample_trajectory_cartilage.json` | **synthetic**: `make_sample_trajectory.py`'s cartilage tissue, 12 frames, all three species kinds and a non-`strain` load dial. No fields (the generator cannot make them). 1.4 MB. | `python3 blender/make_sample_trajectory.py --tissue cartilage --out blender/sample_trajectory_cartilage.json --force` |
+| `blender/sample_trajectory_cartilage.json` | **synthetic**: `make_sample_trajectory.py`'s cartilage tissue, 12 frames, all three species kinds, a non-`strain` load dial and its `meta.loadRange` (`compression`, 0-0.5, so the committed file's arrows read `0.3 -> 0.60`). No fields (the generator cannot make them). 1.4 MB. | `python3 blender/make_sample_trajectory.py --tissue cartilage --out blender/sample_trajectory_cartilage.json --force` |
 
 `make_sample_trajectory.py`'s own defaults are `sample_synthetic_*.json`, so running it with no
 arguments can never overwrite either fixture; `--force` is still required to overwrite anything.
@@ -208,7 +224,9 @@ automatically and says so; `--eevee` insists.
    the Geometry Nodes trees (`TW_FiberTubes`, `TW_ScaffoldStruts`, `TW_GelSpheres`,
    `TW_CellSpheres`) and materials (`TW_fiber`, `TW_scaffold`, `TW_gel`, `TW_cell`,
    ...) are ordinary editable data, and every per-vertex attribute the shaders
-   read (`col`, `rho`, `dens`, `fa`, `frac_<species>`, `a`, `b`) is on the meshes.
+   read (`col`, `rho`, `rad`, `dens`, `alpha`, `fa`, `frac_<species>`, `a`, `b`) is on the
+   meshes. Radius and opacity are finished in Python (`rad` on fibers and struts, `alpha` on
+   gel spheres), so the node trees only read them and the laws live in one place.
 
 You can also start the GUI with arguments: `blender --python blender/import_tissue.py -- --input my.json --all-frames --turntable`.
 
@@ -218,24 +236,25 @@ You can also start the GUI with arguments: `blender --python blender/import_tiss
 |---|---|---|
 | `--layers L,L,...` | `fibers,cells,gel,scaffold` | which layers to build (e.g. `--layers fibers,cells` hides the haze and the lattice). Fields are **not** a layer here -- see `--fields` |
 | `--fields K,K,...` | *(none)* | diffusible fields to draw as a haze, or `all`. Off by default, matching the web view, where the field layers start off. An unknown key is an error, not a silent no-op |
-| `--field-scale F` | 1.8 | field haze: sphere diameter `F*h*(0.35+0.65*value)` (the web `pointSize`) |
+| `--field-scale F` | 1.8 | field haze: sphere diameter `F*h*pointScale*(0.35+0.65*value)` (the web `pointSize`; `pointScale` is the field definition's own multiplier, 1 unless a file carries one) |
 | `--field-opacity F` | 0.45 | field haze: peak opacity of one sphere (the web `pointOpacity`) |
 | `--field-min F` | 0.02 | hide field spheres below this value |
 | `--field-norm M` | `clamp` | `clamp` values to [0,1] like the web view, or `max` = divide each field by its own maximum over the whole trajectory (use it for a faint field such as oxygen at a 24 % medium tension) |
-| `--fiber-radius F` | `meta.render.fiber.radiusScale`, else 0.6 | the recipe's `radiusScale`: rod radius is `F*0.12*h*sqrt(rho)` with a `0.025*h` floor, times the per-rod jitter; ~0.4 gives a finer weave at high density |
-| `--strut-radius F` | 1.0 | multiplies the scaffold strut radius `0.08*h*density` |
+| `--fiber-radius F` | 1.0 | **multiplies** the recipe's `radiusScale` (`meta.render.fiber.radiusScale`, else 0.6), so 1 draws what the file says and 0.7 gives a finer weave. Rod radius is `radiusScale*0.12*h*sqrt(rho)` with a `0.025*h` floor, times the per-rod jitter. *(v0.4 briefly made this flag the absolute `radiusScale`, i.e. default 0.6; it is a multiplier again, as in v0.3, so an old command line keeps its old intent -- see section 7)* |
+| `--strut-radius F` | 1.0 | multiplies the scaffold strut radius `max(0.018*h, 0.075*h*sqrt(density))` (the web's law, floor included) |
 | `--view-transform V` | `Standard` | Blender colour management. `Standard` makes the definition hex the literal output colour; `AgX` / `Filmic` / `Khronos PBR Neutral` roll the highlights off instead (see section 3) |
 | `--gel-mode M` | `auto` | `volume` (a Cycles fog from a Volume Cube density field; `auto` picks it when the node exists) or `spheres` (instanced translucent spheres, cheaper, works in Eevee) |
 | `--gel-density F` | 1.5 | volume mode: scatter/absorption density per unit gel density (1.5 at gel 0.8 makes the far side of the cube ~30 % visible) |
 | `--gel-emission F` | 0.6 | self-illumination of the haze, scaled by local density (0 = lit only by the lamps) |
 | `--gel-step-rate F` | 2.0 | volume mode: Cycles volume step rate; larger renders faster and blurrier |
-| `--gel-scale F` | 1.0 | spheres mode: multiplies the sphere radius `0.62*h*density^(1/3)` (larger = more overlap) |
-| `--gel-opacity F` | 0.22 | spheres mode: peak opacity of one sphere seen face-on at density 1 |
+| `--gel-scale F` | 1.0 | spheres mode: multiplies the sphere radius `0.62*h*cbrt(min(density,1.5))*sizeJitter` (larger = more overlap) |
+| `--gel-opacity F` | 0.28 | spheres mode: peak opacity of one sphere seen face-on at density 1 (the web `gelOpacity`) |
+| `--scaffold-opacity F` | 0.9 | peak opacity of a strut at density 1; alpha is `F*density^0.6` (the web `scaffoldOpacity`) |
 | `--emission F` | 0.12 | emission strength on fibers (cells 0.8x, struts 0.5x) for the glow-on-dark look; 0 = purely lit |
 | `--rho-min F` | recipe `minDensity` (0.03) | fibers fade out below this total fiber density and disappear at `minDensityRamp` (0.35) times it |
 | `--gel-min F` | 0.02 | gel spheres below this density are omitted (the web `gelMin`) |
 | `--scaffold-min F` | 0.025 | scaffold struts below this density are omitted (the web `scaffoldMin`) |
-| `--dens-min F` | *(unset)* | sets `--gel-min` and `--scaffold-min` at once (the old name for both) |
+| `--dens-min F` | *(unset)* | sets `--gel-min` and `--scaffold-min` at once (the pre-v0.4 name for both; unset means the two defaults above apply) |
 | `--seed N` | `meta.render.seed`, else 90210 | seed of the fiber layout stream. **The layout recipe lives in `src/recipe.js`** and is mirrored in `RECIPE_FIBER` here: mulberry32(seed), voxels in index order, `K` rods each, and seven draws per rod -- three for the centre offset `(u-0.5)*0.9*h` per axis, two for the random unit vector (`z = 2u-1`, `phi = 2*pi*u`), one for the length factor `0.78+0.5u` and one for the radius factor `0.85+0.3u`. Change the order on either side and the two renders stop matching; `blender/test_recipe_parity.py` is what catches it |
 | `--res WxH` | 1280x720 | render size |
 | `--samples N` | 32 Eevee / 64 Cycles | render samples |
@@ -320,23 +339,34 @@ geometry, and the materials read the attributes (`ShaderNodeAttribute`).
   tints the fibers and cells inside it. It costs render time: roughly 4-5x the
   sphere mode in Cycles at the default step rate.
   Alternative (`--gel-mode spheres`, also the fallback when the Volume Cube node
-  is missing): one point per voxel above `--dens-min` with `r =
-  0.62*h*density^(1/3)`, `dens`, `col` (density-weighted mix when several gel
-  species exist); Geometry Nodes `TW_GelSpheres`: Instance on Points (icosphere,
-  2 subdivisions, Scale <- `r`) -> Realize Instances -> Set Shade Smooth -> Set
-  Material; material `TW_gel`: Mix Shader between Transparent and (Emission +
-  Diffuse) of the species colour with factor `opacity * (0.3+0.7*dens) *
-  (1-facing)^1.5`, back faces fully transparent so a ray pays once per sphere.
-  Cheap and Eevee-friendly, but the outermost spheres protrude past the cube
-  faces, so the boundary looks scalloped.
+  is missing): **the web renderer's own sphere cloud** (`src/render.js` `_buildGel` /
+  `_updateGel`), point by point. One point per voxel above `--gel-min`, at the voxel centre
+  plus that voxel's offset from a jitter stream of its own (mulberry32 seeded
+  `--seed ^ 0x5bd1e995`, four draws per voxel: three offsets of `(u-0.5)*0.5*h` and a size
+  factor `0.85+0.3u`), clamped so the sphere stays inside the cube; radius
+  `r = 0.62*h*cbrt(min(density,1.5))` times that size factor, and per-point `alpha =
+  min(density,1)`, thinned to 45 % of that in a voxel that holds a cell (the web's
+  `gelCellFade`, so cells keep their contrast in a dense haze). Attributes `r`, `dens`,
+  `alpha`, `col` (density-weighted mix when several gel species exist); Geometry Nodes
+  `TW_GelSpheres`: Instance on Points (icosphere, 2 subdivisions, Scale <- `r`) -> Realize
+  Instances -> Set Shade Smooth -> Set Material; material `TW_gel`: Mix Shader between
+  Transparent and (Emission + Diffuse) of the species colour with factor
+  `--gel-opacity * alpha * (1-facing)^1.5`, back faces fully transparent so a ray pays once
+  per sphere. Cheap and Eevee-friendly; the jitter also removes the grid the un-jittered
+  version showed, at the price of a few spheres protruding past the cube faces where the
+  clamp lets them (the same trade the browser makes).
 * **Scaffold (kind `scaffold`)** -- a fixed lattice: from every voxel centre one
   strut along +x, +y and +z to the neighbouring centre (to the cube face for the
   last voxel, plus a half strut to the face for the first), 5616 struts for
-  N = 12, with per-vertex `dens` (the density of the voxel at that end, so struts
-  taper between voxels) and `col`. Geometry Nodes `TW_ScaffoldStruts` is the same
-  tube tree with radius `0.09*h*dens^1`; material `TW_scaffold` is a glossy
-  Principled with alpha `clamp(0.15 + 1.6*dens)`, so struts both thin and fade as
-  the scaffold hydrolyses, and disappear below `--dens-min`.
+  N = 12. All four laws are `src/render.js` `_updateScaffold`: a strut carries **one**
+  density -- the mean of the two voxels it joins (its own voxel's, for a strut that ends on a
+  face) -- and from it a radius `max(0.018*h, 0.075*h*sqrt(min(dens,1)))` (attribute `rad`,
+  `--strut-radius` multiplies both terms), an alpha `--scaffold-opacity * min(dens,1)^0.6`
+  (material `TW_scaffold`, a glossy Principled) and, below density 0.4, a **shortening about
+  its midpoint** to `0.3 + 0.7*dens/0.4` of its length, so the lattice fragments at the nodes
+  as it hydrolyses instead of only thinning away. A strut whose density is below
+  `--scaffold-min` is not drawn at all. Attributes `rad`, `dens`, `col`; Geometry Nodes
+  `TW_ScaffoldStruts` is the same tube tree as the fibers, reading the finished `rad`.
 * **Cells** -- per frame one point-cloud mesh (a vertex per cell) with attributes
   `a`, `b`, `c`, `col`, `scale` and `rot`. The colour is the type's **OKLab ramp** sampled at
   `a`: a 33-entry LUT from `colors[0]` to `colors[1]`, piecewise through the mid colour
@@ -368,8 +398,32 @@ geometry, and the materials read the attributes (`ShaderNodeAttribute`).
 
 ## 5. Known limitations
 
+The list below is also the complete answer to "what does this draw differently from the browser,
+on purpose?". Everything not on it is meant to match, and `blender/test_recipe_parity.py` fails
+when it stops matching.
+
 * The view transform differs from the web renderer's (ACES there, `Standard` here); material
   colours match, rendered pixels do not. See the end of section 3.
+* **Per-renderer by construction, four of them.** (1) The default gel is a *volume fog*, which
+  the browser has no equivalent of at all -- `--gel-mode spheres` is the mode that follows the
+  web laws (section 4). (2) A field blob is an instanced sphere on both sides (the web's
+  `fieldStyle` default), with the same colour, the same world size law
+  `pointSize*h*(0.35+0.65*value)` and the same opacity law `0.2+0.8*value` -- but the web widens
+  its spheres by `fieldSphereDiameter` (1.1x) so they lay down the haze of the v0.1 *sprite*
+  they replaced, and this importer draws the sprite diameter itself. A tissue that asks for
+  `fieldStyle: 'points'` gets gl_PointSize sprites in the browser, which have no Blender
+  equivalent at all. (3) The edge fade that softens the gel
+  and field blobs is `(1-facing)^1.5` in Blender's Layer Weight against `|n.v|^1.6` (gel) and
+  `|n.v|^3.5` (fields) in the web shader: the same idea, tuned by eye per renderer, not the same
+  curve. (4) The gel spheres' *lighting* is Blender's (Emission + Diffuse + the scene lamps),
+  the web's is a flat ambient/diffuse blend -- the alpha laws now agree, the shading model does
+  not.
+* Two renderer inputs the export format does not carry, so this importer cannot honour them:
+  a species' optional `render` hints (`minDensity`, `radiusScale`, `opacity`, `style` --
+  docs/EXTENDING.md section 1) and a field's `pointScale`. `engine.exportMeta()` emits
+  key/label/kind/colour only, so a tissue that sets any of them looks right in the browser and
+  is drawn at the defaults here. The importer already reads `fields[i].pointScale` if it ever
+  appears in a file; the species hints have no home in the format yet.
 * The volume gel is a nearest-voxel density field (lightly blurred), so at
   `3N` grid cells per axis the voxel structure is still faintly visible inside the
   fog; several gel species become overlapping fogs rather than one mixed-colour
@@ -387,11 +441,9 @@ geometry, and the materials read the attributes (`ShaderNodeAttribute`).
   export cadence is fixed at one frame every 2 simulated days (there is no dial for it); for a
   smoother clip export headless with a smaller `--snap`, e.g.
   `node tools/run_headless.mjs --tissue fibrous --only maturation --snap 1 --blender my.json`.
-* The field haze is instanced spheres, not the web's screen-space sprites (a sphere is brightest
-  at its silhouette, the web sprite at its centre), so the two are the same colour and the same
-  size but not pixel-identical. Like the web view it goes nearly opaque where the field
-  approaches 1 -- a ray crosses ~30 overlapping spheres -- so turn `--field-opacity` down, or
-  drop a layer with `--layers`, to see the matrix through it. And `--field-norm clamp`
+* The field haze (see the sphere-vs-sprite bullet above) goes nearly opaque where the field
+  approaches 1, exactly as the web view does -- a ray crosses ~30 overlapping spheres -- so turn
+  `--field-opacity` down, or drop a layer with `--layers`, to see the matrix through it. And `--field-norm clamp`
   (the default, matching the web) leaves a field that never approaches 1 -- oxygen at a 24 %
   medium tension, say -- very faint. `--field-norm max` is the readable alternative and is
   *not* what the browser shows.
@@ -425,14 +477,25 @@ directory's python:
 | every entry of every cell colour ramp, and the sampled `a` = 0, 0.25, 0.5, 0.75, 1 colours | 1e-6 / **1/255 per channel** after sRGB encoding |
 | the volume-preserving cell aspect law | 1e-9 |
 | the load-arrow normalisation over `meta.loadRange` (including the no-`loadRange` fallback) | 1e-9 |
+| the gel / scaffold / field constants (read out of the renderer's own `opts`), the CLI defaults that mirror them, the gel jitter stream, and the radius / alpha / shortening `scaffold_struts()` and `gel_points()` produce | 1e-9 constants, 1e-6 laws |
 
-Typical worst deviation is ~6e-8 -- the float32 arrays the JS side stores its layout in. Without
-node installed the script prints `SKIP` and exits 0, the mirror image of the python-less skips
-in `tests/export.test.mjs`. **If you retune `src/recipe.js` or the renderer's ramp/aspect
-options, this test fails until `RECIPE_FIBER` / `CELL_RAMP_*` / `CELL_ASPECT_EXP` in
-`blender/import_tissue.py` are updated to match.** The reverse check -- that the JS writers and
-this reader still agree on the file format -- is `tests/export.test.mjs`, which runs
-`import_tissue.py --dry-run` over a fresh export of every registered tissue.
+It prints `PASS` or `FAIL` per section and one `PASS:` / `FAIL:` summary line, and exits 0 or 1.
+Typical worst deviation is ~2e-7 -- the float32 arrays the JS side stores its layout in and the
+OKLab round trip. Without node installed the script prints `SKIP` and exits 0, the mirror image
+of the python-less skips in `tests/export.test.mjs`. **If you retune `src/recipe.js` or the
+renderer's ramp / aspect / gel / scaffold / field options, this test fails until `RECIPE_FIBER` /
+`CELL_RAMP_*` / `CELL_ASPECT_EXP` / `GEL_*` / `SCAFFOLD_*` in `blender/import_tissue.py` are
+updated to match.** It is not only a manual check: `tests/recipe.test.mjs` spawns it as part of
+`npm test` (skipping when python3 is missing) and asserts the exit code, so the drift fails a
+build. The reverse check -- that the JS writers and this reader still agree on the file format --
+is `tests/export.test.mjs`, which runs `import_tissue.py --dry-run` over a fresh export of every
+registered tissue.
+
+Three things the harness deliberately does not restate but *runs*: the four pure colour statics
+and the three lines of `setTissue` that decide which of a cell type's `colors` become the ramp's
+start, end and mid (lifted out of `src/render.js`'s source and evaluated), and `recipeRng`
+itself, imported from `src/recipe.js`. If any of them is renamed or reshaped the dump throws
+with a message naming this directory, instead of quietly comparing a copy against itself.
 
 A no-Blender sanity check of any trajectory:
 
@@ -445,8 +508,33 @@ cell-state means, the `a = 0.5` colour of every cell ramp and what the load arro
 
 ## 7. Tested with
 
+* **The v0.4 haze pass** (gel and scaffold laws aligned with the web renderer, per-field jitter
+  index, honest `meta.render` provenance, `--fiber-radius` back to a multiplier), same wheel and
+  container:
+  * `python3 blender/test_recipe_parity.py` green, now including the gel/scaffold/field section
+    (~1390 comparisons, worst deviation 2e-7), and mutation-tested again: moving `GEL_SIZE`,
+    `GEL_CELL_FADE`, `GEL_JITTER_SPAN`, `SCAFFOLD_MIN_RADIUS`, `SCAFFOLD_BREAK` or the
+    three-colour ramp rule each fails exactly the section that owns it.
+  * `--dry-run` on both committed fixtures (the cartilage one regenerated, so its arrows read
+    `compression 0.3 -> 0.60 of 0-0.5 (meta.loadRange)` instead of the pre-`loadRange`
+    `0.30 of 0-1 (assumed)`), and on a fresh `run_headless --tissue cartilage --only race`
+    export with `--fields o2` (`amp 0.1 -> 0.50 of 0-0.2`, 1728 o2 points per frame).
+  * a 960x540 Cycles still (64 samples + denoise) of that fresh export at day 20 with
+    `--fields o2`, 106 s: teal GAG fog, white collagen II tubes, teal chondrocytes, the
+    `#d9c9a3` cones on both z faces. Two 640x360 checks of the changed layers: the scaffold
+    alone at density 1.0 (a full lattice at radius `0.075*h`) and at 0.06 (short, faint
+    fragments about each strut's midpoint -- the break-up the web shows), and `--gel-mode
+    spheres` at gel 0.85, where the jittered cloud reads as haze instead of a grid of balls
+    and the cells stay legible through it.
+  * **Behaviour changes to know about**: `--fiber-radius` is a multiplier again (v0.4 briefly
+    made it the absolute `radiusScale`, so a v0.3 command line passing 1.0 drew rods 1.67x too
+    thick); `--gel-opacity` defaults to 0.28 rather than 0.22, and the gel alpha law is now
+    `opacity*min(d,1)` rather than `opacity*(0.3+0.7*d)`, so a thin haze is fainter and a dense
+    one slightly stronger; scaffold struts are thicker at low density, no longer taper between
+    voxels, and break up below density 0.4; and when `meta.render.K` disagrees with `meta.K`
+    the layout now follows `meta.render.K` (what the browser drew).
 * **The v0.4 pass** (fields, shared recipe, OKLab ramp, normalised arrows), same wheel and
-  container: `python3 blender/test_recipe_parity.py` green (1046 comparisons, worst deviation
+  container: `python3 blender/test_recipe_parity.py` green (worst deviation
   6e-8 -- the float32 arrays the JS side stores its layout in); `--dry-run --all-frames` on both
   committed fixtures and on fresh `run_headless` exports of both registered tissues, with
   `--fields all`; and two 960x540 Cycles stills (64 samples + denoise):
