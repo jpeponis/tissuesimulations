@@ -43,11 +43,12 @@ flowchart TD
   CSV --> PY["tools/plot_scenarios.py<br/>matplotlib panels"]
   CSV --> BL
 
-  ENG --> TST["tests/*.test.mjs<br/>schema · determinism · invariants · scenario checks ·<br/>performance · golden regression · build constraints · tools"]
-  GOLD["tests/golden/fibrous.json<br/>tools/make_golden.mjs"] --> TST
+  ENG --> TST["tests/*.test.mjs<br/>schema · determinism · invariants · scenario checks ·<br/>performance · golden regression · build constraints ·<br/>tools · export contract · teaching claims"]
+  GOLD["tests/golden/fibrous.json (v0.1, 3 %)<br/>tests/golden/fibrous.engine.json (current, 1e-5)<br/>tools/make_golden.mjs"] --> TST
+  EXP --> TST
 
   SRC2["src/*.js + index.html"] --> BUILD["tools/build_single.mjs"]
-  BUILD --> DIST["dist/tissue-weather.html<br/>dist/tissue-weather.artifact.html"]
+  BUILD --> DIST["dist/tissue-weather.html<br/>dist/tissue-weather.artifact.html<br/>dist/tissue-weather.offline.html (--vendor)"]
 ```
 
 Read it as five paths out of the same engine:
@@ -62,8 +63,10 @@ Read it as five paths out of the same engine:
    one CSV of stats and one JSON trajectory per run; `tools/plot_scenarios.py` draws them.
 4. **Tests.** `tests/engine.test.mjs` runs the conformance suite (EXTENDING.md §7) over every
    registered tissue *plus* the unregistered starter, so the template is always known to pass;
-   `tests/build.test.mjs` enforces the build constraints; `tests/tools.test.mjs` covers the
-   scaffolding and dist checks.
+   `tests/build.test.mjs` enforces the build constraints and the fail-loud build; `tests/tools.test.mjs`
+   covers the scaffolding, the dist check, the as-built parameter blocks and the shared harness;
+   `tests/export.test.mjs` hands a fresh export to the real Blender reader; `tests/fidelity.test.mjs`
+   measures the claims the teaching copy makes.
 5. **The build.** `tools/build_single.mjs` inlines the sources into one HTML file.
 
 ### What crosses each boundary
@@ -83,18 +86,48 @@ Determinism is a property of the whole chain: a seeded mulberry32 PRNG in the en
 tissue + seed + dial sequence gives identical numbers in Node and in the browser. That is what
 makes the golden regression and the scenario checks meaningful.
 
+### What one step does, and why the order is part of the contract
+
+The normative version of this is [`docs/EXTENDING.md`](EXTENDING.md) **§2.5 "Step order and input
+staleness"**; read that before writing a rule. This is the reason it exists.
+
+A `step()` is four passes over the same state: **cells** in index order (each one deposits into the
+voxel it stands in, then moves), **binning and repulsion**, **voxels** in index order (each one
+integrates its own `dRho`, rescales the orientation tensor, applies the load alignment and the
+clamps, and stores its stiffness), then the **diffusive passes** — species transport, then the
+fields. So a hook does not see one consistent snapshot of the world, and it cannot: the deposition
+of the cell that ran a microsecond ago is already in `ctx.rho`, while `ctx.fa`, `ctx.fiberTotal` and
+`ctx.E` are the values the LAST voxel pass computed, one step old. Which of the two a number is
+decides what a rule means — a secretion law written against a live `rho` self-limits within the
+step, and the same law written against the stale `fiberTotal` does not — so the staleness table in
+§2.5 is a contract, not an implementation note, and `src/tissues/fibrous.js` reproduces the v0.1
+model precisely because it reads the same stale `fiberTotal` v0.1 read.
+
+Two consequences worth carrying around:
+
+- **The RNG stream is part of the contract too.** §2.5 lists what draws from it and how often
+  (reset: 1 + 3 draws per voxel; adding a cell: 6; a motile cell with `noise > 0`: 9 per step). A
+  rule that stops writing `out.noise` does not just change that cell — it shifts every later random
+  number in the run, so the goldens move. That is why "no behaviour change" work is checked against
+  `tests/golden/fibrous.engine.json` at 1e-5 and not by eye.
+- **A hook may only touch its own cell or voxel.** Anything that has to move between voxels is
+  engine machinery — species transport (`D`, `sink`) or a field — because a hook that reads
+  `engine.species[s][v ± 1]` silently couples the result to the visiting order of pass 4, and the
+  next change to that order breaks it without a test noticing.
+
 ## 2. The single-file build
 
 `tools/build_single.mjs` produces a page that runs from a double-click, from GitHub Pages, or
 inside a host that only accepts a fragment:
 
 ```
-src/copy.js  src/engine.js  src/tissues/<each>.js  src/tissues/index.js  src/plots.js  src/render.js  src/app.js
+src/copy.js  src/engine.js  src/tissues/<each>.js  src/tissues/index.js  src/plots.js  src/recipe.js  src/render.js  src/app.js
         │  strip `export `, drop local `import … from './…'`, hoist external imports
         ▼
    one <script type="module">  →  substituted for <script type="module" src="./src/app.js"> in index.html
         ├── dist/tissue-weather.html            full standalone page
-        └── dist/tissue-weather.artifact.html   head+body fragment for hosts that wrap the page
+        ├── dist/tissue-weather.artifact.html   head+body fragment for hosts that wrap the page
+        └── dist/tissue-weather.offline.html    --vendor only: Three.js inlined, no import map, no network
 ```
 
 Tissue files are discovered from `src/tissues/*.js` automatically (`index.js` last,
@@ -111,8 +144,24 @@ Tissue files are discovered from `src/tissues/*.js` automatically (`index.js` la
 `tools/check_dist.mjs` rebuilds into a temp directory and diffs against `dist/`, so a source
 change that never reached the committed artifact fails CI instead of shipping a stale page.
 
-Three.js is the only external dependency: `index.html` carries an import map pointing at
-`cdn.jsdelivr.net/npm/three@0.160.0`. `app.js` loads `render.js` with a *dynamic* import so a
+The build also refuses to write a page it knows is broken (docs/REVIEW.md D1). Because it
+concatenates rather than resolves, an import it drops is only discovered when the page runs, so
+`build_single.mjs` now **resolves every local specifier** against the bundle list and throws with
+`src/file:line` when the target is not in it, throws on any `import` / `export` statement that
+survived the strip, and finally `node --check`s the assembled module — which is what catches two
+files declaring the same top-level `const`. A file that is not in the order is a build error, not a
+silent omission: that is how `src/recipe.js` gets into the bundle above.
+
+`--vendor` writes a third output, `dist/tissue-weather.offline.html`: the same page with
+`three.module.min.js` and `OrbitControls.js` inlined as their own module scripts (their export
+blocks rewritten to publish on `window`, the import map removed), sourced from `dist/cdn-cache`,
+`node_modules` or curl. It needs no network at all — the classroom copy. The CDN variants stay,
+because the artifact host's CSP blocks `blob:`/`data:` scripts and the vendored file is 1.1 MB.
+
+Three.js is the only external dependency (besides the Google Fonts stylesheet): `index.html`
+carries an import map pointing at `cdn.jsdelivr.net/npm/three@0.160.0`, and
+`tests/build.test.mjs` fails if the version drifts apart between the page, the renderer harness and
+the docs. `app.js` loads `render.js` with a *dynamic* import so a
 CDN failure can be caught and explained; in the bundle `render.js` is already inlined ahead of
 it, so the import is never attempted.
 
@@ -131,6 +180,7 @@ it, so the import is never attempted.
 | `src/render.js` | Three.js scene built from the definition: fiber rods, gel haze, scaffold lattice, cells, field point clouds, load arrows |
 | `src/plots.js` | 2D canvas readouts: rolling time-series strips with ghost traces, and the deposition/degradation flux gauge |
 | `src/copy.js` | the copy every tissue shares: the live equilibrium sentence and the dial/rate formatters |
+| `src/recipe.js` | the one fiber-layout recipe (offsets, directions, lengths, radii) that `render.js` draws and `blender/import_tissue.py` re-implements |
 | `src/app.js` | wiring: tissue picker, dials, scenario cards, readouts, legend, About, keyboard, deep links, export — all generated from the definition |
 
 ### Build outputs
@@ -139,6 +189,7 @@ it, so the import is never attempted.
 |---|---|
 | `dist/tissue-weather.html` | the single-file build; what GitHub Pages and "just open the file" serve |
 | `dist/tissue-weather.artifact.html` | the same page as a head+body fragment for hosts that supply their own document skeleton |
+| `dist/tissue-weather.offline.html` | `--vendor` output: Three.js inlined, no import map, no network at all — the classroom copy (not committed; build it when you need it) |
 | `dist/shots/`, `dist/cdn-cache/` | screenshot output and the curl-fetched CDN cache used by the headless harnesses (both git-ignored) |
 
 ### Tools
@@ -147,6 +198,8 @@ it, so the import is never attempted.
 |---|---|
 | `tools/build_single.mjs` | inlines `src/*.js` into the two `dist/*.html` outputs |
 | `tools/check_dist.mjs` | rebuilds into a temp directory and fails if `dist/` is stale |
+| `tools/check_params_doc.mjs` | rewrites (`--write`) and checks the `<!-- params:<tissue> -->` as-built blocks in the docs |
+| `tools/lib/browser.mjs` | shared Playwright plumbing: find Playwright, serve a directory, launch Chromium, answer the CDNs from a cache, always clean up |
 | `tools/new_tissue.mjs` | scaffolds `src/tissues/<key>.js` from the starter and registers it |
 | `tools/run_headless.mjs` | runs a tissue's scenarios (and per-tissue variants) in Node; writes CSV stats and format-2 trajectories |
 | `tools/make_golden.mjs` | records the reference statistics of a tissue for the golden regression |
@@ -160,8 +213,11 @@ it, so the import is never attempted.
 |---|---|
 | `tests/engine.test.mjs` | conformance for every registered tissue (schema, determinism, invariants, scenario checks, performance), the fibrous golden regression, the engine API and the copy helpers |
 | `tests/build.test.mjs` | the EXTENDING.md §0 source constraints and the shape of the built page |
-| `tests/tools.test.mjs` | `new_tissue.mjs` and `check_dist.mjs`, exercised in throw-away copies of the repo |
+| `tests/tools.test.mjs` | `new_tissue.mjs`, `check_dist.mjs`, `check_params_doc.mjs` and `lib/browser.mjs`, exercised in throw-away copies of the repo |
+| `tests/export.test.mjs` | the format-2 export per tissue, handed to `blender/import_tissue.py --dry-run` (skipped without python3) |
+| `tests/fidelity.test.mjs` | the teaching claims of `docs/TEACHING.md` and the tissue copy, measured on the current engine |
 | `tests/golden/fibrous.json` | reference statistics recorded from the v0.1 model (seed 7); matched within 3 % |
+| `tests/golden/fibrous.engine.json` | the tight reference recorded from the current engine; matched at 1e-5 |
 
 ### Blender
 
@@ -199,4 +255,6 @@ it, so the import is never attempted.
 | change the look of the 3D scene | `src/render.js` | `node tools/render_smoke.mjs --out <dir>` |
 | change the panel, dials or deep links | `src/app.js`, `index.html` | `node tools/screenshot_app.mjs`, then `npm run build && npm run check-dist` |
 | change the readouts | the tissue's `readouts` block first; `src/plots.js` only for a new chart *type* | `npm test`, screenshots |
-| change the teaching text | the tissue's `copy` block, `src/copy.js`, `docs/TEACHING.md` | `npm run build` |
+| change the teaching text | the tissue's `copy` block, `src/copy.js`, `docs/TEACHING.md` | `npm test` (`tests/fidelity.test.mjs` measures the claims), then `npm run build` |
+| change a tissue parameter | that tissue's `params` / `engine` block | `node tools/check_params_doc.mjs --write` (the docs carry a generated as-built block), then `npm test` |
+| make an offline copy for a classroom | nothing | `node tools/build_single.mjs --vendor` → `dist/tissue-weather.offline.html` |

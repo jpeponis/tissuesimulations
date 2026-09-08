@@ -13,7 +13,7 @@
 import { TissueEngine } from './engine.js';
 import { TISSUES, TISSUE_DEFAULT } from './tissues/index.js';
 import { TimeSeriesPlot, FluxGauge } from './plots.js';
-import { copyEquilibriumSentence, copyFormatRate, copyFormatDial } from './copy.js';
+import { copyEquilibriumSentence, copyFormatRate, copyFormatDial, copyTrend } from './copy.js';
 
 const APP_THEME = {
   text: '#e6edf3', muted: '#8b9bb0', grid: '#243040', surface: '#161e28',
@@ -27,14 +27,29 @@ const APP_LABEL_MS = 5000;  // canvas aria-label refresh
 const APP_TABLE_MS = 500;
 const APP_URL_MS = 500;     // history.replaceState debounce
 const APP_FLASH_MS = 3200;
+const APP_STATUS_MS = 15000;    // screen-reader status: at most one routine announcement per 15 s
+const APP_TREND_MS = 5000;      // …and at most one "the balance turned" announcement per 5 s
+const APP_TREND_HOLD_MS = 1000; // a new trend must hold this long before it is worth saying
+const APP_STEP_BUDGET_MS = 8;   // wall-clock stepping budget per frame (A3); always ≥ 1 step
+const APP_SLOW_MS = 1500;       // how long "sim slowed" stays in #fps after a dropped backlog
+const APP_WARM_MS = 5;          // idle-frame budget for engine.warmScenarios (A2)
+const APP_WARM_CHUNK_MS = 2;    // …spent in slices this long, so the budget is not overshot
 const APP_GHOST_MIN_DAYS = 0.5; // a run shorter than this is not worth keeping as a ghost
-const APP_SPEEDS = [['Watch', 2], ['Weeks', 8], ['Months', 20]];  // labelled presets next to the speed slider
+const APP_SPEED_DEFAULT = 5;    // days per second — the number the teaching copy quotes
+const APP_SPEEDS = [['Watch', 1], ['Weeks', 5], ['Months', 20]];  // labelled presets next to the speed slider
+const APP_WEEK_JUMP = 7;        // the "+7 days" button, run (not stepped) to a stopAt
+const APP_MARKERS = ['circle', 'square', 'diamond'];  // endpoint glyphs: identity never by colour alone (B5)
+const APP_PRESENT_FONT = 14;    // readout font in presentation mode (11 px normally)
 const APP_EVENTS_KEY = 'tw.autoEvents';
 const APP_KEYS = [
   ['Space', 'play / pause'], ['R', 'reset the scenario (previous run stays dashed)'], ['I', 'injure (when the tissue supports it)'],
-  ['1 – 9', 'pick a scenario'], ['← →', 'nudge the focused dial (Home / End for the extremes)'], ['Tab', 'move between controls; the 3D view is focusable and describes itself'],
+  ['1 – 9', 'pick a scenario'], ['P', 'presentation mode (bigger sentence and clock)'],
+  ['← →', 'nudge the focused dial (Home / End for the extremes); on a focused chart, move the crosshair (Esc drops it)'],
+  ['Tab', 'move between controls; the 3D view and every chart are focusable and describe themselves'],
 ];
-const APP_OFFLINE_HTML = 'To use this page offline: reload once with an internet connection so the browser caches the library, or download <code>three@0.160.0</code> (<code>build/three.module.js</code> and <code>examples/jsm/controls/OrbitControls.js</code>) next to this page and point the import map in the HTML at those files.';
+/** The one line of orientation under the intro paragraph in the first-run hint (C13). */
+const APP_HINT_CONTROLS = 'Press Play to start the clock, drag a dial to change the weather, and drag the 3D view to look around. Everything works from the keyboard too — Space plays, 1–9 pick a scenario.';
+const APP_OFFLINE_HTML = 'To use this page offline: reload once with an internet connection so the browser caches the library, or download <code>three@0.160.0</code> (<code>build/three.module.min.js</code> and <code>examples/jsm/controls/OrbitControls.js</code>) next to this page and point the import map in the HTML at those files.';
 
 function appEl(id) { return document.getElementById(id); }
 function appH(tag, attrs = {}, children = []) {
@@ -61,8 +76,21 @@ function appLowerFirst(t) {
   const first = s.split(' ')[0];
   return /[A-Z]/.test(first.slice(1)) ? s : s.charAt(0).toLowerCase() + s.slice(1);
 }
-/** 10^v as a readable number (no exponent notation): 0.89, 5.6, 32, 320. */
-function appPow10(v) { const x = Math.pow(10, v); return x >= 10 ? x.toFixed(0) : x >= 1 ? x.toFixed(1) : x.toPrecision(2); }
+/**
+ * 10^v as a readable number, never in exponent notation (REVIEW §5): 320, 32, 5.6, 0.89, 0.0089.
+ * `toPrecision` would print 1.5e+2 / 8.9e-8 for the tails of a log axis that leaves its domain.
+ */
+function appPow10(v) {
+  const x = Math.pow(10, v);
+  if (!Number.isFinite(x)) return '–';
+  if (x >= 10) return x.toFixed(0);
+  if (x >= 1) return x.toFixed(1);
+  if (x >= 0.01) return x.toFixed(2);
+  const digits = Math.min(20, Math.max(2, 2 - Math.floor(Math.log10(x))));   // two significant digits
+  return x.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
+}
+/** The day as weeks, for the clock: "week 3.4". */
+function appWeek(t) { return `week ${(t / 7).toFixed(1)}`; }
 function appFormatDial(dial, v) { return typeof dial.format === 'function' ? dial.format(v) : copyFormatDial(dial.format, v); }
 function appSpeedText(speed) {
   const week = 7 / speed;
@@ -132,15 +160,25 @@ export class TissueApp {
     this.rendererState = 'loading';
     this.layers = { fibers: true, cells: true, scaffold: true, gel: true, fields: {} };
     this.playing = false; this.hasPlayed = false; this.ready = false;
-    this.speed = 2; this.accum = 0; this.lastFrame = 0; this.dt = 0.02;
+    this.speed = APP_SPEED_DEFAULT; this.accum = 0; this.lastFrame = 0; this.dt = 0.02;
     this.scenarioKey = null;
     this.exportFrames = []; this.exportEvery = 2; this.nextExportT = 0;
     this.stats = null; this.values = {}; this.dialValues = {};
     this.lastStatsAt = -1e9; this.lastPlotAt = -1e9; this.lastSentenceAt = -1e9; this.lastLabelAt = -1e9; this.lastTableAt = -1e9;
     this.flashUntil = 0; this.urlTimer = null; this.frameTimes = []; this.lastFpsAt = 0;
-    this.plots = []; this.gauge = null; this.tableOn = false; this.tableCells = [];
+    this.plots = []; this.gauge = null; this.gaugeVal = null; this.tableOn = false; this.tableCells = [];
+    this.historyBox = null; this.historyOut = null;
     this.dialInputs = {}; this.dialOutputs = {}; this.scenarioButtons = {}; this.layerButtons = {}; this.speedButtons = [];
     this.cellStates = []; this.stateNoun = { noun: 'activation', qualifier: '' }; this.voc = {};
+    // screen-reader status region (C3): routine announcements at most every APP_STATUS_MS,
+    // plus one whenever the trend changes, the clock stops or a scenario loads
+    this.statusText = ''; this.lastStatusAt = -1e9; this.lastTrend = null; this.statusFlip = false;
+    this.lastRevision = undefined;         // engine.revision at the last stats sample (B1/A3)
+    this.pendingTrend = null; this.pendingTrendAt = 0; this.lastTrendSaidAt = -1e9;
+    this.stopAt = null;                    // "+7 days": pause when the clock reaches this day
+    this.slowUntil = 0;                    // "sim slowed" in #fps while a backlog is being dropped
+    this.warmDone = false; this.warmChunk = 16;   // idle-frame scenario warm-up (A2)
+    this.present = false; this.autoRotate = true;
     // scripted scenario events: off by default (the student does the protocol by hand),
     // remembered for the session so an instructor can leave hands-free mode on
     this.autoEvents = appSession(APP_EVENTS_KEY) === '1';
@@ -151,10 +189,15 @@ export class TissueApp {
     this.reducedMotion = !!(this.motionQuery && this.motionQuery.matches);
     this.query = new URLSearchParams(window.location.search);
 
+    this.present = this.query.get('present') === '1';
+    this.autoRotate = this.query.get('rotate') !== '0' && !this.reducedMotion;
+    if (this.query.get('debug') === '1') document.body.classList.add('debug');
+
     this.bindStatic();
     this.buildTissuePicker();
+    this.setPresent(this.present, false);
     const qSpeed = parseFloat(this.query.get('speed'));
-    this.setSpeed(Number.isFinite(qSpeed) ? qSpeed : 2, false);
+    this.setSpeed(Number.isFinite(qSpeed) ? qSpeed : APP_SPEED_DEFAULT, false);
     const qt = this.query.get('tissue');
     const defKey = typeof TISSUE_DEFAULT === 'string' ? TISSUE_DEFAULT : (TISSUE_DEFAULT && TISSUE_DEFAULT.key);
     const first = (qt && TISSUES[qt]) ? qt : (defKey && TISSUES[defKey] ? defKey : Object.keys(TISSUES)[0]);
@@ -169,12 +212,14 @@ export class TissueApp {
   bindStatic() {
     appEl('btn-play').addEventListener('click', () => this.togglePlay());
     appEl('btn-step').addEventListener('click', () => this.advance(1));
+    appEl('btn-week').addEventListener('click', () => this.runFor(APP_WEEK_JUMP));
     appEl('btn-reset').addEventListener('click', () => this.reset());
     appEl('btn-injure').addEventListener('click', () => this.injure());
     appEl('btn-copy-link').addEventListener('click', () => this.copyLink());
     appEl('btn-table').addEventListener('click', () => this.toggleTable());
     appEl('btn-clear-ref').addEventListener('click', () => this.clearReference(true));
-    appEl('hint-dismiss').addEventListener('click', () => { appEl('hint').hidden = true; });
+    appEl('hint-dismiss').addEventListener('click', () => { appEl('hint').hidden = true; appEl('btn-play').focus(); });
+    appEl('btn-present').addEventListener('click', () => this.setPresent(!this.present, true));
     const speed = appEl('speed');
     speed.addEventListener('input', () => this.setSpeed(parseFloat(speed.value), true));
     // three named speeds beside the slider: the slider still takes any value in between
@@ -186,6 +231,18 @@ export class TissueApp {
       b.addEventListener('click', () => this.setSpeed(v, false));
       presets.append(b);
       return { b, v };
+    });
+    /**
+     * Space belongs to play/pause (C1). A button keeps focus after a MOUSE click, so the next
+     * Space re-fires that button — a scenario chip reloads, Injure wounds again. Drop focus from
+     * a mouse-clicked button (`detail > 0`; a keyboard-activated click reports 0), except the
+     * play button itself, where keeping focus is exactly what a repeat press should hit. Keyboard
+     * users never lose focus, so Tab-then-Space still activates the button they are on.
+     */
+    document.addEventListener('click', (e) => {
+      if (!e.detail) return;
+      const b = e.target && e.target.closest ? e.target.closest('button') : null;
+      if (b && b.id !== 'btn-play' && document.activeElement === b) b.blur();
     });
     // legend: open on wide screens, collapsed (but reachable) on narrow ones
     const legendBox = appEl('legend-box');
@@ -213,6 +270,7 @@ export class TissueApp {
       e.preventDefault(); this.togglePlay(); return;
     }
     const k = e.key.toLowerCase();
+    if (k === 'p') { e.preventDefault(); this.setPresent(!this.present, true); return; }
     if (k === 'r') { e.preventDefault(); this.reset(); return; }
     if (k === 'i') { if (this.tissue && this.tissue.injury) { e.preventDefault(); this.injure(); } return; }
     if (/^[1-9]$/.test(e.key) && this.tissue) {
@@ -235,7 +293,7 @@ export class TissueApp {
   setTissue(key, opts = {}) {
     const tissue = TISSUES[key];
     if (!tissue) return;
-    this.setPlaying(false);
+    this.setPlaying(false, true);
     this.tissueKey = key; this.tissue = tissue;
     const radio = appEl(`tissue-${key}`); if (radio) radio.checked = true;
     document.title = `Tissue Weather · ${tissue.name}`;
@@ -250,9 +308,10 @@ export class TissueApp {
     this.stateNoun = appStateNoun(this.cellStates);
     this.voc = Object.assign({ cellStateNoun: this.stateNoun.noun }, (tissue.copy && tissue.copy.vocabulary) || {});
     if (this.renderer && typeof this.renderer.setTissue === 'function') this.renderer.setTissue(tissue);
-    this.buildDials(); this.buildScenarios(); this.buildReadouts(); this.buildLayers(); this.buildLegend(); this.buildAbout();
+    this.buildDials(); this.buildScenarios(); this.buildReadouts(); this.buildLayers(); this.buildLegend(); this.buildAbout(); this.buildHint();
     appEl('btn-injure').hidden = !tissue.injury;
     this.engine = null; this.stats = null; this.ready = false;
+    this.warmDone = false; this.lastTrend = null; this.stopAt = null;
     this.busy(`preparing ${tissue.name}…`);
     const sc = tissue.scenarios.some((s) => s.key === opts.scenario) ? opts.scenario : tissue.scenarios[0].key;
     // let the overlay paint before the (possibly slow) engine construction
@@ -369,6 +428,9 @@ export class TissueApp {
       if (this.tissue.injury) { this.engine.injure((ev.injure && ev.injure.center) || null, ev.injure && ev.injure.radius); parts.push('wound inflicted'); }
       else parts.push('injury skipped (this tissue has none)');
     }
+    // scripted events earn a mark on the time axis too — the protocol should be visible in the
+    // chart, not only in the card (C11)
+    this.markPlots(parts.filter(Boolean).join('; ') || 'scripted event', `event:${ev.at}`);
     this.flash(`Day ${ev.at}, scripted: ${parts.filter(Boolean).join('; ') || 'event applied'}.`);
     this.scheduleUrl();
   }
@@ -382,7 +444,7 @@ export class TissueApp {
     this.renderScenarioCard(sc);
     appEl('scenario-name').textContent = sc.title;
     const wasPlaying = this.playing;
-    this.setPlaying(false);
+    this.setPlaying(false, true);
     // ghost traces: keep the run that just ended (if it went anywhere) as dashed reference lines
     if (o.ghost === false) this.clearReference(false);
     else if (this.runDays() >= APP_GHOST_MIN_DAYS) { for (const p of this.plots) p.plot.setReference(); this.syncReferenceUI(); }
@@ -405,8 +467,13 @@ export class TissueApp {
       this.busy(null);
       this.ready = true;
       this.flashUntil = 0;
+      this.lastTrend = null;
+      this.stopAt = null;
       this.sample(true, performance.now());
       if (o.flash) this.flash(o.flash);
+      // a scenario swap is silent on screen apart from the card: say which one loaded (C3).
+      // No programmatic focus move — loadScenario also runs on page load and on a radio change.
+      else this.announce(`Scenario “${sc.title}” loaded, day 0. ${sc.goal ? appFirstSentence(sc.goal) : ''}`.trim(), true);
       this.setPlaying(o.autoplay === undefined ? wasPlaying : o.autoplay);
       this.scheduleUrl();
     }, 30);
@@ -431,8 +498,9 @@ export class TissueApp {
   injure() {
     if (!this.engine || !this.ready || !this.tissue.injury) return;
     this.engine.injure();
+    this.markPlots('injury', 'injure');
     this.sample(true, performance.now());
-    this.flash('Wound inflicted. Watch the cells near it activate and refill it.');
+    this.flash((this.tissue.injury && this.tissue.injury.flash) || 'Wound inflicted. Watch the hole refill.');
   }
 
   // ---------- dials ----------
@@ -448,14 +516,21 @@ export class TissueApp {
       const ci = m.indexOf(':');
       const tag = (ci > 0 ? m.slice(0, ci) : m).toLowerCase();
       const rest = ci > 0 ? m.slice(ci + 1).trim() : '';
-      const hint = appH('div', { class: 'hint', id: `${id}-hint` }, [
-        d.biology ? appH('span', { text: `${d.biology} ` }) : '',
-        rest ? appH('span', { class: 'metaphor-note', text: `Like ${tag}: ${rest} ` }) : '',
-        d.watch ? appH('b', { text: 'Watch: ' }) : '', d.watch ? appH('span', { text: d.watch }) : '',
-      ]);
+      // The biology line stays visible: it is what aria-describedby points at, and it is the
+      // sentence a student needs while moving the slider. The metaphor and the "Watch:" line
+      // fold into a details (C8) — seven cartilage dials with three lines each pushed Play and
+      // the readouts more than a screen below the fold.
+      const hint = appH('div', { class: 'hint', id: `${id}-hint` }, [d.biology ? appH('span', { text: d.biology }) : '']);
+      const more = (rest || d.watch) ? appH('details', { class: 'dial-more' }, [
+        appH('summary', { text: rest && d.watch ? 'Metaphor & what to watch' : (rest ? 'Metaphor' : 'What to watch') }),
+        rest ? appH('p', { class: 'metaphor-note', text: `Like ${tag}: ${rest}` }) : '',
+        d.watch ? appH('p', {}, [appH('b', { text: 'Watch: ' }), document.createTextNode(d.watch)]) : '',
+      ]) : '';
       box.append(appH('div', { class: 'dial' }, [
-        appH('label', { for: id }, [document.createTextNode(d.label), tag ? appH('span', { class: 'metaphor', text: tag }) : '']),
-        out, input, hint,
+        // the metaphor tag is decoration inside the label; without aria-hidden the slider is
+        // announced as "Growth-factor bath humidity" (C5)
+        appH('label', { for: id }, [document.createTextNode(d.label), tag ? appH('span', { class: 'metaphor', 'aria-hidden': 'true', text: tag }) : '']),
+        out, input, hint, more,
       ]));
       this.dialInputs[d.key] = input; this.dialOutputs[d.key] = out;
     }
@@ -471,7 +546,18 @@ export class TissueApp {
     if (input) { if (source !== 'ui') input.value = v; input.setAttribute('aria-valuetext', txt); }
     if (this.dialOutputs[key]) this.dialOutputs[key].textContent = txt;
     if (this.engine) this.engine.setDials({ [key]: v });
+    // a dashed rule with a letter on the time axis, so "what did I change, and when?" is
+    // answerable from the chart (C11). Debounced in plots.js on SIMULATED time: a slider drag
+    // is one mark, not thirty.
+    if (this.ready && this.engine) this.markPlots(`${appShortLabel(d.label)} → ${txt}`, `dial:${key}`);
     this.scheduleUrl();
+  }
+
+  /** Put the same mark on every chart (the time axis is shared). */
+  markPlots(label, key) {
+    if (!this.engine) return;
+    const t = this.engine.time;
+    for (const p of this.plots) p.plot.mark(t, label, key);
   }
 
   syncDialsFromEngine() {
@@ -492,32 +578,62 @@ export class TissueApp {
     const box = appEl('readouts'); box.replaceChildren();
     for (const p of this.plots) p.plot.dispose();
     if (this.gauge) this.gauge.dispose();
-    this.plots = []; this.gauge = null;
-    for (const r of this.tissue.readouts || []) {
+    this.plots = []; this.gauge = null; this.gaugeVal = null;
+    const fontPx = this.present ? APP_PRESENT_FONT : 11;
+    // the flux gauge answers "which way is it going?" and is the readout the scenarios point
+    // at first, so it goes at the top of the section (C8); everything else keeps its order
+    const ordered = (this.tissue.readouts || []).slice().sort((a, b) => (a.type === 'flux' ? 0 : 1) - (b.type === 'flux' ? 0 : 1));
+    for (const r of ordered) {
       const val = appH('span', { class: 'val' });
       const head = appH('div', { class: 'head' }, [appH('h3', { text: r.label }), val]);
       const meaning = (r.unit || r.meaning) ? appH('p', { class: 'meaning' }, [r.unit ? appH('span', { class: 'unit', text: r.unit }) : '', r.unit && r.meaning ? document.createTextNode(' — ') : '', r.meaning ? document.createTextNode(r.meaning) : '']) : '';
       if (r.type === 'flux') {
-        const canvas = appH('canvas', { role: 'img', 'aria-label': `${r.label} gauge; every rate it compares is listed in the values table` });
+        const canvas = appH('canvas', { role: 'img', 'aria-label': `${r.label} gauge; the same rates are written beside the title and in the values table` });
         box.append(appH('div', { class: 'readout gauge' }, [head, meaning, canvas]));
-        this.gauge = new FluxGauge(canvas, APP_THEME, { scaffold: this.scaffoldNoun() });
+        // the tissue's own words for the gauge (docs/EXTENDING.md §1 `copy.gauge`), else the weather ones
+        const gaugeCopy = (this.tissue.copy && this.tissue.copy.gauge) || {};
+        this.gauge = new FluxGauge(canvas, APP_THEME, Object.assign({ scaffold: this.scaffoldNoun() }, gaugeCopy, { fontPx }));
+        this.gaugeVal = val;
         continue;
       }
       const stack = r.type === 'stack';
       const isLog = r.type === 'log';
-      const series = (r.series || []).map((s) => ({ key: s.stat, label: s.label, color: s.color, stack }));
+      // marker shapes and (for the top band of a stack) a hatch make a pair of luminance twins
+      // readable without colour (B5); a definition may set `marker` / `pattern` itself,
+      // `pattern: 'none'` opts a band out.
+      const declaresPattern = (r.series || []).some((x) => x.pattern);
+      const nStacked = stack ? (r.series || []).length : 0;
+      const series = (r.series || []).map((s, i) => ({
+        key: s.stat, label: s.label, color: s.color, stack,
+        marker: s.marker || APP_MARKERS[i % APP_MARKERS.length],
+        pattern: s.pattern === 'none' ? null : (s.pattern || (stack && !declaresPattern && nStacked > 1 && i === nStacked - 1 ? 'hatch' : null)),
+      }));
       const yDomain = Array.isArray(r.domain) ? r.domain : (isLog ? [-1, 2.5] : [0, 1]);
       const yFormat = isLog ? (v) => appPow10(v) : (v) => v.toFixed(2);
-      const canvas = appH('canvas', { role: 'img', 'aria-label': `${r.label} chart over the last 90 days; the current values are in the values table` });
-      const keys = appH('div', { class: 'keys' }, series.length > 1 ? series.map((s) => appH('span', {}, [appH('i', { style: `background:${s.color}` }), document.createTextNode(s.label)])) : []);
+      const canvas = appH('canvas', {
+        role: 'img', tabindex: '0', 'aria-describedby': 'chart-keys-hint',
+        'aria-label': `${r.label} chart over the last 90 days; focus it and use the arrow keys to read day by day`,
+      });
+      const keys = appH('div', { class: 'keys' }, series.length > 1 ? series.map((s) => appH('span', {}, [
+        appH('i', { class: `key-mark ${s.marker}${s.pattern === 'hatch' ? ' hatch' : ''}`, style: `background:${s.color}` }), document.createTextNode(s.label),
+      ])) : []);
       const ghostKey = appH('span', { class: 'ghost-key', hidden: true }, [appH('i', { class: 'dash' }), document.createTextNode('previous run (dashed)')]);
       keys.append(ghostKey);
       box.append(appH('div', { class: 'readout' }, [head, meaning, canvas, keys]));
-      const plot = new TimeSeriesPlot(canvas, { series, yDomain, yFormat, windowDays: 90, theme: APP_THEME });
+      const plot = new TimeSeriesPlot(canvas, {
+        series, yDomain, yFormat, windowDays: 90, theme: APP_THEME, fontPx,
+        onHover: (lines, i, source) => this.onPlotHover(r, lines, source),
+      });
       this.plots.push({ readout: r, plot, val, ghostKey, isLog, unitWord: (r.unit || '').split(/[\s(]/)[0] });
     }
     this.buildTable();
     this.syncReferenceUI();
+  }
+
+  /** The keyboard crosshair speaks: mirror the tooltip into the status region (C4). */
+  onPlotHover(readout, lines, source) {
+    if (source !== 'key' || !lines || !lines.length) return;
+    this.announce(`${readout.label}, ${lines.join(', ')}`, true);
   }
 
   /** What the third flux bar and its table row are called: the tissue's word, else a neutral one. */
@@ -588,6 +704,50 @@ export class TissueApp {
       appH('thead', {}, [appH('tr', {}, [appH('th', { scope: 'col', text: 'Readout' }), appH('th', { scope: 'col', text: 'Series' }), appH('th', { scope: 'col', text: 'Value' }), appH('th', { scope: 'col', text: 'Unit' })])]),
       tbody,
     ]));
+    // the last five days as numbers (C4): a chart is a picture, and "is it still rising?" needs
+    // more than the latest value. Filled only while the details is open.
+    this.historyOut = appH('div', { class: 'history-out' });
+    this.historyBox = appH('details', { class: 'history' }, [appH('summary', { text: 'Last five days as a table' }), this.historyOut]);
+    this.historyBox.addEventListener('toggle', () => this.renderHistory());
+    box.append(this.historyBox);
+  }
+
+  /**
+   * One row per plotted series, one column per whole day over the last five (nearest sample).
+   * Reads the plots' own buffers, so it needs no extra history and always agrees with the charts.
+   */
+  renderHistory() {
+    const box = this.historyBox, out = this.historyOut;
+    if (!box || !out || !box.open || !this.plots.length) return;
+    const t = this.plots[0].plot.t;
+    if (!t.length) { out.replaceChildren(appH('p', { class: 'note', text: 'Nothing recorded yet — press Play.' })); return; }
+    const end = Math.floor(t[t.length - 1]);
+    const days = [];
+    for (let d = Math.max(Math.ceil(t[0]), end - 4); d <= end; d++) days.push(d);
+    if (!days.length) days.push(end);
+    // one pass over each plot's time buffer picks the sample nearest each day; every series of
+    // that plot then reads the same indices
+    const rows = [];
+    for (const p of this.plots) {
+      const T = p.plot.t;
+      const idx = days.map((d) => {
+        let best = -1, bestD = Infinity;
+        for (let i = 0; i < T.length; i++) { const dd = Math.abs(T[i] - d); if (dd < bestD) { bestD = dd; best = i; } }
+        return bestD <= 0.75 ? best : -1;
+      });
+      for (const ser of p.plot.spec.series) {
+        const cells = idx.map((i) => {
+          const v = i < 0 ? NaN : p.plot.data[ser.key][i];
+          return appH('td', { class: 'num', text: Number.isFinite(v) ? (p.isLog ? appPow10(v) : v.toFixed(3)) : '–' });
+        });
+        rows.push(appH('tr', {}, [appH('th', { scope: 'row', text: `${p.readout.label} · ${ser.label}` }), ...cells]));
+      }
+    }
+    out.replaceChildren(appH('table', {}, [
+      appH('caption', { text: `Days ${days[0]} to ${days[days.length - 1]}` }),
+      appH('thead', {}, [appH('tr', {}, [appH('th', { scope: 'col', text: 'Series' }), ...days.map((d) => appH('th', { scope: 'col', text: `d ${d}` }))])]),
+      appH('tbody', {}, rows),
+    ]));
   }
   renderTable(now) {
     this.lastTableAt = now;
@@ -602,7 +762,8 @@ export class TissueApp {
     this.tableOn = !this.tableOn;
     appEl('btn-table').setAttribute('aria-pressed', String(this.tableOn));
     appEl('stats-table').hidden = !this.tableOn;
-    if (this.tableOn) this.renderTable(performance.now());
+    if (this.tableOn) { this.renderTable(performance.now()); this.renderHistory(); }
+    this.announce(this.tableOn ? 'Values table shown under the readouts.' : 'Values table hidden.', true);
   }
 
   // ghost traces
@@ -622,6 +783,9 @@ export class TissueApp {
   buildLayers() {
     const box = appEl('layers'); box.replaceChildren(); this.layerButtons = {};
     const t = this.tissue;
+    // a visible word in front of the chip row: "show fibers cells …" reads as a control, a bare
+    // row of pills reads as decoration (C13). The group already carries an aria-label.
+    box.append(appH('span', { class: 'chips-label', 'aria-hidden': 'true', text: 'show' }));
     const items = [['fibers', 'fibers'], ['cells', 'cells']];
     const gel = (t.species || []).filter((s) => s.kind === 'gel');
     const scaffold = (t.species || []).filter((s) => s.kind === 'scaffold');
@@ -639,6 +803,22 @@ export class TissueApp {
       });
       this.layerButtons[id] = b; box.append(b);
     }
+    // auto-rotate is motion the viewer did not ask for: give it a stop control (B3, WCAG 2.2.2)
+    const rot = appH('button', {
+      class: 'chip', type: 'button', id: 'btn-rotate', 'aria-pressed': String(this.autoRotate), text: 'auto-rotate',
+      title: 'Turn the slow automatic rotation of the 3D view on or off (?rotate=0 starts with it off)',
+    });
+    rot.addEventListener('click', () => this.setAutoRotate(!this.autoRotate, true));
+    this.layerButtons['auto-rotate'] = rot; box.append(rot);
+  }
+
+  /** Auto-rotate, from the chip or from the renderer (a drag or a key press stops it). */
+  setAutoRotate(on, fromUi) {
+    this.autoRotate = !!on;
+    const b = this.layerButtons['auto-rotate'];
+    if (b) b.setAttribute('aria-pressed', String(this.autoRotate));
+    if (fromUi && this.renderer && typeof this.renderer.setAutoRotate === 'function') this.renderer.setAutoRotate(this.autoRotate);
+    if (fromUi) this.scheduleUrl();
   }
 
   defaultSwatches() {
@@ -655,7 +835,11 @@ export class TissueApp {
     let sw = null;
     if (this.renderer && typeof this.renderer.legendSwatches === 'function') { try { sw = this.renderer.legendSwatches(); } catch (e) { sw = null; } }
     if (!Array.isArray(sw) || !sw.length) sw = this.defaultSwatches();
-    box.append(appH('ul', { class: 'legend-swatches', 'aria-label': 'Colour key' }, sw.map((s) => appH('li', { class: 'legend-row' }, [appH('span', { class: 'swatch', style: `background:${s.css}` }), appH('span', { text: s.label })]))));
+    const rows = sw.map((s) => appH('li', { class: 'legend-row' }, [appH('span', { class: 'swatch', style: `background:${s.css}` }), appH('span', { text: s.label })]));
+    // optional scale cue (C13): a definition that knows how big its cube is says so
+    const um = Number(t.domainMicrons);
+    if (Number.isFinite(um) && um > 0) rows.push(appH('li', { class: 'legend-row legend-scale' }, [appH('span', { class: 'swatch scale-swatch', 'aria-hidden': 'true' }), appH('span', { text: `Cube edge ≈ ${um >= 1000 ? `${(um / 1000).toFixed(um % 1000 ? 1 : 0)} mm` : `${Math.round(um)} µm`}` })]));
+    box.append(appH('ul', { class: 'legend-swatches', 'aria-label': 'Colour key' }, rows));
     // "How to read the view": every string the definition put in copy.legend, in its own
     // order — fibers, cells, scaffold, gel, load and each key under `fields` — not a fixed
     // set (the cartilage scaffold and gel lines were dropped by the old fixed list).
@@ -673,6 +857,45 @@ export class TissueApp {
     }
   }
 
+  /**
+   * The first-run hint (C13). Everything a newcomer needs to know before pressing Play, in the
+   * panel rather than behind a closed About at its bottom: the tissue's own opening sentences,
+   * one line about the controls, and a button that opens About where the rest of it lives.
+   * Hidden for good once the clock has run (setPlaying) or when the student dismisses it.
+   */
+  buildHint() {
+    const box = appEl('hint');
+    if (!box) return;
+    const dismiss = appEl('hint-dismiss');
+    const intro = (this.tissue.copy && this.tissue.copy.intro) || {};
+    const first = (Array.isArray(intro.paragraphs) && intro.paragraphs[0]) || this.tissue.short || '';
+    // the opening sentences of the tissue's own intro: enough to say what the cube is
+    // (no lookbehind: it is a parse-time error in older Safari, which would take the module with it)
+    const sentences = String(first).match(/[^.!?]+[.!?]+\s*/g) || [String(first)];
+    const opener = sentences.slice(0, 2).join('').trim();
+    const body = appH('div', { class: 'hint-body' }, [
+      appH('p', {}, [appH('b', { text: 'First time here? ' }), document.createTextNode(opener)]),
+      appH('p', { class: 'hint-controls', text: APP_HINT_CONTROLS }),
+      appH('p', { class: 'hint-tools' }, [appH('button', {
+        type: 'button', id: 'btn-what', class: 'linkish', text: 'What am I looking at?',
+        title: 'Open the About section: what the model is, where the metaphor breaks, the keyboard map',
+        onclick: () => this.openAbout(),
+      })]),
+    ]);
+    box.replaceChildren(body, dismiss || '');
+    box.hidden = this.hasPlayed;
+  }
+
+  /** Open the About details and put it in view (the hint's "What am I looking at?" button). */
+  openAbout() {
+    const ab = appEl('about');
+    if (!ab) return;
+    ab.open = true;
+    const sum = ab.querySelector('summary');
+    if (sum && typeof sum.scrollIntoView === 'function') sum.scrollIntoView({ block: 'nearest' });
+    if (sum && typeof sum.focus === 'function') sum.focus();
+  }
+
   buildAbout() {
     const ab = appEl('about-body'); ab.replaceChildren();
     const t = this.tissue, c = t.copy || {}, intro = c.intro || {};
@@ -686,7 +909,7 @@ export class TissueApp {
     }
     ab.append(appH('h3', { text: 'Keyboard' }));
     ab.append(appH('ul', { class: 'keys-list' }, APP_KEYS.map(([k, what]) => appH('li', {}, [appH('kbd', { text: k }), document.createTextNode(` ${what}`)]))));
-    ab.append(appH('p', { class: 'note', text: 'Drag the 3D view to orbit, scroll to zoom. Hover a chart for exact values; the Table button under the readouts lists them as text.' }));
+    ab.append(appH('p', { class: 'note', text: 'Drag the 3D view to orbit, scroll to zoom. With the view focused, the arrow keys orbit, + and − zoom and Home reframes it. Hover a chart for exact values, or focus it and walk the crosshair with the arrow keys; the Table button under the readouts lists the same numbers as text.' }));
     ab.append(appH('div', { class: 'tools' }, [
       appH('button', { type: 'button', text: 'Export trajectory (JSON for Blender)', onclick: () => this.exportJSON() }),
       appH('a', { href: 'https://github.com/jpeponis/tissuesimulations', target: '_blank', rel: 'noopener', text: 'Model notes & source' }),
@@ -713,7 +936,13 @@ export class TissueApp {
       this.flash('The 3D view could not load; the readouts still run.');
       return;
     }
-    try { this.renderer = new Ctor(canvas, { autoRotate: !this.reducedMotion }); }
+    try {
+      this.renderer = new Ctor(canvas, {
+        autoRotate: this.autoRotate,
+        // the renderer stops rotating by itself on a drag or a key press (WCAG 2.2.2): keep the chip honest
+        onAutoRotate: (on) => this.setAutoRotate(on, false),
+      });
+    }
     catch (e) {
       this.rendererState = 'failed';
       this.showNotice('3D view unavailable', `The WebGL renderer could not start (${(e && e.message) || 'unknown error'}). The simulation, dials and readouts still run.`);
@@ -722,6 +951,11 @@ export class TissueApp {
     if (this.tissue && typeof this.renderer.setTissue === 'function') this.renderer.setTissue(this.tissue);
     this.rendererState = 'ready';
     this.buildLegend();
+    // the camera is keyboard-operable (B2); give the pointer the same way back to the default view
+    if (typeof this.renderer.resetView === 'function') {
+      const b = appEl('btn-view');
+      if (b) { b.hidden = false; b.addEventListener('click', () => { this.renderer.resetView(); this.announce('3D view reframed.', true); }); }
+    }
   }
 
   showNotice(title, body, extra) {
@@ -732,23 +966,32 @@ export class TissueApp {
 
   busy(text) {
     const b = appEl('busy');
-    if (text) { b.textContent = text; b.hidden = false; appEl('app').setAttribute('aria-busy', 'true'); }
-    else { b.hidden = true; appEl('app').removeAttribute('aria-busy'); }
+    if (text) {
+      b.textContent = text; b.hidden = false; appEl('app').setAttribute('aria-busy', 'true');
+      this.announce(text, true);          // the overlay is visual only; the status region says it once
+    } else { b.hidden = true; appEl('app').removeAttribute('aria-busy'); }
   }
 
   // ---------- run loop ----------
-  setPlaying(on) {
+  /** `quiet` suppresses the announcement — a scenario or tissue switch says its own thing. */
+  setPlaying(on, quiet) {
     if (on && !(this.engine && this.ready)) on = false;
+    const was = this.playing;
     this.playing = on;
     const b = appEl('btn-play');
     b.textContent = on ? 'Pause' : 'Play';
     b.setAttribute('title', on ? 'Pause the simulation (Space)' : 'Run the simulation (Space)');
     if (on && !this.hasPlayed) { this.hasPlayed = true; appEl('hint').hidden = true; }
+    if (!on) { this.stopAt = null; this.accum = 0; }
+    // a screen reader hears the clock stop, and what the tissue was doing when it did (C3)
+    if (quiet || !this.stats) return;
+    if (was && !on) this.announce(`Paused, day ${this.stats.t.toFixed(1)}. ${this.sentence(this.stats)}`, true);
+    else if (!was && on) this.announce(`Playing at ${this.speed} simulated days per second, from day ${this.stats.t.toFixed(1)}.`, true);
   }
   togglePlay() { this.setPlaying(!this.playing); }
 
   setSpeed(v, fromUi) {
-    v = appClamp(Number.isFinite(v) ? v : 2, 0.25, 20);
+    v = appClamp(Number.isFinite(v) ? v : APP_SPEED_DEFAULT, 0.25, 20);
     this.speed = v;
     const input = appEl('speed');
     if (!fromUi) input.value = v;
@@ -759,10 +1002,26 @@ export class TissueApp {
     this.scheduleUrl();
   }
 
+  /** One simulated day, stepped synchronously (50 steps ≈ 10 ms): the "+1 day" button. */
   advance(days) {
     if (!this.engine || !this.ready) return;
     this.runSteps(Math.max(1, Math.round(days / this.dt)));
     this.sample(true, performance.now());
+    if (this.stats) this.announce(`Day ${this.stats.t.toFixed(1)}, ${appWeek(this.stats.t)}. ${this.sentence(this.stats)}`, true);
+  }
+
+  /**
+   * "+7 days": run to a target day instead of stepping there (C10). 350 steps synchronously is a
+   * third of a second of frozen UI on a Chromebook; playing to a `stopAt` keeps the 3D view and
+   * the charts alive and pauses on arrival. Pressing it again extends the target.
+   */
+  runFor(days) {
+    if (!this.engine || !this.ready) return;
+    const base = this.stopAt != null ? this.stopAt : this.engine.time;
+    this.stopAt = base + days;
+    this.accum = 0;
+    this.setPlaying(true);
+    this.flash(`Running to day ${this.stopAt.toFixed(0)} (${appWeek(this.stopAt)}), then pausing.`);
   }
 
   /**
@@ -788,29 +1047,85 @@ export class TissueApp {
     this.captureExport();
   }
 
+  /**
+   * One animation frame: step the engine within a WALL-CLOCK budget (A3), update the 3D view,
+   * sample the stats, and — while paused — spend a few idle milliseconds warming the scenario
+   * pre-runs (A2) so the first Unloading click is instant.
+   *
+   * The old bound was a step COUNT (60), which is 12 ms of fibrous but 21 ms of cartilage and
+   * whatever the next tissue costs. Here the loop stops as soon as APP_STEP_BUDGET_MS is spent —
+   * always after at least one step, so the clock never freezes — and the backlog it could not
+   * work through is DROPPED (the sim runs slower than the speed dial asks rather than falling
+   * further behind every frame), which #fps says out loud as "sim slowed".
+   */
   frame(now) {
     requestAnimationFrame((t) => this.frame(t));
     const dtReal = this.lastFrame ? Math.min(0.1, (now - this.lastFrame) / 1000) : 0;
     this.lastFrame = now;
     const eng = this.engine;
+    let slowed = false;
     if (eng && this.ready) {
       if (this.playing && dtReal > 0) {
-        this.accum += dtReal * this.speed; // simulated days owed
-        const maxSteps = 60; // keep the frame responsive; the sim slows rather than stutters
+        this.accum += dtReal * this.speed;                    // simulated days owed
         let n = Math.floor(this.accum / this.dt);
-        if (n > maxSteps) { n = maxSteps; this.accum = n * this.dt; }
-        if (n > 0) { this.runSteps(n); this.accum -= n * this.dt; }
+        if (this.stopAt != null) n = Math.min(n, Math.max(0, Math.ceil((this.stopAt - eng.time) / this.dt - 1e-9)));
+        if (n > 0) {
+          const t0 = performance.now();
+          let done = 0;
+          while (done < n) {
+            const take = Math.min(n - done, 8);               // one budget check per ~8 steps
+            this.runSteps(take);
+            done += take;
+            if (performance.now() - t0 >= APP_STEP_BUDGET_MS) break;
+          }
+          this.accum -= done * this.dt;
+          if (done < n) { this.accum = 0; slowed = true; this.slowUntil = now + APP_SLOW_MS; }   // drop the backlog
+        }
+        if (this.stopAt != null && eng.time >= this.stopAt - 1e-9) {
+          const target = this.stopAt;
+          this.stopAt = null;
+          this.setPlaying(false, true);      // the flash below is the announcement
+          this.sample(true, now);
+          this.flash(`Paused at day ${eng.time.toFixed(1)} (${appWeek(eng.time)}), the target was day ${target.toFixed(0)}.`);
+        }
       }
       if (this.renderer) this.renderer.update(eng.state, this.layers);
       if (now - this.lastStatsAt >= APP_STATS_MS) this.sample(false, now);
+      if (!this.playing && !slowed) this.warmIdle(now);
     }
     if (this.renderer) this.renderer.render();
     this.frameTimes.push(now); if (this.frameTimes.length > 30) this.frameTimes.shift();
     if (this.frameTimes.length === 30 && now - this.lastFpsAt > 1000) {
       const fps = 29000 / (this.frameTimes[29] - this.frameTimes[0]);
-      appEl('fps').textContent = `${fps.toFixed(0)} fps`;
+      // #fps is hidden by CSS (body.debug shows it) but keeps being written: tools/screenshot_app.mjs
+      // reads it, and "sim slowed" is the one message worth surfacing from here.
+      appEl('fps').textContent = now < this.slowUntil ? `${fps.toFixed(0)} fps · sim slowed` : `${fps.toFixed(0)} fps`;
       this.lastFpsAt = now;
     }
+  }
+
+  /**
+   * Idle frames pay for the scenario pre-runs (A2). `engine.warmScenarios(n)` advances one
+   * `init.from` pre-run by n steps and caches it when it finishes, so the 3000-step Unloading
+   * pre-run is spread over a few seconds of doing nothing instead of freezing the UI on the
+   * first click. The chunk size follows the measured cost, and an engine without the method
+   * (an older build) simply never warms — loadScenario still runs it synchronously.
+   */
+  warmIdle() {
+    const eng = this.engine;
+    if (this.warmDone || !eng || typeof eng.warmScenarios !== 'function') return;
+    const t0 = performance.now();
+    let spent = 0;
+    do {
+      let r = null;
+      const s0 = performance.now();
+      try { r = eng.warmScenarios(this.warmChunk); } catch (e) { this.warmDone = true; return; }
+      const ms = performance.now() - s0;
+      if (!r || r.done) { this.warmDone = true; return; }   // every pre-run is cached
+      // size the next slice from the measured per-step cost of this one
+      this.warmChunk = appClamp(Math.round(APP_WARM_CHUNK_MS * this.warmChunk / Math.max(0.05, ms)), 4, 400);
+      spent = performance.now() - t0;
+    } while (spent < APP_WARM_MS);
   }
 
   statValue(s, path) {
@@ -823,35 +1138,100 @@ export class TissueApp {
     return Number.isFinite(v) ? v : NaN;
   }
 
-  /** Sample engine.stats() (≤ 10×/s), feed plots, and refresh text at their own cadences. */
+  /** The live sentence for these stats, in this tissue's vocabulary. */
+  sentence(s) { return copyEquilibriumSentence(s, this.voc); }
+  /** The trend these stats are in ('still' | 'condensing' | 'evaporating' | 'steady'). */
+  trend(s) { return copyTrend(s, this.voc); }
+
+  /**
+   * Sample engine.stats() (≤ 10×/s), feed plots, and refresh text at their own cadences.
+   *
+   * While the state is unchanged — paused, and nothing pressed — the engine's `revision`
+   * (docs/EXTENDING.md §3) says so and the stats pass is skipped entirely: no stats(), no plot
+   * push, no redraw (REVIEW §5, folded into A3/B1). The text below still runs, because the live
+   * sentence has to come back after a flash expires even when nothing is moving. An engine
+   * without `revision` samples exactly as before.
+   */
   sample(force, now) {
     if (!this.engine) return;
     this.lastStatsAt = now;
-    const s = this.engine.stats();
+    const rev = this.engine.revision;
+    const fresh = force || rev === undefined || rev !== this.lastRevision || !this.stats;
+    this.lastRevision = rev;
+    const s = fresh ? this.engine.stats() : this.stats;
     this.stats = s;
     appEl('day').textContent = s.t.toFixed(1);
+    const wk = appEl('week');
+    if (wk) wk.textContent = `(${appWeek(s.t)})`;
     const vals = this.values;
-    for (const p of this.plots) {
-      for (const ser of p.plot.spec.series) vals[ser.key] = this.statValue(s, ser.key);
-      p.plot.push(s.t, vals);
+    if (fresh) {
+      for (const p of this.plots) {
+        for (const ser of p.plot.spec.series) vals[ser.key] = this.statValue(s, ser.key);
+        p.plot.push(s.t, vals);
+      }
     }
-    if (force || now - this.lastPlotAt >= APP_PLOT_MS) {
+    if (fresh && (force || now - this.lastPlotAt >= APP_PLOT_MS)) {
       for (const p of this.plots) { p.plot.draw(); p.val.textContent = this.readoutValueText(p); }
-      if (this.gauge) this.gauge.update(s.deposition, s.degradation, s.scaffoldFlux);
+      if (this.gauge) {
+        this.gauge.update(s.deposition, s.degradation, s.scaffoldFlux);
+        // the gauge is a picture; the number goes in the DOM beside the title (C4)
+        if (this.gaugeVal) this.gaugeVal.textContent = this.gaugeValueText();
+      }
       this.lastPlotAt = now;
     }
+    const trend = this.trend(s);
     if (now >= this.flashUntil && (force || now - this.lastSentenceAt > APP_SENTENCE_MS)) {
       const eq = appEl('equilibrium');
-      eq.textContent = copyEquilibriumSentence(s, this.voc);
-      const ratio = (s.deposition + 1e-9) / (s.degradation + 1e-9);
-      eq.dataset.state = ratio > 1.15 ? 'condensing' : ratio < 0.87 ? 'evaporating' : 'steady';
+      eq.textContent = this.sentence(s);
+      eq.dataset.state = trend;
       this.lastSentenceAt = now;
     }
+    // Screen readers (C3): the visual sentence is rewritten every 0.7 s with changing rates, which
+    // in a live region is a flood. Announce it when the BALANCE turns — but only once the new
+    // trend has held for a second and not more often than every APP_TREND_MS, because the first
+    // days of a run cross the thresholds several times — and otherwise at most once every
+    // APP_STATUS_MS while the clock runs. Pauses, steps and scenario loads announce on their own.
+    if (trend !== this.pendingTrend) { this.pendingTrend = trend; this.pendingTrendAt = now; }
+    const turned = trend !== this.lastTrend && this.lastTrend !== null
+      && now - this.pendingTrendAt >= APP_TREND_HOLD_MS && now - this.lastTrendSaidAt >= APP_TREND_MS;
+    if (turned) { this.lastTrendSaidAt = now; this.announce(`Day ${s.t.toFixed(1)}. ${this.sentence(s)}`, true); }
+    else if (this.playing && now - this.lastStatusAt >= APP_STATUS_MS) this.announce(`Day ${s.t.toFixed(1)}. ${this.sentence(s)}`);
+    if (turned || this.lastTrend === null || now - this.pendingTrendAt >= APP_TREND_HOLD_MS) this.lastTrend = trend;
     if (force || now - this.lastLabelAt > APP_LABEL_MS) {
       appEl('view').setAttribute('aria-label', this.describe(s));
       this.lastLabelAt = now;
     }
-    if (this.tableOn && (force || now - this.lastTableAt > APP_TABLE_MS)) this.renderTable(now);
+    if (this.tableOn && (force || now - this.lastTableAt > APP_TABLE_MS)) { this.renderTable(now); this.renderHistory(); }
+  }
+
+  /** The flux gauge as text for the value beside its title: "0.05/d vs 0.02/d · 2.50 ×". */
+  gaugeValueText() {
+    const s = this.stats;
+    if (!s) return '';
+    const ratio = (s.deposition + 1e-9) / (s.degradation + 1e-9);
+    const r = ratio > 99 ? '>99' : ratio.toFixed(2);
+    let out = `${copyFormatRate(s.deposition)} vs ${copyFormatRate(s.degradation)} · ${r} ×`;
+    if (Number.isFinite(s.scaffoldFlux) && s.scaffoldFlux > 0) out += ` · ${copyFormatRate(s.scaffoldFlux)}`;
+    return out;
+  }
+
+  // ---------- screen-reader status region (C3) ----------
+  /**
+   * Say something once, in the polite `#status` region. `force` bypasses the 15 s cadence (a
+   * pause, a step, a scenario load, a flash, a busy overlay, a keyboard crosshair reading).
+   * Identical text is nudged with a trailing space so a repeat is still announced, and nothing
+   * here moves focus.
+   */
+  announce(text, force) {
+    const el = appEl('status');
+    if (!el || !text) return;
+    const now = performance.now();
+    if (!force && now - this.lastStatusAt < APP_STATUS_MS) return;
+    let msg = String(text);
+    if (msg === this.statusText) { this.statusFlip = !this.statusFlip; msg += this.statusFlip ? ' ' : ''; }
+    this.statusText = msg;
+    this.lastStatusAt = now;
+    el.textContent = msg;
   }
 
   /** One sentence for the 3D canvas's aria-label, built from generic stats and the tissue's words. */
@@ -870,7 +1250,10 @@ export class TissueApp {
       if (fibers.length > 1 && Number.isFinite(fr)) str += ` with ${Math.round(fr * 100)} % ${appLowerFirst(last.label)}`;
       parts.push(str);
     }
-    if (Number.isFinite(s.fa)) parts.push(`alignment ${s.fa.toFixed(2)}`);
+    // F8: "alignment" is whole-tissue coherence (globalFA) everywhere else in the UI; the
+    // per-voxel mean (fa) is "local anisotropy". Keep the spoken description on the same measure.
+    if (Number.isFinite(s.globalFA)) parts.push(`alignment ${s.globalFA.toFixed(2)}`);
+    else if (Number.isFinite(s.fa)) parts.push(`alignment ${s.fa.toFixed(2)}`);
     // the cells in their own vocabulary: "activation 0.85", "phenotype 0.99 (1 = chondrogenic)"
     if (s.cells && Number.isFinite(s.cells.a)) {
       const n = this.stateNoun;
@@ -889,6 +1272,29 @@ export class TissueApp {
     eq.textContent = msg;
     eq.dataset.state = 'flash';
     this.flashUntil = performance.now() + APP_FLASH_MS;
+    this.announce(msg, true);            // said once, not re-read every 0.7 s (C3)
+  }
+
+  // ---------- presentation mode (C12) ----------
+  /**
+   * `body.present` (CSS in index.html) blows the live sentence up to 24 px on a backdrop, the
+   * clock to 18 px, widens the panel and hides the per-dial hints — the lecture-room view from
+   * the back row. Toggled by the chip, by `?present=1` and by the P key; the copied link keeps it.
+   * The charts follow with a bigger font, so the readouts scale with the rest.
+   */
+  setPresent(on, fromUi) {
+    this.present = !!on;
+    document.body.classList.toggle('present', this.present);
+    const b = appEl('btn-present');
+    if (b) b.setAttribute('aria-pressed', String(this.present));
+    const fontPx = this.present ? APP_PRESENT_FONT : 11;
+    for (const p of this.plots) { p.plot.spec.fontPx = fontPx; p.plot.draw(); }
+    if (this.gauge && typeof this.gauge.setFontPx === 'function') this.gauge.setFontPx(fontPx);
+    if (this.renderer && typeof this.renderer.resize === 'function') this.renderer.resize();
+    if (fromUi) {
+      this.scheduleUrl();
+      this.announce(this.present ? 'Presentation mode on: bigger sentence and clock, hints hidden.' : 'Presentation mode off.', true);
+    }
   }
 
   // ---------- deep links ----------
@@ -898,6 +1304,9 @@ export class TissueApp {
     if (this.scenarioKey) p.set('scenario', this.scenarioKey);
     for (const d of this.tissue.dials) if (Number.isFinite(this.dialValues[d.key])) p.set(d.key, appNum(this.dialValues[d.key]));
     p.set('speed', appNum(this.speed));
+    if (this.present) p.set('present', '1');
+    if (!this.autoRotate) p.set('rotate', '0');
+    if (document.body.classList.contains('debug')) p.set('debug', '1');
     return `${window.location.pathname}?${p.toString()}${window.location.hash}`;
   }
   scheduleUrl() { clearTimeout(this.urlTimer); this.urlTimer = setTimeout(() => this.writeUrl(), APP_URL_MS); }
@@ -938,6 +1347,11 @@ export class TissueApp {
     if (!this.engine || !this.ready) return;
     const st = this.engine.state;
     const meta = Object.assign({ format: 2, tissue: this.tissueKey }, typeof this.engine.exportMeta === 'function' ? this.engine.exportMeta() : {}, { scenario: this.scenarioKey, exportEveryDays: this.exportEvery });
+    // E2: carry the fiber recipe actually in use so blender/import_tissue.py reproduces this
+    // exact layout (recipe_from_meta) instead of falling back to its own copy of the defaults.
+    if (this.renderer && typeof this.renderer.layoutParams === 'function') {
+      try { meta.render = this.renderer.layoutParams(); } catch (e) { /* renderer without the hook: importer falls back */ }
+    }
     const payload = { meta, frames: this.exportFrames };
     const filename = `tissue-weather-${this.tissueKey}-${this.scenarioKey}-day${st.time.toFixed(0)}.json`;
     const json = JSON.stringify(payload);

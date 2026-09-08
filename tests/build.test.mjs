@@ -12,7 +12,7 @@
 // artifact; `node tools/check_dist.mjs` (npm run check-dist) is what tells you dist/ is stale.
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -181,5 +181,157 @@ describe('single-file build (tools/build_single.mjs)', () => {
     for (const name of ['tissue-weather.html', 'tissue-weather.artifact.html']) {
       assert.ok(existsSync(join(root, 'dist', name)), `dist/${name} is missing — run npm run build`);
     }
+  });
+});
+
+// ---------------------------------------------------------------- fail-loud checks (REVIEW D1)
+// The build concatenates: an import it cannot resolve, a statement the strip missed or a name
+// declared twice all produce a green build and a dead page. Each must throw instead.
+describe('the build refuses to write a broken bundle (docs/REVIEW.md D1)', () => {
+  /** A throw-away repo (src/ + index.html + the build) that `mutate` may edit before the build runs. */
+  function buildIn(mutate) {
+    const dir = mkdtempSync(join(tmpdir(), 'tissue-weather-fail-'));
+    try {
+      cpSync(SRC, join(dir, 'src'), { recursive: true });
+      cpSync(join(root, 'index.html'), join(dir, 'index.html'));
+      mkdirSync(join(dir, 'tools'), { recursive: true });
+      cpSync(join(root, 'tools', 'build_single.mjs'), join(dir, 'tools', 'build_single.mjs'));
+      if (mutate) mutate(dir);
+      try {
+        const stdout = execFileSync(process.execPath, [join(dir, 'tools', 'build_single.mjs')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        return { status: 0, stdout, stderr: '', dir, wrote: existsSync(join(dir, 'dist', 'tissue-weather.html')) };
+      } catch (e) {
+        return { status: e.status ?? 1, stdout: (e.stdout || '').toString(), stderr: (e.stderr || '').toString(), dir, wrote: existsSync(join(dir, 'dist', 'tissue-weather.html')) };
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+
+  test('a local import whose target is not bundled throws with file:line', () => {
+    const r = buildIn((dir) => {
+      writeFileSync(join(dir, 'src', 'tissues', '_helper.js'), 'export const helperK = 3;\n');
+      writeFileSync(join(dir, 'src', 'tissues', 'scratchy.js'),
+        "import { helperK } from './_helper.js';\nexport const TISSUE_SCRATCHY = { key: 'scratchy', k: helperK };\n");
+    });
+    assert.equal(r.status, 1, `the build must fail\n${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /src\/tissues\/scratchy\.js:1/, 'names the importing file and line');
+    assert.match(r.stderr, /_helper\.js/, 'names the specifier it could not resolve');
+    assert.ok(!r.wrote, 'nothing may be written when a check fails');
+  });
+
+  test('an import that reaches outside src/ throws too', () => {
+    const r = buildIn((dir) => {
+      const p = join(dir, 'src', 'plots.js');
+      writeFileSync(p, `import { readFileSync } from '../tools/build_single.mjs';\n${readFileSync(p, 'utf8')}`);
+    });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /src\/plots\.js:1/);
+  });
+
+  test('a multi-line import survives the strip and throws', () => {
+    const r = buildIn((dir) => {
+      const p = join(dir, 'src', 'plots.js');
+      writeFileSync(p, readFileSync(p, 'utf8').replace("import { copyFormatRate } from './copy.js';", "import {\n  copyFormatRate\n} from './copy.js';"));
+    });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /src\/plots\.js:\d+/);
+    assert.match(r.stderr, /import|export/);
+  });
+
+  test('`export default` / `export { … }` throw', () => {
+    for (const line of ['export default 1;', 'export { copyFormatRate as fmt };', "export * from './copy.js';"]) {
+      const r = buildIn((dir) => {
+        const p = join(dir, 'src', 'plots.js');
+        writeFileSync(p, `${readFileSync(p, 'utf8')}\n${line}\n`);
+      });
+      assert.equal(r.status, 1, `\`${line}\` must fail the build`);
+      assert.match(r.stderr, /src\/plots\.js:\d+/);
+    }
+  });
+
+  test('a duplicate top-level declaration is caught by node --check', () => {
+    const r = buildIn((dir) => {
+      const p = join(dir, 'src', 'app.js');
+      writeFileSync(p, `${readFileSync(p, 'utf8')}\nconst TISSUES = 1;\n`);
+    });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /already been declared|node --check|does not parse/);
+    assert.ok(!r.wrote);
+  });
+
+  test('a syntax error in one source is caught before anything is written', () => {
+    const r = buildIn((dir) => {
+      const p = join(dir, 'src', 'copy.js');
+      writeFileSync(p, `${readFileSync(p, 'utf8')}\nconst broken = (;\n`);
+    });
+    assert.equal(r.status, 1);
+    assert.ok(!r.wrote);
+  });
+
+  test('the untouched tree still builds', () => {
+    const r = buildIn(null);
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.ok(r.wrote);
+  });
+});
+
+// ---------------------------------------------------------------- vendored offline page (C9)
+// `--vendor` inlines Three.js so the page needs no network at all. It is opt-in and needs the
+// library on disk (dist/cdn-cache or node_modules), so the test skips when it is not there.
+describe('the vendored offline build (docs/REVIEW.md C9)', () => {
+  const cdnThree = join(root, 'dist', 'cdn-cache', 'cdn.jsdelivr.net');
+  const nmThree = join(root, 'node_modules', 'three', 'build', 'three.module.js');
+  const haveLib = existsSync(cdnThree) || existsSync(nmThree);
+
+  test('writes dist/tissue-weather.offline.html with no import map and no CDN URL', { skip: haveLib ? false : 'three.module.js is not cached locally (dist/cdn-cache or node_modules)' }, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tissue-weather-vendor-'));
+    try {
+      cpSync(SRC, join(dir, 'src'), { recursive: true });
+      cpSync(join(root, 'index.html'), join(dir, 'index.html'));
+      mkdirSync(join(dir, 'tools'), { recursive: true });
+      cpSync(join(root, 'tools', 'build_single.mjs'), join(dir, 'tools', 'build_single.mjs'));
+      if (existsSync(cdnThree)) { mkdirSync(join(dir, 'dist', 'cdn-cache'), { recursive: true }); cpSync(cdnThree, join(dir, 'dist', 'cdn-cache', 'cdn.jsdelivr.net'), { recursive: true }); }
+      else { mkdirSync(join(dir, 'node_modules'), { recursive: true }); cpSync(join(root, 'node_modules', 'three'), join(dir, 'node_modules', 'three'), { recursive: true }); }
+      execFileSync(process.execPath, [join(dir, 'tools', 'build_single.mjs'), '--vendor'], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      const off = readFileSync(join(dir, 'dist', 'tissue-weather.offline.html'), 'utf8');
+      assert.ok(!/<script type="importmap">/.test(off), 'the import map must be gone: nothing is resolved by specifier any more');
+      const urls = (off.match(/(?:src|href)="(https?:[^"]+)"/g) || []);
+      assert.deepEqual(urls, [], `the offline page must not fetch anything: ${urls.join(', ')}`);
+      assert.match(off, /window\.__TISSUE_THREE = \{/, 'three publishes its exports on a global');
+      assert.match(off, /const THREE = window\.__TISSUE_THREE;/, 'the bundle binds that global instead of importing');
+      assert.match(off, /const \{ ?OrbitControls ?\} = window\.__TISSUE_ADDON_ORBITCONTROLS;/);
+      assert.ok(!/^\s*import\s/m.test(off.slice(off.indexOf('<script type="module">'))), 'no import statement may survive in any inlined module');
+      assert.match(off, /SPDX-License-Identifier: MIT/, "three's licence header travels with the code");
+      assert.equal((off.match(/<script type="module">/g) || []).length, 3, 'three, the addon and the app, in that order');
+
+      // the CDN variants are still produced and still use the import map
+      const cdn = readFileSync(join(dir, 'dist', 'tissue-weather.html'), 'utf8');
+      assert.match(cdn, /<script type="importmap">/);
+      assert.ok(off.length > cdn.length + 5e5, `the library really is inlined (offline ${off.length} vs CDN ${cdn.length} bytes)`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+// ---------------------------------------------------------------- one three@ version (D9)
+// The Three.js version is pinned in the page, in the renderer harness and in the docs. When they
+// drift, the harness measures a different library from the one the app ships.
+describe('the pinned three@ version agrees everywhere (docs/REVIEW.md D9)', () => {
+  const FILES = ['index.html', 'tools/render_smoke.html', 'tools/render_smoke.mjs', 'docs/SPEC.md',
+    'docs/ARCHITECTURE.md', 'README.md', 'src/app.js', 'blender/README.md'];
+  test('every three@<version> mention matches index.html', () => {
+    const pins = new Map();
+    for (const rel of FILES) {
+      const p = join(root, rel);
+      if (!existsSync(p)) continue;
+      for (const m of readFileSync(p, 'utf8').matchAll(/three@(\d+\.\d+\.\d+)/g)) {
+        if (!pins.has(rel)) pins.set(rel, new Set());
+        pins.get(rel).add(m[1]);
+      }
+    }
+    const app = [...(pins.get('index.html') || [])];
+    assert.equal(app.length, 1, `index.html must pin exactly one three@ version, found: ${app.join(', ')}`);
+    const disagree = [...pins].filter(([, vs]) => [...vs].some((v) => v !== app[0]))
+      .map(([rel, vs]) => `${rel}: ${[...vs].join(', ')}`);
+    assert.deepEqual(disagree, [], `these still name another three@ version than index.html's ${app[0]}:\n  ${disagree.join('\n  ')}`);
   });
 });

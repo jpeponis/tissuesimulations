@@ -33,6 +33,10 @@ export const TISSUE_TEMPLATE = {
   //        sink: 0.5, boundary: 'face:+z'   /day loss to the medium at the top layer only
   //                                         ("washes out"; counts as degradation, or as
   //                                          scaffoldFlux for a 'scaffold' species)
+  //        mode: 'auto'                     v0.4: how the transport is integrated —
+  //                                         'auto' (default: explicit while D·dt/h² ≤ 1/6, then
+  //                                         sub-cycled), 'explicit' (v0.3: the number is clamped
+  //                                         at 1/6, i.e. a smaller D) or 'subcycled'.
   //      Keys 'total', 'fiberTotal' and 'tissueTotal' are reserved by the stat paths.
   species: [
     { key: 'gel', label: 'Hydrogel scaffold', kind: 'scaffold', color: '#9fb7c9',
@@ -45,6 +49,12 @@ export const TISSUE_TEMPLATE = {
   //      kBath (/day); `decay` /day. Sources come from the rules (cell and voxel fieldSrc).
   //      Optional `boundary: 'face:+z'` holds the top z layer at the bath value instead
   //      (e.g. oxygen entering from the medium face); default 'bath' relaxes everywhere.
+  //      v0.4 `mode` picks the integration from the diffusion number lam = D·dt/h² and is
+  //      normally left alone ('auto'): explicit while lam ≤ 1/6, sub-cycled above it, and a
+  //      warm-started steady solve ('quasiSteady') once a field is so fast that stepping it in
+  //      time is pointless (oxygen: D/L² ~ 10³/day). 'explicit' pins the v0.3 behaviour, which
+  //      CLAMPS lam at 1/6 — stable, but the field then diffuses with a smaller D than declared.
+  //      TissueEngine.validate() warns once, naming the field, its lam and the mode it chose.
   fields: [
     { key: 'g', label: 'Growth factor', color: '#3fd6c4', D: 0.05, bath: 'Gext', kBath: 4, decay: 0 },
   ],
@@ -55,6 +65,13 @@ export const TISSUE_TEMPLATE = {
   //      `shape.aspect` is aspectMin at state 0 and aspectMax at state 1, so aspectMin >
   //      aspectMax is legal (a cell that gets ROUNDER as the state rises).
   //      `radius` may also be { by: 'a'|'b', min, max } to grow with a state.
+  //      v0.4: `motile: false` is honoured — such a cell keeps its polarity and its place
+  //      (no guidance, no load alignment, no noise draws, no migration) and repulsion moves only
+  //      its motile partner, so it acts as an obstacle. `rCell` overrides the engine's repulsion
+  //      radius for this type (the contact distance of a pair is rCell_i + rCell_j; keep
+  //      2·max(rCell) < h = L/N or validate() warns). `count: 20` seeds an absolute number of
+  //      cells of this type instead of a share (`fraction`); with a role:'cellCount' dial the
+  //      dial still sets the TOTAL and the counted types are seeded first.
   cellTypes: [
     { key: 'cell', label: 'Matrix-building cell',
       colors: ['#4ea3ff', '#ff7a3d'],                      // colour lerped by a
@@ -97,8 +114,9 @@ export const TISSUE_TEMPLATE = {
   //        { at: [from, to], agg: 'min'|'max'|'mean'|'first', … }   aggregated over 0.5 d samples
   //      stat paths: species.<key> | species.<key>.fraction | species.total (with scaffold) |
   //                  species.tissueTotal (without) | fiber.total | scaffold | fa | globalFA | fz |
-  //                  logE | E | cells.a | cells.b | cells.c | fields.<key> | deposition |
-  //                  degradation | ratio | scaffoldFlux | cumDeposition | cumDegradation
+  //                  logE | E | cells.a | cells.b | cells.c | cells.byType.<key>[.a|.b|.c|.n] |
+  //                  fields.<key> | deposition | degradation | ratio | scaffoldFlux |
+  //                  cumDeposition | cumDegradation
   scenarios: [
     { key: 'replace', title: 'Scaffold replacement',
       goal: 'Watch cells replace a dissolving hydrogel with a matrix of their own.',
@@ -180,6 +198,10 @@ export const TISSUE_TEMPLATE = {
 
   // ---- engine numerics this tissue wants (all optional; see ENGINE_DEFAULTS in src/engine.js).
   //      `vox: 1..4` asks for extra per-voxel accumulators (out.vox[k] → ctx.vox[k]); 0 is aSum.
+  // ---- engine numerics this tissue wants (all optional; see ENGINE_DEFAULTS in src/engine.js).
+  //      `loadMode: 'compression'` flips the passive alignment: the tensor (and any cell that
+  //      writes out.loadAlign) then relaxes into the plane PERPENDICULAR to the load axis
+  //      instead of onto it. Default 'tension'.
   engine: { N: 12, dt: 0.02 },
 
   // ---- tissue parameters, passed to makeRules as `p`

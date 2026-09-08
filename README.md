@@ -45,6 +45,12 @@ line (see *Adding a tissue* below).
 - **Download and open.** `dist/tissue-weather.html` is the whole app in one file. Double-click
   it. It fetches Three.js from jsdelivr the first time, so it needs internet on first load;
   after that the browser cache carries it.
+- **No network in the room?** Build the offline copy once, on a machine that does have a
+  connection: `node tools/build_single.mjs --vendor` writes `dist/tissue-weather.offline.html`
+  (about 1.1 MB) with Three.js inlined and no import map. It makes **no network requests at all** —
+  put it on a USB stick or the LMS and double-click it. Use it for teaching if the room's Wi-Fi is
+  a lottery; use `tissue-weather.html` (smaller, cached library, system fonts loaded from Google)
+  everywhere else.
 - **GitHub Pages.** Settings → Pages → *Deploy from a branch* → your branch, folder `/ (root)`.
   The site then lives at `https://<user>.github.io/<repo>/` — for this repository,
   `https://jpeponis.github.io/tissuesimulations/`.
@@ -124,6 +130,7 @@ Blender)* in the About panel. Mouse: drag to orbit, wheel to zoom.
 | `src/render.js` | the Three.js scene: fiber rods, gel haze, scaffold lattice, cells, field clouds, load arrows |
 | `src/plots.js` | the readouts: rolling time-series strips with ghost traces, and the flux gauge |
 | `src/copy.js` | the copy every tissue shares: the live equilibrium sentence and the formatters |
+| `src/recipe.js` | the one fiber-layout recipe the web renderer and the Blender importer both follow |
 | `src/app.js` | the wiring: picker, dials, scenario cards, readouts, legend, About, keyboard, deep links, export |
 | `dist/tissue-weather.html` | the single-file build (`npm run build`); `dist/tissue-weather.artifact.html` is the same page as a fragment |
 | `docs/EXTENDING.md` | **the contract**: what a tissue definition looks like and what the engine, renderer, app, tools and tests promise |
@@ -132,8 +139,8 @@ Blender)* in the About panel. Mouse: drag to orbit, wheel to zoom.
 | `docs/MODEL.md` | biology, equations, parameter table with sources, known simplifications |
 | `docs/TEACHING.md` | learning objectives, 50-minute lesson, guided experiments, misconceptions, assessment |
 | `docs/tissues/cartilage-hydrogel.md` | the literature specification behind the cartilage tissue, every number with a DOI |
-| `tools/` | `build_single.mjs`, `check_dist.mjs`, `new_tissue.mjs`, `run_headless.mjs`, `make_golden.mjs`, `plot_scenarios.py`, `screenshot_app.mjs`, `render_smoke.mjs` |
-| `tests/` | `engine.test.mjs` (conformance for every tissue + the golden regression), `build.test.mjs`, `tools.test.mjs`, `golden/` |
+| `tools/` | `build_single.mjs`, `check_dist.mjs`, `check_params_doc.mjs`, `new_tissue.mjs`, `run_headless.mjs`, `make_golden.mjs`, `plot_scenarios.py`, `screenshot_app.mjs`, `render_smoke.mjs`, `lib/browser.mjs` |
+| `tests/` | `engine.test.mjs` (conformance for every tissue + the golden regressions), `build.test.mjs`, `tools.test.mjs`, `export.test.mjs` (the Blender reader on a fresh export), `fidelity.test.mjs` (the teaching claims, measured), `golden/` |
 | `blender/` | `import_tissue.py` turns an exported trajectory into an animated Blender 4.2 scene; see [`blender/README.md`](blender/README.md) |
 | `CONTRIBUTING.md` | dev setup, the build constraints and why they exist, the PR checklist |
 
@@ -144,9 +151,11 @@ Node ≥ 20, and **no dependencies** — there is nothing to install.
 | command | what it does |
 |---|---|
 | `npm test` | `node --test tests/*.test.mjs`: conformance for every registered tissue (schema, determinism, invariants, every scenario's checks, performance), the fibrous golden regression, the engine API, the build constraints and the tools |
-| `npm run build` | writes `dist/tissue-weather.html` and `dist/tissue-weather.artifact.html` |
+| `npm run build` | writes `dist/tissue-weather.html` and `dist/tissue-weather.artifact.html`. It refuses to write a broken bundle: an unresolved local import, a surviving `import`/`export` statement or a duplicate top-level name is an error with a `src/file:line`, not a dead page |
+| `node tools/build_single.mjs --vendor` | additionally writes `dist/tissue-weather.offline.html` — Three.js inlined, no network at all (needs the library once, from `dist/cdn-cache`, `node_modules` or curl) |
 | `npm run check-dist` | rebuilds into a temp directory and fails if the committed `dist/` is stale |
-| `npm run headless` | runs every scenario of a tissue in Node → `scratch/<tissue>/<run>.csv` (stats over time) and `<run>.json` (a format-2 trajectory). Flags after `--`, e.g. `npm run headless -- --tissue fibrous --days 40` |
+| `npm run headless` | runs every scenario of a tissue in Node → `scratch/<tissue>/<run>.csv` (stats over time) and `<run>.json` (a format-2 trajectory). Flags after `--`, e.g. `npm run headless -- --tissue fibrous --days=40`; `--help` lists them and the runs, and an unknown `--only` name exits 2 instead of writing nothing |
+| `node tools/check_params_doc.mjs [--write]` | keeps the "as built" parameter blocks in `docs/MODEL.md` and `docs/tissues/cartilage-hydrogel.md` equal to the tissue definitions (`npm test` fails when they drift) |
 | `npm run golden` | re-records the golden reference — read `CONTRIBUTING.md` first |
 | `npm run new-tissue -- <key> "<Name>"` | scaffolds and registers a new tissue definition |
 | `npm run screenshot` | drives the real app in headless Chromium (needs Playwright) and saves screenshots |
@@ -215,8 +224,9 @@ put the two library files next to the HTML.
 - **Load is static and uniaxial** along z, and there is no compaction of the construct.
 - **Small domain, seeded randomness.** 12³ voxels ≈ 300 µm on a side; a different seed moves the
   cells and the wound site, though the population behaviour is stable.
-- **The 3D scene needs a GPU and a CDN.** The first load fetches Three.js; a sandboxed viewer that
-  blocks downloads also blocks *Export trajectory*.
+- **The 3D scene needs a GPU and a CDN.** The first load fetches Three.js (build the offline copy
+  above if that is a problem); a sandboxed viewer that blocks downloads also blocks
+  *Export trajectory*.
 - Per-tissue caveats are listed in each tissue's About panel and in `docs/MODEL.md` §5 (fibrous)
   and `docs/tissues/cartilage-hydrogel.md` §6 (cartilage).
 
@@ -226,9 +236,13 @@ Run a scenario, then use **About → Export trajectory (JSON for Blender)** — 
 entirely with `npm run headless`, which writes the same format. Then:
 
 ```bash
+npm run headless -- --tissue fibrous --only maturation --days 60   # writes scratch/fibrous/maturation.json
 blender --background --python blender/import_tissue.py -- \
-    --input scratch/fibrous/maturation_traj.json --out render.png --all-frames
+    --input scratch/fibrous/maturation.json --out render.png --all-frames
 ```
+
+(`--blender PATH` on the headless run writes the same trajectory to `PATH` as well — that, and only
+that, is what the older `maturation_traj.json` duplicate was for.)
 
 [`blender/README.md`](blender/README.md) covers the GUI workflow, the trajectory formats, the
 renderer switches, the synthetic sample trajectories (no browser or Node needed) and the limits.

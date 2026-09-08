@@ -30,7 +30,7 @@
 </script>
 </head>
 <body>
-<div id="viewport"><canvas id="c"></canvas></div>
+<div id="viewport"><canvas id="c" tabindex="0" aria-label="3D view"></canvas></div>
 <div id="hud">
   <h1>Tissue Weather — render smoke</h1>
   <div class="row"><span>tissue</span><span id="tissues"></span></div>
@@ -163,6 +163,9 @@ function fakeFibrous(B, t, dials) {
   S.dials.Gext = Gext; S.dials.strain = strain; S.dials.protease = protease; S.time = t;
   const dens = 0.06 + 1.05 * ramp(t, 22), align = ramp(t, 18) * (0.35 + 0.65 * strain), matur = ramp(t, 28);
   const ws = t < 4 ? 0 : 0.9 * Math.exp(-(t - 4) / 18);
+  // engine.injure() records { center, radius, time } in WORLD units; the renderer marks it with a
+  // wire sphere whose opacity decays from the injury (B4). ?wound=0 keeps the state's wound null.
+  S.wound = (woundOn && t >= 4) ? { center: [B.wc[0] * S.L, B.wc[1] * S.L, B.wc[2] * S.L], radius: B.wr * S.L, time: 4, nVox: 0 } : null;
   for (let v = 0; v < V; v++) {
     const s = B.spat[v], jt = B.jit[v], w = B.wound[v] * ws;
     let rho = Math.min(2, dens * (0.6 + 0.6 * s) * (0.9 + 0.2 * jt) * (1 - 0.85 * w));
@@ -260,10 +263,15 @@ const flag = (k, d) => (q.has(k) ? q.get(k) !== '0' && q.get(k) !== 'false' : d)
 const N = num('N', 12), nCells = num('n', 160), K = num('K', 3);
 let currentTissue = TISSUES[q.get('tissue')] ? q.get('tissue') : 'fibrous';
 let t = num('t', 0), speed = num('speed', 4), playing = flag('play', false);
-const layers = { fibers: flag('fibers', true), cells: flag('cells', true), scaffold: flag('scaffold', true), gel: flag('gel', true), fields: {} };
+const layers = { fibers: flag('fibers', true), cells: flag('cells', true), scaffold: flag('scaffold', true), gel: flag('gel', true), wound: flag('woundLayer', true), fields: {} };
+// ?wound=0 drops state.wound (the renderer must then hide the marker); ?revision=1 attaches the
+// engine's monotonic `state.revision`, which is what update() dirty-checks against (B1). Without
+// it every state looks new — the fallback this page exercises by default.
+const woundOn = flag('wound', true);
+let revisionOn = flag('revision', false);
 for (const k of (q.get('fields') || '').split(',').filter(Boolean)) layers.fields[k] = true;
 const dials = {};
-for (const [k, v] of q) if (!Number.isNaN(+v) && v !== '' && !['t', 'N', 'n', 'K', 'speed'].includes(k) && !k.startsWith('opt.')) dials[k] = +v;
+for (const [k, v] of q) if (!Number.isNaN(+v) && v !== '' && !['t', 'N', 'n', 'K', 'speed', 'wound', 'woundLayer', 'revision'].includes(k) && !k.startsWith('opt.')) dials[k] = +v;
 const errBox = document.getElementById('err');
 const errors = [];
 const logErr = (msg) => { errors.push(msg); errBox.textContent = errors.slice(-6).join('\n'); };
@@ -278,7 +286,11 @@ if (!flag('hud', true)) document.getElementById('hud').hidden = true;
 if (flag('radiusByState', false)) {
   TISSUES.cartilage.cellTypes[0].radius = { by: 'b', min: 0.018, max: 0.052 };
 }
+const autoRotateEvents = [];
 const rendererOpts = { K, toneMapping: q.get('tm') || 'aces', exposure: num('exposure', 1.08) };
+// B3: the renderer tells the page every time it starts or stops rotating (pointerdown, keydown,
+// setAutoRotate) so a toggle in the UI can follow it instead of going out of sync.
+rendererOpts.onAutoRotate = (on) => { autoRotateEvents.push(!!on); const cb = document.getElementById('auto'); if (cb) cb.checked = !!on; };
 if (q.has('auto')) rendererOpts.autoRotate = flag('auto', true);
 for (const [k, v] of q) if (k.startsWith('opt.')) rendererOpts[k.slice(4)] = v === 'true' ? true : v === 'false' ? false : (v !== '' && !Number.isNaN(+v)) ? +v : v;
 const canvas = document.getElementById('c');
@@ -353,11 +365,20 @@ function stats() {
 let readyResolve; const ready = new Promise((r) => { readyResolve = r; });
 const frameWaiters = [];
 let lastNow = performance.now(), state = null;
+// A stand-in for the engine's revision counter: it only moves when something the renderer draws
+// moved (time, dials, tissue), which is exactly the contract update() dirty-checks against.
+let revision = 0, revKey = '';
+function bumpRevision(s) {
+  const k = `${currentTissue}|${t}|${Object.keys(dials).sort().map((k2) => `${k2}=${dials[k2]}`).join(',')}`;
+  if (k !== revKey) { revKey = k; revision++; }
+  s.revision = revision;
+}
 function loop(now) {
   const dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
   if (playing) { t = Math.min(60, t + speed * dt); $('t').value = t; if (t >= 60) { playing = false; $('play').textContent = 'Play'; } }
   $('tval').textContent = t.toFixed(1);
   state = makeFakeState(N, nCells, t, dials, currentTissue);
+  if (revisionOn) bumpRevision(state); else delete state.revision;
   const a = performance.now();
   renderer.update(state, layers);
   const b = performance.now();
@@ -404,6 +425,78 @@ function probePixels() {
     img.src = url;
   });
 }
+// Instance-buffer upload counters: three bumps `.version` on every `needsUpdate = true`, so a
+// frame that uploaded nothing leaves these unchanged — how the harness proves the B1 dirty check
+// really skipped the work instead of just reporting a small updateMs.
+function bufferVersions() {
+  const r = renderer, out = { fibers: -1, cells: -1, gel: -1, scaffold: -1, updates: r.stats.updates, skipped: r.stats.skipped, updateMs: +r.stats.updateMs.toFixed(4) };
+  if (r.fibers) out.fibers = r.fibers.mesh.instanceMatrix.version;
+  if (r.cells) out.cells = r.cells.mesh.instanceMatrix.version;
+  if (r.gel) out.gel = r.gel.mesh ? r.gel.mesh.instanceMatrix.version : r.gel.valAttr.version;
+  if (r.scaffold) out.scaffold = r.scaffold.mesh.instanceMatrix.version;
+  return out;
+}
+
+function cameraState() {
+  const c = renderer.camera, t2 = renderer.controls.target;
+  return { pos: [+c.position.x.toFixed(6), +c.position.y.toFixed(6), +c.position.z.toFixed(6)],
+           target: [+t2.x.toFixed(6), +t2.y.toFixed(6), +t2.z.toFixed(6)],
+           dist: +c.position.distanceTo(t2).toFixed(6), autoRotate: renderer.controls.autoRotate };
+}
+
+// The wire sphere the renderer draws for state.wound.
+function woundState() {
+  const W = renderer.woundMarker;
+  if (!W) return null;
+  return { visible: W.obj.visible, opacity: +W.mat.opacity.toFixed(4),
+           pos: [+W.obj.position.x.toFixed(4), +W.obj.position.y.toFixed(4), +W.obj.position.z.toFixed(4)],
+           scale: +W.obj.scale.x.toFixed(4) };
+}
+
+/**
+ * GPU vs CPU tone curve (E4): draw flat MeshBasicMaterial patches of known LINEAR colours in a
+ * throw-away renderer with the given tone mapping, read the 8-bit pixels back, and return them
+ * next to TissueRenderer.toneMap() + the same sRGB encode. The legend swatch claim ("matches the
+ * lit view's colour to ≤ 1/255") is exactly this comparison.
+ */
+async function toneCurveCheck(mode = 'aces', exposure = 1.08, colors = null) {
+  const THREE = await import('three');
+  const cols = colors || [[0.8, 0.35, 0.05], [0.05, 0.5, 0.45], [0.02, 0.02, 0.02], [1, 1, 1], [0.25, 0.25, 0.3], [0.6, 0.1, 0.55]];
+  const cv = document.createElement('canvas'); cv.width = 16 * cols.length; cv.height = 16;
+  const r2 = new THREE.WebGLRenderer({ canvas: cv, antialias: false, alpha: false });
+  r2.outputColorSpace = THREE.SRGBColorSpace;
+  r2.toneMapping = mode === 'none' ? THREE.NoToneMapping : mode === 'agx' ? THREE.AgXToneMapping : THREE.ACESFilmicToneMapping;
+  r2.toneMappingExposure = exposure;
+  r2.setSize(cv.width, cv.height, false);
+  const scene = new THREE.Scene();
+  const cam = new THREE.OrthographicCamera(0, cols.length, 1, 0, -1, 1);
+  const mats = [];
+  cols.forEach((c, i) => {
+    const m = new THREE.MeshBasicMaterial({ color: new THREE.Color().setRGB(c[0], c[1], c[2], THREE.LinearSRGBColorSpace), toneMapped: true });
+    mats.push(m);
+    const q = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), m);
+    q.position.set(i + 0.5, 0.5, 0);
+    scene.add(q);
+  });
+  r2.render(scene, cam);
+  const gl = r2.getContext();
+  const px = new Uint8Array(cv.width * cv.height * 4);
+  gl.readPixels(0, 0, cv.width, cv.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  const out = [];
+  cols.forEach((c, i) => {
+    const x = i * 16 + 8, y = 8, o = (y * cv.width + x) * 4;
+    const gpu = [px[o], px[o + 1], px[o + 2]];
+    const cpuCss = TissueRenderer._css(TissueRenderer.toneMap(c, mode, exposure));
+    const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(cpuCss);
+    const cpu = [+m[1], +m[2], +m[3]];
+    out.push({ linear: c, gpu, cpu, delta: Math.max(Math.abs(gpu[0] - cpu[0]), Math.abs(gpu[1] - cpu[1]), Math.abs(gpu[2] - cpu[2])) });
+  });
+  for (const m of mats) m.dispose();
+  scene.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+  r2.dispose();
+  return { mode, exposure, entries: out, maxDelta: out.reduce((a, e) => Math.max(a, e.delta), 0) };
+}
+
 function glInfo() {
   const gl = renderer.renderer.getContext();
   const ext = gl.getExtension('WEBGL_debug_renderer_info');
@@ -411,7 +504,11 @@ function glInfo() {
            dpr: renderer.renderer.getPixelRatio(), width: canvas.width, height: canvas.height, triangles: renderer.renderer.info.render.triangles, calls: renderer.renderer.info.render.calls };
 }
 window.__smoke = {
-  ready, renderer, makeFakeState, errors, tissues: TISSUES,
+  ready, renderer, makeFakeState, errors, tissues: TISSUES, autoRotateEvents,
+  bufferVersions, cameraState, woundState, toneCurveCheck,
+  focusCanvas: () => canvas.focus(),
+  bumpRevision: () => { revision++; if (state) state.revision = revision; },
+  setRevisionMode: (on) => { revisionOn = !!on; if (!on && state) delete state.revision; },
   get tissue() { return currentTissue; },
   setTissue: (k) => applyTissue(k),
   setTime: (v) => { t = v; playing = false; },

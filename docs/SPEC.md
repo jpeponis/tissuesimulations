@@ -45,13 +45,18 @@ src/render.js         Three.js scene: fibers, gel, scaffold, cells, fields, load
 src/plots.js          2D canvas time-series + flux gauge (no deps)
 src/copy.js           shared student-facing copy helpers (per-tissue text lives in the definitions)
 src/app.js            wires engine ↔ render ↔ UI; the panel is generated from the definition; export JSON
-tools/build_single.mjs  inlines src/*.js into dist/tissue-weather.html (single-file artifact)
+tools/build_single.mjs  inlines src/*.js into dist/tissue-weather.html (single-file artifact);
+                        --vendor also writes dist/tissue-weather.offline.html with Three.js inlined
 tools/check_dist.mjs    rebuilds into a temp dir and fails if dist/ is stale
+tools/check_params_doc.mjs  keeps the "as built" parameter blocks in the docs equal to the code
 tools/new_tissue.mjs    scaffolds and registers a new tissue definition
-tools/run_headless.mjs  node: run scenarios, dump CSV + JSON trajectory
+tools/run_headless.mjs  node: run scenarios, dump CSV + JSON trajectory (--help for the options)
 tools/plot_scenarios.py matplotlib check plots of the CSVs
+tools/lib/browser.mjs   the shared Playwright harness (serve, launch, CDN cache) for the two smoke tools
 tests/engine.test.mjs   node --test tests/*.test.mjs: conformance per tissue, invariants, scenario checks, golden regression
 tests/build.test.mjs, tests/tools.test.mjs  build constraints and the developer tools
+tests/export.test.mjs   the trajectory format, writer to reader (python3 --dry-run of the Blender importer)
+tests/fidelity.test.mjs the teaching claims, measured on the current engine
 blender/import_tissue.py  bpy script: JSON trajectory → animated fibers + cells (Blender 4.2 LTS)
 docs/EXTENDING.md     the v0.2 contract between the engine and a tissue definition
 docs/ARCHITECTURE.md  data flow, the single-file build, the file map
@@ -67,9 +72,11 @@ Hard constraints (the single-file artifact build depends on them):
   tissues/* (`index.js` last), plots, render, app. `tests/build.test.mjs`
   enforces these three rules.
 - Three.js is loaded via an import map from
-  `https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js` and
+  `https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js` and
   `https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/` (addons). No other
-  external hosts. No external CSS/images. Everything else inline.
+  external hosts besides the Google Fonts stylesheet. No external images. Everything else inline.
+  `tools/build_single.mjs --vendor` produces a variant with the library inlined and the import map
+  removed, for a room with no network at all.
 - `engine.js` and every file under `src/tissues/` must not touch `window`,
   `document`, `performance`, or `Math.random` directly — all randomness comes from
   a seeded PRNG (mulberry32) so runs are reproducible.
@@ -100,7 +107,9 @@ arrays `Txx,Tyy,Tzz,Txy,Txz,Tyz`.
   `FA = sqrt(3/2) * ||T - (rho/3) I||_F / ||T||_F` (0 isotropic, 1 one axis);
   principal axis `f` by 2 warm-started power iterations on `T` (store `fx,fy,fz`).
   Stiffness (kPa):
-  `E = E0 + Escale * rho^2 * (1 + kMat*phiMat) * (1 + kStrain*strain)`.
+  `E = E0 + Escale * rho^2 * (1 + kMat*phiMat) * (1 + kStrain*strain)`
+  (as built `kStrain = 0.5`, see §3; the readout plots the mean of `log10 E`, i.e. a
+  GEOMETRIC mean in kPa).
   Defaults `E0 = 0.3`, `Escale = 20`, `kMat = 3`, `kStrain = 1` (so rho=1
   mature ≈ 80 kPa; scar-like; provisional ≈ 5–20 kPa; empty ≈ 0.3 kPa).
 
@@ -159,10 +168,10 @@ resists proteolysis). Maturation `mat = kMat0 * rhoNew * (1 + kLox*alphaLocal)`,
 | dial | symbol | range | metaphor | biology |
 |---|---|---|---|---|
 | Growth-factor bath | `Gext` | 0..1 | humidity | TGF-β / serum in the medium; drives activation & secretion |
-| Mechanical load | `strain` | 0..1 | pressure | static uniaxial strain along z: aligns fibers/cells, raises sensed tension & stiffness |
-| Protease activity | `proteaseDial` | 0..1 | temperature | MMP vs TIMP balance / inflammation; sets basal degradation |
+| Mechanical load | `strain` | 0..1 | pressure | static uniaxial load along z as a 0–1 INDEX (not engineering strain — physiological strains are 1–8 %; the app shows it as 0.60, not "60 %"): aligns fibers/cells, raises sensed tension & stiffness |
+| Protease activity | `proteaseDial` | 0..1 | temperature | MMP vs TIMP balance / inflammation; scales the enzyme cells make (`mBasal·P³`). It never switches degradation off: a background `mMin` and the under-tension term `mAct·(1−H)` are always there, so at dial 0 the matrix is still cut, slowly |
 | Cell number | `nCells` | 40..400 | droplet nuclei | seeding density |
-| Speed | days/s | 0.5..20 | — | — |
+| Speed | days/s | 0.25..20 (presets Watch 1 · Weeks 5 · Months 20; default 5) | — | — |
 
 Buttons: Play/Pause, Step, Reset (current scenario), Injure (spherical wound
 of radius 0.25 L at a random spot: zero T and rhoMat, add `g += 0.6`, `m += 0.8`
@@ -181,13 +190,20 @@ in the wound), Export JSON (trajectory snapshot every `exportEvery` days).
    stiffness positive feedback; dense, poorly aligned, stiff, stays high even if
    you later lower Gext (hysteresis — the key teaching moment).
 4. **Wound healing** — mature tissue, then Injure. Expect: local burst of g and m,
-   cells activate near wound, fill with immature isotropic matrix, slowly matures;
-   alignment may never fully recover (scar).
+   the cells already there keep depositing (there is no chemotaxis), the hole fills
+   with immature isotropic matrix and slowly matures. As built the patch is clearly
+   less aligned than its neighbours at ~3 weeks (FA 0.40 vs 0.54) and has nearly caught
+   up by 8 weeks (0.49 vs 0.54) — the model has no memory of the wound, which is one of
+   the things a real scar has (docs/TEACHING.md §4).
 5. **Empty sandbox** — rho=0.02, all dials mid; free play.
 
 ### 1.8 Readouts (plots.js)
 Time series (rolling 90 d window): mean `rho` split into new/mature (stacked
-area), mean FA, mean log10 E, mean alpha. Flux gauge: total deposition rate vs
+area), alignment, mean log10 E, mean alpha. As built the alignment chart plots the
+WHOLE-TISSUE coherence `globalFA` (the anisotropy of the summed tensor) as the headline
+trace, with the per-voxel mean `fa` beside it as "local anisotropy" — the two differ by
+a lot in a scarred tissue (fibrosis at day 90: fa 0.37, globalFA 0.29), and the scenario
+`checks` and the goldens stay on `fa`. Flux gauge: total deposition rate vs
 total degradation rate this step, rendered as a two-sided bar
 ("condensing ⟷ evaporating") — this is the equilibrium the dials push.
 
@@ -244,6 +260,10 @@ could not produce the scenario behaviours of 1.7. `src/tissues/fibrous.js` carri
 full tuning log in its header comment (in v0.1 it lived in `src/model.js`); `docs/MODEL.md` §4 lists the biology
 reviewer's recommendations and which were adopted. Summary of the deviations:
 
+The exact numbers the code runs are generated into `docs/MODEL.md` §3 (the `<!-- params:fibrous -->`
+block, written by `node tools/check_params_doc.mjs --write` and checked by `npm test`); this table is
+the record of what was changed and why.
+
 | item | spec | as built | why |
 |---|---|---|---|
 | secretion per cell | `sBasal + sAct·α` (0.004, 0.05) | `(0.005 + 2.5·α²)·(0.5 + 0.5·H)·(1 − ρ/1.6)²` | spec gain ~50× too low to reach ρ≈1 in 60 d; α² keeps quiescent cells from filling a low-GF tissue; crowding term gives a steady state |
@@ -258,9 +278,10 @@ reviewer's recommendations and which were adopted. Summary of the deviations:
 | contact guidance / noise | `kGuide 2`, `σ 0.6` | `6`, `2.5 rad/√d` | polarity memory of hours, not days |
 | speed | as spec | × grip `0.5 + 0.5·min(1, ρ/0.5)`; comment fixed: 0.7 L/d ≈ 9 µm/h | Metzcar-style tent rejected: cells left sparse regions and wounds never refilled |
 | kStrain | 1 | 0.5 | |
+| kAlign | 0.4 /d | 0.6 /d | traction realignment toward the CELL's axis; cells reorganise a gel in hours to a day. Not a lever on the alignment readout — at the maturation preset FA(60 d) is 0.60 at 0.6 and 0.62 at 0.4, because only `kLoadFib` pulls fibres onto the load axis. Both goldens were recorded at 0.6 |
 | injury | instantaneous g/m bursts | bursts + inflammation field (g source 4/d, m source 1/d, τ 5 d) | bath exchange erases a burst in hours |
 | wound dials | unspecified | Gext 0.5, strain 0.45, protease 0.4 | |
-| sandbox init | ρ 0.02 | ρ 0.15 | so "evaporates" is a visible event |
+| sandbox init | ρ 0.02 | ρ 0.02 (unchanged) | the app preset is the spec value; the denser ρ 0.15 start, where "evaporates" is a visible event, survives as the headless variant `sandbox_evaporate` |
 
 Spec inconsistencies found by the implementers, kept here for the record:
 `kappa` undefined; 30 µm/h at L = 300 µm is 2.4 L/d, not 0.7; `kBath, kGcell,

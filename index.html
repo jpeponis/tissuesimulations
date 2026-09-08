@@ -6,7 +6,15 @@
 <title>Tissue Weather</title>
 <meta name="description" content="A 3D interactive for teaching dynamic reciprocity: cells and extracellular matrix remodelling each other under growth factor, load and protease dials.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<!-- The 3D library is four hops down the load waterfall (page → app.js → dynamic import of
+     render.js → three). Preload the two modules the moment the HTML is parsed, so they arrive in
+     parallel with the app instead of after it. `crossorigin` is required: a module is fetched in
+     CORS mode, and a preload without it warms a second, unusable cache entry.
+     tools/build_single.mjs --vendor strips both links (the offline page carries three inline). -->
+<link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js" crossorigin>
+<link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js" crossorigin>
 <style>
 /* Tissue Weather — single deliberate dark-field treatment. The 3D viewport is a
    dark-field micrograph; the panel is an instrument console beside it. Every
@@ -20,7 +28,9 @@
   --panel: #10161e;         /* console */
   --surface: #161e28;       /* cards, inputs */
   --surface-2: #1c2632;
-  --rule: #243040;
+  --rule: #243040;          /* dividers and card edges: decoration */
+  --control-border: #60758f; /* the visible EDGE of an interactive control: 3.8:1 on --panel,
+                                3.6:1 on --surface, 3.2:1 on --surface-2 (WCAG 1.4.11) */
   --text: #e6edf3;
   --muted: #8b9bb0;
   --faint: #7d8ea6;         /* quiet but readable: ≥ 4.5:1 on every surface */
@@ -37,6 +47,8 @@
   --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --panel-w: 392px;
+  --sentence: 15px;
+  --clock: 13px;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -49,7 +61,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 a { color: var(--amber-ink); }
 kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--surface-2); color: var(--text); }
-.visually-hidden { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+.visually-hidden, .sr-only { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+/* skip link: first thing in the tab order, invisible until it has focus */
+.skip-link { position: absolute; left: -9999px; top: 0; z-index: 20; background: var(--surface-2); color: var(--text); border: 1px solid var(--control-border); border-radius: 0 0 8px 0; padding: 8px 14px; text-decoration: none; }
+.skip-link:focus { left: 0; }
 
 #app { display: grid; grid-template-columns: 1fr var(--panel-w); height: 100vh; height: 100dvh; }
 #stage { position: relative; min-width: 0; min-height: 0; background: var(--ground); }
@@ -63,9 +78,12 @@ kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--ru
 .brand { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 30px; line-height: 1; letter-spacing: -0.01em; }
 .brand em { font-style: italic; color: var(--amber-ink); }
 .brand small { font-family: var(--font-ui); font-size: 12px; color: var(--muted); margin-left: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
-.clock { font-family: var(--font-mono); font-size: 13px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.clock { font-family: var(--font-mono); font-size: var(--clock); color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; font-variant-numeric: tabular-nums; align-items: baseline; }
+.clock .week { color: var(--faint); }
+#fps { display: none; }                 /* written every second, shown only with ?debug=1 */
+body.debug #fps { display: inline; }
 .clock b { color: var(--text); font-weight: 500; }
-.equilibrium { margin: 4px 0 0; font-size: 15px; max-width: 46ch; color: var(--text); text-wrap: pretty; text-shadow: 0 1px 8px rgba(0,0,0,0.7); min-height: 1.4em; }
+.equilibrium { margin: 4px 0 0; font-size: var(--sentence); max-width: 46ch; color: var(--text); text-wrap: pretty; text-shadow: 0 1px 8px rgba(0,0,0,0.7); min-height: 1.4em; }
 .equilibrium[data-state]::before {
   content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; background: var(--muted);
 }
@@ -75,11 +93,13 @@ kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--ru
 
 /* legend: a collapsible so it stays reachable on small screens */
 .hud-legend { left: 20px; bottom: 16px; font-size: 12px; color: var(--muted); max-width: min(48%, 420px); pointer-events: auto; }
-.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--rule); background: rgba(16,22,30,0.85); color: var(--text); font-size: 12px; }
+.hud-legend summary { cursor: pointer; display: inline-block; min-height: 24px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--text); font-size: 12px; }
 .hud-legend summary::-webkit-details-marker { display: none; }
 .hud-legend summary::before { content: "▸ "; color: var(--muted); }
 .hud-legend[open] summary::before { content: "▾ "; }
-#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.72); border-radius: 8px; padding: 8px 10px; }
+/* the open legend + guide must never reach the HUD at the top, on any screen (C14) */
+#legend { margin-top: 8px; display: grid; gap: 6px; background: rgba(16,22,30,0.72); border-radius: 8px; padding: 8px 10px; max-height: min(45vh, calc(100vh - 220px)); overflow-y: auto; overscroll-behavior: contain; }
+.legend-scale .scale-swatch { background: linear-gradient(90deg, var(--deco) 0 2px, transparent 2px calc(100% - 2px), var(--deco) calc(100% - 2px)); height: 6px; border-radius: 0; }
 .legend-swatches { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
 .legend-row { display: flex; align-items: center; gap: 8px; }
 .swatch { width: 34px; height: 8px; border-radius: 4px; flex: none; }
@@ -88,9 +108,14 @@ kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--ru
 .legend-guide[open] summary::before { content: "▾ "; }
 .legend-guide ul { margin: 6px 0 0; padding-left: 16px; display: grid; gap: 4px; max-width: 46ch; }
 
-.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; max-width: 48%; }
-.chip { border: 1px solid var(--rule); background: rgba(16,22,30,0.85); color: var(--muted); border-radius: 999px; padding: 4px 11px; min-height: 28px; font-size: 12px; cursor: pointer; }
-.chip[aria-pressed="true"] { color: var(--text); border-color: var(--muted); background: var(--surface-2); }
+.hud-layers { right: 16px; bottom: 16px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 48%; }
+.chips-label { flex: 0 0 100%; text-align: right; font-size: 12px; color: var(--muted); text-transform: lowercase; letter-spacing: 0.04em; text-shadow: 0 1px 6px rgba(0,0,0,0.8); margin-bottom: 1px; }
+.chip { border: 1px solid var(--control-border); background: rgba(16,22,30,0.85); color: var(--muted); border-radius: 999px; padding: 4px 11px; min-height: 28px; font-size: 12px; cursor: pointer; }
+/* a pressed chip is not distinguished by colour alone: the tick has its space reserved, so
+   turning a layer on and off never reflows the row (C7) */
+.chip[aria-pressed]::before { content: "✓"; visibility: hidden; margin-right: 5px; font-size: 11px; }
+.chip[aria-pressed="true"]::before { visibility: visible; }
+.chip[aria-pressed="true"] { color: var(--text); border-color: var(--text); background: var(--surface-2); }
 .chip:hover { color: var(--text); }
 
 /* notices: CDN / WebGL failures */
@@ -102,9 +127,15 @@ kbd { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--ru
 
 /* Console */
 #panel { background: var(--panel); border-left: 1px solid var(--rule); overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 18px; padding: 16px 18px 28px; }
+#panel:focus { outline: none; }
 section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+/* Run rides at the top of the console (C8). Play, +1 day, +7 days, Injure, Reset and the speed
+   were ~1.6 screens below the fold at 1440×900 with four dials, and further with seven. The
+   section is opaque and pulls its own top padding over the 18 px flex gap so nothing shows
+   through while the rest of the console scrolls under it. */
+.run { position: sticky; top: 0; z-index: 5; background: var(--panel); padding: 18px 0 10px; margin: -18px 0 0; border-bottom: 1px solid var(--rule); }
 
-.segmented { display: flex; margin: 0; padding: 0; min-width: 0; min-inline-size: 0; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.segmented { display: flex; margin: 0; padding: 0; min-width: 0; min-inline-size: 0; border: 1px solid var(--control-border); border-radius: 8px; overflow: hidden; background: var(--surface); }
 .segmented .seg { flex: 1; position: relative; min-width: 0; }
 .segmented .seg + .seg { border-left: 1px solid var(--rule); }
 .segmented input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
@@ -114,13 +145,16 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .segmented input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: -3px; border-radius: 6px; }
 .tissue-short { margin: 6px 0 0; font-size: 12px; color: var(--faint); }
 
-.hint-card { display: flex; gap: 10px; align-items: center; background: var(--surface); border-left: 3px solid var(--amber); border-radius: 8px; padding: 10px 12px; font-size: 13px; }
-.hint-card p { margin: 0; flex: 1; }
+.hint-card { display: flex; gap: 10px; align-items: flex-start; background: var(--surface); border-left: 3px solid var(--amber); border-radius: 8px; padding: 10px 12px; font-size: 13px; }
+.hint-card .hint-body { flex: 1; display: grid; gap: 6px; min-width: 0; }
+.hint-card p { margin: 0; }
+.hint-card .hint-controls { color: var(--muted); }
+.hint-card .linkish { border: 0; background: none; padding: 0; min-height: 24px; color: var(--amber-ink); text-decoration: underline; cursor: pointer; font-size: 13px; }
 .hint-card b { color: var(--amber-ink); font-weight: 500; }
-.hint-card button { border: 1px solid var(--rule); background: var(--surface-2); border-radius: 6px; padding: 5px 10px; min-height: 28px; cursor: pointer; font-size: 12px; color: var(--text); }
+.hint-card button { border: 1px solid var(--control-border); background: var(--surface-2); border-radius: 6px; padding: 5px 10px; min-height: 28px; cursor: pointer; font-size: 12px; color: var(--text); }
 
 .scenarios { display: flex; flex-wrap: wrap; gap: 6px; }
-.scenario-btn { border: 1px solid var(--rule); background: var(--surface); border-radius: 6px; padding: 6px 10px; min-height: 32px; cursor: pointer; color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 7px; }
+.scenario-btn { border: 1px solid var(--control-border); background: var(--surface); border-radius: 6px; padding: 6px 10px; min-height: 32px; cursor: pointer; color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 7px; }
 .scenario-btn kbd { font-size: 10px; padding: 0 4px; color: var(--muted); border-bottom-width: 1px; }
 .scenario-btn[aria-pressed="true"] { color: var(--text); border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
 .scenario-btn[aria-pressed="true"] kbd { color: var(--text); }
@@ -135,7 +169,7 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .scenario-card summary { cursor: pointer; color: var(--muted); min-height: 24px; }
 .scenario-card .note { color: var(--faint); }
 
-.dial { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "label value" "slider slider" "hint hint"; gap: 2px 10px; padding: 10px 0; border-top: 1px solid var(--rule); }
+.dial { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "label value" "slider slider" "hint hint" "more more"; gap: 2px 10px; padding: 10px 0; border-top: 1px solid var(--rule); }
 .dial:first-of-type { border-top: 0; }
 .dial label { grid-area: label; font-weight: 500; display: flex; align-items: baseline; gap: 8px; }
 .dial .metaphor { font-family: var(--font-display); font-style: italic; color: var(--amber-ink); font-size: 15px; font-weight: 400; }
@@ -144,9 +178,14 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .dial .hint { grid-area: hint; font-size: 12px; color: var(--muted); }
 .dial .hint b { color: var(--text); font-weight: 500; }
 .dial .metaphor-note { color: var(--faint); font-style: italic; }
+.dial-more { grid-area: more; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.dial-more summary { cursor: pointer; color: var(--faint); min-height: 24px; line-height: 24px; font-size: 11px; }
+.dial-more summary::marker { color: var(--deco); }
+.dial-more p { margin: 4px 0 0; }
+.dial-more b { color: var(--text); font-weight: 500; }
 
-.transport { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-.transport button { border: 1px solid var(--rule); background: var(--surface); border-radius: 6px; padding: 8px 6px; min-height: 36px; cursor: pointer; font-weight: 500; font-size: 13px; }
+.transport { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 6px; }
+.transport button { border: 1px solid var(--control-border); background: var(--surface); border-radius: 6px; padding: 8px 6px; min-height: 36px; cursor: pointer; font-weight: 500; font-size: 13px; }
 .transport button:hover { background: var(--surface-2); }
 .transport button.primary { background: var(--amber); color: #1a1206; border-color: var(--amber); }
 .transport button.primary:hover { background: var(--amber-ink); }
@@ -158,9 +197,9 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .speed .speed-presets { grid-column: 2 / -1; display: flex; gap: 6px; flex-wrap: wrap; }
 .speed .speed-presets .chip { background: var(--surface); }
 .share { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
-.share button, .tools-row button { border: 1px solid var(--rule); background: var(--surface); border-radius: 6px; padding: 5px 10px; min-height: 28px; cursor: pointer; font-size: 12px; color: var(--text); }
+.share button, .tools-row button { border: 1px solid var(--control-border); background: var(--surface); border-radius: 6px; padding: 5px 10px; min-height: 28px; cursor: pointer; font-size: 12px; color: var(--text); }
 .share button:hover, .tools-row button:hover { background: var(--surface-2); }
-.share .link-out { flex: 1 1 100%; min-height: 28px; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); color: var(--text); font-family: var(--font-mono); font-size: 11px; padding: 4px 8px; }
+.share .link-out { flex: 1 1 100%; min-height: 28px; border: 1px solid var(--control-border); border-radius: 6px; background: var(--surface); color: var(--text); font-family: var(--font-mono); font-size: 11px; padding: 4px 8px; }
 .share .link-out[hidden] { display: none; }
 
 .readout { display: grid; gap: 2px; margin-bottom: 12px; }
@@ -175,6 +214,11 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .readout canvas { width: 100%; height: 84px; display: block; background: var(--surface); border-radius: 6px; }
 .readout .keys { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--muted); min-height: 14px; }
 .readout .keys i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.readout .keys i.circle { border-radius: 50%; }
+.readout .keys i.square { border-radius: 1px; }
+.readout .keys i.diamond { border-radius: 1px; transform: rotate(45deg) scale(0.82); }
+.readout .keys i.hatch { background-image: repeating-linear-gradient(45deg, rgba(22,30,40,0.85) 0 1px, transparent 1px 3px); }
+.readout canvas:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .readout .keys i.dash { width: 14px; height: 0; border-top: 2px dashed var(--muted); vertical-align: 3px; border-radius: 0; }
 .readout .keys [hidden] { display: none; }
 .gauge canvas { width: 100%; height: 62px; display: block; background: var(--surface); border-radius: 6px; }
@@ -188,7 +232,15 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 #stats-table th, #stats-table td { text-align: left; padding: 4px 6px; border-top: 1px solid var(--rule); vertical-align: top; }
 #stats-table thead th { color: var(--muted); font-weight: 500; border-top: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
 #stats-table tbody th { font-weight: 500; }
-#stats-table td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+#stats-table td.num, .history td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.history { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.history summary { cursor: pointer; min-height: 24px; color: var(--muted); }
+.history .history-out { overflow-x: auto; margin-top: 6px; }
+.history table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.history caption { text-align: left; color: var(--faint); padding: 0 0 4px; font-family: var(--font-mono); }
+.history th, .history td { text-align: left; padding: 3px 6px; border-top: 1px solid var(--rule); white-space: nowrap; }
+.history thead th { color: var(--muted); font-weight: 500; border-top: 0; }
+.history tbody th { font-weight: 500; color: var(--text); }
 
 .about { color: var(--muted); font-size: 13px; }
 .about summary { cursor: pointer; color: var(--text); font-weight: 500; min-height: 24px; }
@@ -200,12 +252,43 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
 .about dd { margin: 0; }
 .about .keys-list { margin: 6px 0; padding: 0; list-style: none; display: grid; gap: 4px; }
 .about .tools { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
-.about .tools button, .about .tools a { border: 1px solid var(--rule); background: var(--surface); border-radius: 6px; padding: 6px 10px; min-height: 28px; cursor: pointer; font-size: 12px; color: var(--text); text-decoration: none; display: inline-flex; align-items: center; }
+.about .tools button, .about .tools a { border: 1px solid var(--control-border); background: var(--surface); border-radius: 6px; padding: 6px 10px; min-height: 28px; cursor: pointer; font-size: 12px; color: var(--text); text-decoration: none; display: inline-flex; align-items: center; }
 .note { font-size: 12px; color: var(--faint); }
 
 #busy { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(11,15,20,0.6); color: var(--text); font-family: var(--font-mono); font-size: 13px; }
 #busy[hidden] { display: none; }
 [hidden] { display: none !important; }
+
+/* ---- presentation mode (C12): body.present, from the chip, ?present=1 or the P key ----
+   The room reads the sentence and the clock from the back; the per-dial hints and the first-run
+   card are noise on a projector, and the console gets a little wider so the readouts breathe. */
+body.present { --sentence: 24px; --clock: 18px; --panel-w: 460px; }
+body.present .equilibrium { max-width: 30ch; background: rgba(11,15,20,0.72); border-radius: 10px; padding: 8px 12px; margin-left: -12px; text-shadow: none; line-height: 1.3; }
+body.present .clock b { color: var(--text); }
+body.present .brand small,
+body.present .dial .hint,
+body.present .dial-more,
+body.present .hint-card,
+body.present .readout .meaning,
+body.present .tissue-short,
+body.present .scenario-card details,
+body.present .note { display: none; }
+body.present .hud-legend { font-size: 13px; }
+body.present .readout:not(.gauge) canvas { height: 104px; }   /* the gauge draws to a fixed layout */
+body.present .dial label { font-size: 15px; }
+body.present .scenario-card h3 { font-size: 24px; }
+body.present #panel { font-size: 15px; }
+
+/* Touch: a finger needs ~44 px, and the panel has room for it once the hints are collapsed. */
+@media (pointer: coarse) {
+  .chip, .scenario-btn, .transport button, .share button, .tools-row button,
+  .about .tools button, .about .tools a, .hint-card button { min-height: 44px; padding-top: 8px; padding-bottom: 8px; }
+  .segmented span { min-height: 44px; padding: 12px 8px; }
+  .dial input[type=range] { height: 44px; }
+  .speed input { height: 44px; }
+  summary { min-height: 44px; display: list-item; }
+  .readout:not(.gauge) canvas { height: 104px; }
+}
 
 @media (max-width: 900px) {
   #app { grid-template-columns: 1fr; grid-template-rows: 58vh auto; height: auto; }
@@ -215,25 +298,28 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
   .equilibrium { font-size: 13px; }
   .hud-legend { max-width: calc(50% - 30px); }
   .hud-layers { max-width: calc(50% - 22px); }
-  #legend { max-height: 45vh; overflow-y: auto; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
 </style>
 <script type="importmap">
 { "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js",
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
 } }
 </script>
 </head>
 <body>
+<a class="skip-link" href="#panel">Skip to the controls and readouts</a>
 <div id="app">
   <main id="stage" aria-label="3D tissue view">
     <canvas id="view" role="img" tabindex="0" aria-label="3D tissue view, loading"></canvas>
     <div class="hud hud-top">
       <h1 class="brand"><em>Tissue Weather</em><small>dynamic reciprocity</small></h1>
-      <div class="clock"><span>day <b id="day">0.0</b></span><span id="tissue-name"></span><span id="scenario-name"></span><span id="fps" class="note"></span></div>
-      <p class="equilibrium" id="equilibrium" data-state="steady" role="status" aria-live="polite" aria-atomic="true"></p>
+      <div class="clock"><span>day <b id="day">0.0</b> <span class="week" id="week">(week 0.0)</span></span><span id="tissue-name"></span><span id="scenario-name"></span><span id="fps" class="note"></span></div>
+      <!-- The sentence is rewritten every 0.7 s with changing rates: as a live region that is a
+           screen-reader flood (C3). It stays a visual readout; #status below carries the
+           announcements, at most one every 15 s plus the ones that matter. -->
+      <p class="equilibrium" id="equilibrium" data-state="steady"></p>
     </div>
     <details class="hud hud-legend" id="legend-box" open>
       <summary>Legend</summary>
@@ -242,15 +328,40 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
     <div class="hud hud-layers" id="layers" role="group" aria-label="Layers shown in the 3D view"></div>
     <div id="notice" role="alert" hidden></div>
     <div id="busy" hidden>preparing tissue…</div>
+    <!-- Announcements for screen readers only (C3): the day and the balance at most every 15 s
+         while the clock runs, plus every trend change, pause, step, scenario load and flash. -->
+    <div id="status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
   </main>
-  <aside id="panel" aria-label="Controls and readouts">
+  <section id="panel" aria-label="Controls and readouts" tabindex="-1">
     <section>
       <h2 id="h-tissue">Tissue</h2>
       <fieldset class="segmented" id="tissue-picker" aria-labelledby="h-tissue"></fieldset>
       <p class="tissue-short" id="tissue-short"></p>
     </section>
+    <section class="run">
+      <h2>Run</h2>
+      <div class="transport">
+        <button id="btn-play" class="primary" type="button" aria-keyshortcuts="Space" title="Run the simulation (Space)">Play</button>
+        <button id="btn-step" type="button" title="Advance one simulated day">+1 day</button>
+        <button id="btn-week" type="button" title="Run on for seven simulated days, then pause">+7 days</button>
+        <button id="btn-injure" class="danger" type="button" title="Wound the tissue at a random spot" aria-keyshortcuts="i" hidden>Injure</button>
+        <button id="btn-reset" type="button" title="Restart this scenario from day 0; the current run stays as dashed lines" aria-keyshortcuts="r">Reset</button>
+      </div>
+      <div class="speed">
+        <label for="speed">speed</label>
+        <input id="speed" type="range" min="0.25" max="20" step="0.25" value="5">
+        <output id="speed-out" for="speed">5 d/s</output>
+        <div class="speed-presets" id="speed-presets" role="group" aria-label="Speed presets"></div>
+      </div>
+      <div class="share">
+        <button type="button" id="btn-copy-link" title="Copy a link that restores this tissue, scenario, dials and speed">Copy link</button>
+        <button type="button" id="btn-present" class="chip" aria-pressed="false" aria-keyshortcuts="p" title="Presentation mode: bigger sentence and clock, hints hidden (P, or ?present=1)">Presentation</button>
+        <button type="button" id="btn-view" title="Put the 3D camera back on the default framing (Home, with the view focused)" hidden>Reset view</button>
+        <input class="link-out" id="link-out" type="text" readonly aria-label="Link to this view" hidden>
+      </div>
+    </section>
     <div class="hint-card" id="hint" role="note">
-      <p><b>First time here?</b> Pick a scenario, press Play, then move a dial.</p>
+      <div class="hint-body"><p><b>First time here?</b> Pick a scenario, press Play, then move a dial.</p></div>
       <button type="button" id="hint-dismiss" aria-label="Dismiss this hint">Got it</button>
     </div>
     <section>
@@ -263,26 +374,8 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
       <div id="dials"></div>
     </section>
     <section>
-      <h2>Run</h2>
-      <div class="transport">
-        <button id="btn-play" class="primary" type="button" aria-keyshortcuts="Space" title="Run the simulation (Space)">Play</button>
-        <button id="btn-step" type="button" title="Advance one simulated day">+1 day</button>
-        <button id="btn-injure" class="danger" type="button" title="Wound the tissue at a random spot" aria-keyshortcuts="i" hidden>Injure</button>
-        <button id="btn-reset" type="button" title="Restart this scenario from day 0; the current run stays as dashed lines" aria-keyshortcuts="r">Reset</button>
-      </div>
-      <div class="speed">
-        <label for="speed">speed</label>
-        <input id="speed" type="range" min="0.25" max="20" step="0.25" value="2">
-        <output id="speed-out" for="speed">2 d/s</output>
-        <div class="speed-presets" id="speed-presets" role="group" aria-label="Speed presets"></div>
-      </div>
-      <div class="share">
-        <button type="button" id="btn-copy-link" title="Copy a link that restores this tissue, scenario, dials and speed">Copy link</button>
-        <input class="link-out" id="link-out" type="text" readonly aria-label="Link to this view" hidden>
-      </div>
-    </section>
-    <section>
       <h2>Readouts</h2>
+      <p class="sr-only" id="chart-keys-hint">Each chart is focusable: the arrow keys walk a crosshair through the recorded days and read the values out, Home and End jump to the first and last, Escape drops the crosshair.</p>
       <div id="readouts"></div>
       <div class="tools-row">
         <button type="button" id="btn-table" aria-pressed="false" aria-controls="stats-table" title="Show the latest values as a text table">Table</button>
@@ -297,7 +390,7 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
         <div id="about-body"></div>
       </details>
     </section>
-  </aside>
+  </section>
 </div>
 <script type="module" src="./src/app.js"></script>
 <script>
@@ -310,7 +403,7 @@ section h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em; text-trans
     shown = true;
     var n = document.getElementById('notice');
     if (!n) return;
-    n.innerHTML = '<h2></h2><p></p><p>To use this page offline: reload once with an internet connection so the browser caches the library, or download <code>three@0.160.0</code> (<code>build/three.module.js</code> and <code>examples/jsm/controls/OrbitControls.js</code>) next to this page and point the import map at those files. If you opened the file directly (file://), serve the folder over HTTP instead, e.g. <code>python3 -m http.server</code>.</p>';
+    n.innerHTML = '<h2></h2><p></p><p>To use this page offline: reload once with an internet connection so the browser caches the library, or download <code>three@0.160.0</code> (<code>build/three.module.min.js</code> and <code>examples/jsm/controls/OrbitControls.js</code>) next to this page and point the import map at those files. If you opened the file directly (file://), serve the folder over HTTP instead, e.g. <code>python3 -m http.server</code>.</p>';
     n.firstChild.textContent = title;
     n.children[1].textContent = body;
     n.hidden = false;

@@ -50,17 +50,32 @@ function copyNum(v) {
 /**
  * Words used when a tissue supplies no `copy.vocabulary` (docs/EXTENDING.md §1 `copy`).
  * Every tissue-specific fragment of the equilibrium sentence comes from here, so nothing
- * in this file assumes fibroblasts, collagen or an activation switch. A tissue overrides
- * only what it wants; the app may also fill in `cellStateNoun` from the cell type's state
- * labels, so a definition never has to repeat them.
+ * in this file assumes fibroblasts, collagen, an activation switch — or even the weather
+ * metaphor. A tissue overrides only what it wants; the app may also fill in `cellStateNoun`
+ * from the cell type's state labels, so a definition never has to repeat them.
  *
- *   matrix        noun phrase for what the cells build ('collagen', 'proteoglycan and collagen')
- *   cellsActive   clause: the cells are working ('the chondrocytes are pumping out aggrecan')
- *   cellsQuiet    clause: the cells are not working
- *   cellsMid      clause: the cells are halfway
- *   cellStateNoun the cell's primary state, as a noun ('activation', 'phenotype')
- *   stiffHigh     optional continuation of "…the matrix around them is already stiff", used when
- *                 the matrix is stiff (E ≥ 30 kPa) — e.g. 'enough to hold them switched on'
+ *   matrix          noun phrase for what the cells build ('collagen', 'proteoglycan and collagen')
+ *   cellsActive     clause: the cells are working ('the chondrocytes are pumping out aggrecan')
+ *   cellsQuiet      clause: the cells are not working
+ *   cellsMid        clause: the cells are halfway
+ *   cellStateNoun   the cell's primary state, as a noun ('activation', 'phenotype')
+ *   stiffHigh       optional continuation of `activeStiff`, used when the matrix is stiff
+ *                   (E ≥ thresholds.stiffKPa) — e.g. 'enough to hold them switched on'
+ *   activeStiff     continuation after `cellsActive` while condensing INTO a stiff matrix
+ *   activeSoftening continuation after `cellsActive` while condensing into a matrix that is
+ *                   still soft (the default says it is thickening and stiffening as they go)
+ *   stillHint       clause used when there is essentially no matrix yet (density < thresholds.empty);
+ *                   null → built from `matrix`
+ *   metaphor        the four phrases that name the balance: { still, condensing, evaporating, steady }.
+ *                   A tissue that does not want the cloud can say { still: 'the tissue is idle', … }
+ *   thresholds      { quiet, active, empty, stiffKPa, condensing, evaporating, still } — where the
+ *                   sentence switches. `condensing` / `evaporating` are deposition/degradation
+ *                   ratios, `stiffKPa` a stiffness in kPa, `still` the rate below which both
+ *                   fluxes count as zero
+ *   equilibrium     optional (stats, V) => string, a complete replacement for the sentence; a
+ *                   falsy or non-string return falls back to the generic one
+ *   scaffoldNoun    (read by the app) name of the third flux bar for a tissue whose scaffold dissolves
+ *   gauge           (read by the app, not here) { left, right, ratio, caption } labels for the flux gauge
  */
 export const COPY_VOCABULARY_DEFAULT = Object.freeze({
   matrix: 'matrix',
@@ -69,7 +84,53 @@ export const COPY_VOCABULARY_DEFAULT = Object.freeze({
   cellsMid: 'the cells are partly switched on',
   cellStateNoun: 'activation',
   stiffHigh: '',
+  activeStiff: 'and the matrix around them is already stiff',
+  activeSoftening: 'and the matrix is thickening and stiffening as they go',
+  stillHint: null,
+  metaphor: Object.freeze({
+    still: 'the cloud is still',
+    condensing: 'the cloud is condensing',
+    evaporating: 'the cloud is evaporating',
+    steady: 'the cloud holds its shape',
+  }),
+  thresholds: Object.freeze({ quiet: 0.3, active: 0.6, empty: 0.05, stiffKPa: 30, condensing: 1.15, evaporating: 0.87, still: 1e-6 }),
+  equilibrium: null,
 });
+
+/** The vocabulary a tissue actually gets: defaults, with `metaphor` and `thresholds` merged per key. */
+function copyVocabulary(vocabulary) {
+  const V = Object.assign({}, COPY_VOCABULARY_DEFAULT, vocabulary || {});
+  V.metaphor = Object.assign({}, COPY_VOCABULARY_DEFAULT.metaphor, (vocabulary && vocabulary.metaphor) || {});
+  V.thresholds = Object.assign({}, COPY_VOCABULARY_DEFAULT.thresholds, (vocabulary && vocabulary.thresholds) || {});
+  return V;
+}
+
+/** The numbers the sentence and the app both key off, read out of a stats() object (either shape). */
+function copyReadStats(stats, V) {
+  const s = stats || {};
+  const T = V.thresholds;
+  const dep = Math.max(0, copyNum(s.deposition));
+  const deg = Math.max(0, copyNum(s.degradation));
+  const alpha = copyNum(s.cells ? s.cells.a : s.meanAlpha);
+  const rho = copyNum(s.species ? s.species.total : s.meanRho);
+  const logE = s.logE !== undefined ? s.logE : s.meanLogE;
+  const E = Number.isFinite(logE) ? Math.pow(10, logE) : NaN;
+  const tiny = T.still;
+  const still = dep < tiny && deg < tiny;
+  const ratio = deg > tiny ? dep / deg : dep > tiny ? Infinity : 1;
+  const trend = still ? 'still' : ratio > T.condensing ? 'condensing' : ratio < T.evaporating ? 'evaporating' : 'steady';
+  const cells = alpha < T.quiet ? 'quiet' : alpha > T.active ? 'activated' : 'partly';
+  return { dep, deg, alpha, rho, E, ratio, trend, cells, empty: rho < T.empty, stiff: Number.isFinite(E) && E >= T.stiffKPa };
+}
+
+/**
+ * Which way the balance is going, in the tissue's own thresholds:
+ * 'still' | 'condensing' | 'evaporating' | 'steady'. The app uses it for the dot beside the
+ * sentence and to decide when a screen-reader announcement is worth making.
+ */
+export function copyTrend(stats, vocabulary) {
+  return copyReadStats(stats, copyVocabulary(vocabulary)).trend;
+}
 
 /**
  * One live sentence (<= 28 words) describing the current balance and what the
@@ -80,66 +141,62 @@ export const COPY_VOCABULARY_DEFAULT = Object.freeze({
  *   species.total the mean matrix density, logE the mean log10 stiffness (kPa).
  *   (The v0.1 shape meanAlpha / meanRho / meanLogE is still accepted.)
  * vocabulary: tissue.copy.vocabulary, merged over COPY_VOCABULARY_DEFAULT — every
- *   tissue-specific word (matrix, cellsActive, cellsQuiet, cellsMid, cellStateNoun,
- *   stiffHigh) is read from there, so a new tissue needs no change here.
+ *   tissue-specific word is read from there, so a new tissue needs no change here.
+ *   `vocabulary.equilibrium(stats, V)` replaces the sentence outright.
  *
- * Balance: ratio deposition/degradation > 1.15 condensing, < 0.87 evaporating,
- * otherwise holding shape ("still" below 1e-6 on both mean rates).
- * Cells: a < 0.3 quiet, > 0.6 working. Empty: density < 0.05. Stiff: E >= 30 kPa.
+ * Balance: ratio deposition/degradation > thresholds.condensing condensing,
+ * < thresholds.evaporating evaporating, otherwise holding shape ("still" below
+ * thresholds.still on both mean rates). Cells: below thresholds.quiet quiet,
+ * above thresholds.active working. Empty: density < thresholds.empty.
+ * Stiff: E >= thresholds.stiffKPa.
  */
 export function copyEquilibriumSentence(stats, vocabulary) {
-  const s = stats || {};
-  const V = Object.assign({}, COPY_VOCABULARY_DEFAULT, vocabulary || {});
-  const dep = Math.max(0, copyNum(s.deposition));
-  const deg = Math.max(0, copyNum(s.degradation));
-  const alpha = copyNum(s.cells ? s.cells.a : s.meanAlpha);
-  const rho = copyNum(s.species ? s.species.total : s.meanRho);
-  const logE = s.logE !== undefined ? s.logE : s.meanLogE;
-  const E = Number.isFinite(logE) ? Math.pow(10, logE) : NaN;
-
-  const tiny = 1e-6;
-  const still = dep < tiny && deg < tiny;
-  const ratio = deg > tiny ? dep / deg : dep > tiny ? Infinity : 1;
-  const trend = still ? 'still' : ratio > 1.15 ? 'condensing' : ratio < 0.87 ? 'evaporating' : 'steady';
-  const cells = alpha < 0.3 ? 'quiet' : alpha > 0.6 ? 'activated' : 'partly';
-  const empty = rho < 0.05;
-  const stiff = Number.isFinite(E) && E >= 30;
+  const V = copyVocabulary(vocabulary);
+  if (typeof V.equilibrium === 'function') {
+    let own = null;
+    try { own = V.equilibrium(stats || {}, V); } catch (e) { own = null; }
+    if (typeof own === 'string' && own.trim()) return own;
+  }
+  const m = V.metaphor;
+  const { dep, deg, trend, cells, empty, stiff } = copyReadStats(stats, V);
 
   const verb = trend === 'condensing' ? 'outpaces' : trend === 'evaporating' ? 'trails' : 'matches';
   const head = 'Deposition ' + copyFormatRate(dep) + ' ' + verb + ' degradation ' + copyFormatRate(deg);
 
-  const nothingYet = 'there is hardly any ' + V.matrix + ' yet, so add cells, growth factor or load to start condensation.';
+  const nothingYet = typeof V.stillHint === 'string' && V.stillHint
+    ? V.stillHint
+    : 'there is hardly any ' + V.matrix + ' yet, so add cells, growth factor or load to start condensation.';
   let tail;
   if (trend === 'still') {
     tail = empty
-      ? 'the cloud is still; ' + nothingYet
-      : 'the cloud is still; almost nothing is being built or removed, so nothing here is changing.';
+      ? m.still + '; ' + nothingYet
+      : m.still + '; almost nothing is being built or removed, so nothing here is changing.';
   } else if (trend === 'condensing') {
     if (cells === 'activated') {
       tail = stiff
-        ? 'the cloud is condensing; ' + V.cellsActive + ', and the matrix around them is already stiff' + (V.stiffHigh ? ' ' + V.stiffHigh : '') + '.'
-        : 'the cloud is condensing; ' + V.cellsActive + ', and the matrix is thickening and stiffening as they go.';
+        ? m.condensing + '; ' + V.cellsActive + ', ' + V.activeStiff + (V.stiffHigh ? ' ' + V.stiffHigh : '') + '.'
+        : m.condensing + '; ' + V.cellsActive + ', ' + V.activeSoftening + '.';
     } else if (cells === 'quiet') {
-      tail = 'the cloud is condensing; ' + V.cellsQuiet + ', so this is slow basal deposition with little breakdown to oppose it.';
+      tail = m.condensing + '; ' + V.cellsQuiet + ', so this is slow basal deposition with little breakdown to oppose it.';
     } else {
-      tail = 'the cloud is condensing; ' + V.cellsMid + ' and laying down more ' + V.matrix + ' than is removed.';
+      tail = m.condensing + '; ' + V.cellsMid + ' and laying down more ' + V.matrix + ' than is removed.';
     }
   } else if (trend === 'evaporating') {
     if (cells === 'activated') {
-      tail = 'the cloud is evaporating; ' + V.cellsActive + ', but breakdown is winning, and a thinning matrix pulls their ' + V.cellStateNoun + ' down.';
+      tail = m.evaporating + '; ' + V.cellsActive + ', but breakdown is winning, and a thinning matrix pulls their ' + V.cellStateNoun + ' down.';
     } else if (cells === 'quiet') {
-      tail = 'the cloud is evaporating; ' + V.cellsQuiet + ', making little ' + V.matrix + ', so breakdown wins and the tissue thins.';
+      tail = m.evaporating + '; ' + V.cellsQuiet + ', making little ' + V.matrix + ', so breakdown wins and the tissue thins.';
     } else {
-      tail = 'the cloud is evaporating; ' + V.cellsMid + ' and cannot keep pace with breakdown.';
+      tail = m.evaporating + '; ' + V.cellsMid + ' and cannot keep pace with breakdown.';
     }
   } else if (cells === 'activated') {
-    tail = 'the cloud holds its shape; ' + V.cellsActive + ', replacing almost exactly the ' + V.matrix + ' that is removed — a busy balance.';
+    tail = m.steady + '; ' + V.cellsActive + ', replacing almost exactly the ' + V.matrix + ' that is removed — a busy balance.';
   } else if (cells === 'quiet') {
     tail = empty
-      ? 'the cloud holds its shape; ' + nothingYet
-      : 'the cloud holds its shape; ' + V.cellsQuiet + ' and turnover is slow, so the tissue is resting, not remodelling.';
+      ? m.steady + '; ' + nothingYet
+      : m.steady + '; ' + V.cellsQuiet + ' and turnover is slow, so the tissue is resting, not remodelling.';
   } else {
-    tail = 'the cloud holds its shape; ' + V.cellsMid + ', replacing ' + V.matrix + ' about as fast as it is removed.';
+    tail = m.steady + '; ' + V.cellsMid + ', replacing ' + V.matrix + ' about as fast as it is removed.';
   }
 
   return head + ' — ' + tail;

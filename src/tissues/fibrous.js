@@ -78,6 +78,11 @@
  *  ALIGNMENT / MOTILITY  kLoadFib 0.5 → 0.06 × strain²; kLoadAlign 1.5 → 10 × strain² × H;
  *    kGuide 2 → 6, sigmaP 0.6 → 2.5 rad/√d [MODEL.md #2]; v0 0.7 L/d (≈ 9 µm/h) [MODEL.md #1]
  *    × grip factor; kRep 0.5. The Metzcar tent [MODEL.md #6] was tried and rejected.
+ *    kAlign 0.4 → 0.6 /d (traction realignment of T toward the cell's own axis; cells reorganise
+ *    a gel in hours to a day, so the spec's 0.4 was already at the slow end). It is NOT a lever on
+ *    the alignment readout: at the maturation preset, FA at day 60 is 0.60 with 0.6 and 0.62 with
+ *    0.4 — traction pulls fibres onto each CELL's axis, and only kLoadFib pulls them onto the load
+ *    axis. Density is unchanged either way; 0.6 is the value both goldens were recorded with.
  *  STIFFNESS  kStrain 1 → 0.5.  INJURY  bursts (g 0.6, m 0.8) plus an inflammation field
  *    (g 4, m 1 per day, τ 5 d).  SCENARIOS  wound dials = Gext 0.5, strain 0.45, protease 0.4;
  *    sandbox rho 0.02.  NUMERICS  fEvery 4, matured state = 60 d of the maturation preset.
@@ -120,14 +125,14 @@ export const TISSUE_FIBROUS = {
       metaphor: 'Humidity: how much vapor is available to condense.',
       biology: 'TGF-β-like signal in the medium. It pushes fibroblasts to activate and lay down more collagen.',
       watch: 'Cells turn orange as they activate, then the flux bar tips toward condensing a day or two later.' },
-    { key: 'strain', label: 'Mechanical load', min: 0, max: 1, step: 0.01, default: 0.5, format: 'percent', role: 'load',
+    { key: 'strain', label: 'Mechanical load', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2', role: 'load',
       metaphor: 'Pressure: a steady push that shapes the cloud.',
-      biology: 'Static stretch along the vertical axis. Cells feel more tension, and fibers and cells line up with it.',
+      biology: 'Static stretch along the vertical axis, as a 0–1 load index — not engineering strain (a real tissue tears well below 100 % stretch; 1 here means "as loaded as this lesson goes"). Cells feel more tension, and fibers and cells line up with it.',
       watch: 'Fibers swing toward the arrows and the alignment trace rises; stiffness jumps at once, activation follows over days.' },
     { key: 'protease', label: 'Protease activity', min: 0, max: 1, step: 0.01, default: 0.5, format: 'fixed2',
       metaphor: 'Temperature: heat turns droplets back into vapor.',
-      biology: 'Balance of matrix-cutting enzymes (MMPs) against their inhibitors (TIMPs). Above the middle, enzymes outnumber inhibitors.',
-      watch: 'Flux bar leans toward evaporating. Pale new fibers thin first; amber mature ones resist. Switch on the protease haze.' },
+      biology: 'Balance of matrix-cutting enzymes (MMPs) against their inhibitors (TIMPs). It scales the enzyme cells make on top of a background that is always there, so at 0 the matrix is still being cut — slowly — and under-tensioned cells add more of their own.',
+      watch: 'Flux bar leans toward evaporating as you raise it. Pale new fibers thin first; amber mature ones resist. Switch on the protease haze.' },
     { key: 'nCells', label: 'Cell number', min: 40, max: 400, step: 10, default: 160, format: 'cells', role: 'cellCount',
       metaphor: 'Condensation nuclei: droplets need something to form on.',
       biology: 'Seeding density. Each cell builds and digests matrix, so more cells amplify whichever way the balance leans.',
@@ -139,7 +144,7 @@ export const TISSUE_FIBROUS = {
     { key: 'maturation', title: 'Scaffold to tissue',
       goal: 'Watch a loose provisional scaffold turn into dense, aligned, mature tissue while the cells inside it change too.',
       steps: [
-        'Press Play and let about four weeks pass at 5 days per second.',
+        'Press Play and let about four weeks pass (the Weeks speed preset, or +7 days four times).',
         'Watch the fiber colour and the alignment trace, then check stiffness.',
         'Pause and note which changed first: density, alignment, or maturity.',
       ],
@@ -161,14 +166,14 @@ export const TISSUE_FIBROUS = {
         { at: 90, stat: 'cells.a', rel: { stat: 'cells.a', at: 45, op: 'gt' }, value: -0.08 },
       ] },
     { key: 'unloading', title: 'Unloading',
-      goal: 'Take a mature tissue off load and see how a matrix that took weeks to build slowly comes apart.',
+      goal: 'Take a mature tissue off load and out of its growth-factor bath, and watch a matrix that took weeks to build come apart.',
       steps: [
-        'Confirm load is zero and the growth-factor bath is low, then press Play.',
+        'Note that two dials moved at once: load is at 0 and the bath has dropped from 0.5 to 0.2. Press Play.',
         'Watch the flux bar and the cell colour during the first few days.',
-        'Run for six weeks and compare how fast the pale and amber fibers disappear.',
+        'Run for six weeks, then test the dials one at a time: put the load back at 0.6, or the bath back at 0.5, and reset.',
       ],
-      question: 'Nothing was added to the dish. Why does removing load alone flip the cells from building to dismantling?',
-      expect: 'Cells fade back toward blue within days, the flux bar tips to evaporating, density and alignment fall over weeks, and amber mature fibers outlast the pale new ones.',
+      question: 'Two things were taken away at once. Which one causes the atrophy — try each alone and watch the density trace, not just the colour.',
+      expect: 'Cells fade back toward blue within days, the flux bar tips to evaporating, density and alignment fall over weeks, and amber mature fibers outlast the pale new ones. Take away only the load and the story is different: alignment decays, but the density holds and the cells stay mostly switched on.',
       dials: { Gext: 0.2, strain: 0.0, protease: 0.5, nCells: 160 },
       init: { from: { scenario: 'maturation', days: 60 } },
       checks: [
@@ -188,8 +193,8 @@ export const TISSUE_FIBROUS = {
         'Drop the bath to 0.2 without pausing and keep running.',
         'Wait another four weeks and compare stiffness and activation with where they started.',
       ],
-      question: 'You returned the bath to its starting value. What is now holding the cells in their activated state, if not the growth factor?',
-      expect: 'Dense, stiff, poorly aligned matrix by week four. After you lower the bath, stiffness and activation may dip but stay high: the tissue does not retrace its path.',
+      question: 'You returned the bath to its starting value, yet the growth-factor haze stays thick. Where is that growth factor coming from, and what would you turn down to break the loop?',
+      expect: 'Dense, stiff, poorly aligned matrix by week four. After you lower the bath, activation dips a little and settles back; stiffness does not dip at all but keeps climbing. The tissue does not retrace its path.',
       dials: { Gext: 0.9, strain: 0.3, protease: 0.2, nCells: 160 },
       init: { species: { new: 0.15, mat: 0 }, jitter: 0.2 },
       events: [{ at: 45, dials: { Gext: 0.2 } }],
@@ -205,12 +210,12 @@ export const TISSUE_FIBROUS = {
     { key: 'wound', title: 'Wound healing',
       goal: 'Injure a mature tissue and follow the repair from inflammatory burst to scar.',
       steps: [
-        'Press Play, then click Injure and find the hole that appears.',
+        'Press Play, then click Injure and find the hole — it is outlined by a wire sphere.',
         'Switch on the growth-factor and protease layers and watch the wound for a week.',
-        'Run for eight weeks and compare fiber colour and direction inside and outside the old wound.',
+        'Compare fiber direction inside and outside the hole at three weeks, then keep running to eight and watch the gap close.',
       ],
-      question: 'The hole refills with matrix, so why does the repaired patch still count as a scar rather than a regeneration?',
-      expect: 'A teal and magenta flare fills the hole, nearby cells turn orange and wander in, pale tangled fibers appear within days, and they mature slowly without fully regaining alignment.',
+      question: 'By eight weeks the patch has nearly caught up with its neighbours here, which real scars never do. Which of the things that keep a scar a scar is this model missing?',
+      expect: 'A teal and magenta flare fills the hole; the cells already there dim slightly and keep building where they stand (nothing swims in). Pale tangled fibers appear within days: three weeks after the injury the patch is still a tangle against its aligned neighbours, and by eight weeks it has almost caught them up.',
       dials: { Gext: 0.5, strain: 0.45, protease: 0.4, nCells: 160 },
       init: { from: { scenario: 'maturation', days: 60 } },
       events: [{ at: 5, injure: { center: [0.5, 0.5, 0.5] } }],
@@ -248,16 +253,18 @@ export const TISSUE_FIBROUS = {
       type: 'stack', domain: [0, 1],
       series: [{ stat: 'species.new', label: 'new matrix', color: '#3f97dc' }, { stat: 'species.mat', label: 'mature collagen', color: '#c4822a' }] },
     { key: 'align', label: 'Alignment & activation', unit: '0–1',
-      meaning: 'How strongly fibers share one direction: 0 is a random tangle, 1 is a perfectly parallel bundle.',
+      meaning: 'How strongly the tissue as a whole shares one fiber direction: 0 is a random tangle, 1 is a perfectly parallel bundle. The faint trace is the same measure inside single voxels, which stays high even when neighbouring voxels point different ways.',
       type: 'lines', domain: [0, 1],
       series: [
-        { stat: 'fa', label: 'alignment', color: '#8f7ae0', unit: '0–1 (fractional anisotropy)',
-          meaning: 'How strongly fibers share one direction: 0 is a random tangle, 1 is a perfectly parallel bundle.' },
+        { stat: 'globalFA', label: 'alignment (whole tissue)', color: '#8f7ae0', unit: '0–1 (anisotropy of the summed tensor)',
+          meaning: 'How strongly the WHOLE cube shares one fiber direction: 0 is a random tangle, 1 is a perfectly parallel bundle.' },
+        { stat: 'fa', label: 'local anisotropy', color: '#c3b6f2', unit: '0–1 (mean per-voxel fractional anisotropy)',
+          meaning: 'The same measure taken inside each voxel and averaged. A tissue of small aligned patches pointing every which way scores high here and low on the whole-tissue trace.' },
         { stat: 'cells.a', label: 'cell activation', color: '#e0602a', unit: '0–1 (mean over cells)',
           meaning: 'How far cells have shifted from quiet fibroblast toward contractile, collagen-pumping myofibroblast.' },
       ] },
-    { key: 'stiff', label: 'Stiffness', unit: 'kPa (log scale)',
-      meaning: 'How hard the matrix resists stretching. Rises with density, maturity and load; cells sense it and respond.',
+    { key: 'stiff', label: 'Stiffness', unit: 'kPa (log scale; geometric mean)',
+      meaning: 'How hard the matrix resists stretching, as the geometric mean over the voxels. Rises with density, maturity and load; cells sense it and respond. A matured tissue lands near 80 kPa and a fibrotic one above 140 — hypertrophic-scar country, not normal dermis.',
       type: 'log', domain: [-1, 2.5],
       series: [{ stat: 'logE', label: 'stiffness', color: '#8fb8d8' }] },
     { key: 'flux', label: 'Matrix flux', unit: 'density per day',
@@ -283,7 +290,7 @@ export const TISSUE_FIBROUS = {
       { claim: 'Droplets are passive; the weather acts on them and they simply obey.',
         reality: 'Cells rewrite their own rules. A stiffer matrix activates them, and activated cells build stiffer matrix. That loop is the reciprocity.' },
       { claim: 'Humidity, pressure and temperature are set from outside; the cloud cannot change its own weather.',
-        reality: 'Cells release growth factor themselves, and digesting matrix frees more that was stored in it. The tissue partly makes its own humidity.' },
+        reality: 'Activated cells pulling on stiff matrix release growth factor themselves, and that is what keeps a fibrotic tissue switched on after you turn the bath down: it is making its own humidity. Digesting matrix frees a little more, but next to the cells\' own output that term is a rounding error.' },
     ],
     legend: {
       fibers: 'Fibers: pale blue when new, amber once mature and crosslinked. Thicker rods mean denser matrix; rods that share a direction mean aligned matrix.',

@@ -25,8 +25,9 @@ jobs:
         with:
           node-version: '20'
 
-      # conformance for every registered tissue, the golden regression, the engine API,
-      # the build constraints of docs/EXTENDING.md §0 and the developer tools
+      # conformance for every registered tissue, the two golden regressions, the engine API, the
+      # build constraints of docs/EXTENDING.md §0, the developer tools, the export contract
+      # (blender/import_tissue.py --dry-run, python3 is on the runner) and the teaching claims
       - name: npm test
         run: npm test
 
@@ -38,8 +39,31 @@ jobs:
       - name: npm run build
         run: npm run build
 
+      # `git diff` only sees TRACKED files, so check for new untracked ones too: a build output
+      # that nobody committed is just as stale as one that changed.
       - name: dist/ is unchanged by a rebuild
-        run: git diff --exit-code -- dist
+        run: |
+          git diff --exit-code -- dist
+          test -z "$(git status --porcelain -- dist)" || { git status --porcelain -- dist; exit 1; }
+
+      # The offline classroom page (docs/REVIEW.md C9): Three.js inlined, no import map, no network
+      # at run time. It is NOT committed (1.1 MB of vendored library), so it is built and checked
+      # here — after the dist check above, which would otherwise see it as an untracked file.
+      - name: build the vendored offline page
+        run: |
+          node tools/build_single.mjs --vendor
+          test -s dist/tissue-weather.offline.html
+          ! grep -q '<script type="importmap">' dist/tissue-weather.offline.html
+          ! grep -qE '(src|href)="https?:' dist/tissue-weather.offline.html
+
+      - name: upload the offline page
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-page
+          path: dist/tissue-weather.offline.html
+          if-no-files-found: warn
+          retention-days: 14
 
   # ---------------------------------------------------------------- headless scenario run + plots
   headless:
@@ -64,6 +88,14 @@ jobs:
       - name: Show what was written
         run: ls -la scratch/fibrous && head -2 scratch/fibrous/maturation.csv
 
+      # The reader the exports are for. --dry-run parses and measures the trajectory without
+      # Blender, so the JS writer and the python reader are exercised against each other on a file
+      # this job just produced (tests/export.test.mjs does the same for a short in-memory export).
+      - name: The Blender importer reads the trajectory it is given
+        run: |
+          python3 blender/import_tissue.py --input scratch/fibrous/maturation.json --dry-run --all-frames
+          python3 blender/import_tissue.py --input blender/sample_trajectory.json --dry-run
+
       # tools/plot_scenarios.py is allowed to fail: it plots a fixed set of column names, and the
       # v0.2 CSV header is generated from the tissue definition. When the two agree the panel is
       # uploaded below; when they do not, the run still reports the mismatch without failing CI.
@@ -84,6 +116,9 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------- optional browser smoke test
+  # Advisory (continue-on-error): it needs a CDN, a software GL stack and a browser download, so a
+  # red run here means "look at the artifacts", not "the change is wrong". Everything it covers that
+  # CAN be judged deterministically is also covered by npm test.
   screenshot:
     name: Playwright screenshot smoke (optional)
     runs-on: ubuntu-latest
@@ -104,11 +139,23 @@ jobs:
       - name: Drive the app in headless Chromium
         run: node tools/screenshot_app.mjs --tissue fibrous --days 10 --out dist/shots
 
+      # The SHIPPED page, not the source tree: dist/tissue-weather.html is what GitHub Pages serves
+      # and what an instructor downloads, and until now nothing ever executed it in a browser
+      # (docs/REVIEW.md D8). --no-interact keeps it to "does the built bundle boot and render".
+      - name: Drive the built single-file page
+        run: node tools/screenshot_app.mjs --page dist/tissue-weather.html --no-interact --days 5 --out dist/shots/dist-page
+
+      # The renderer on its own, against the synthetic tissues of tools/render_smoke.html:
+      # screenshots, the §4 API, and one second of frame-time measurement (enough to catch a
+      # renderer that has stopped drawing or has become 10x slower).
+      - name: Renderer smoke test
+        run: node tools/render_smoke.mjs --out dist/shots/render --perf-seconds 1
+
       - name: Upload the screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: app-screenshots
-          path: dist/shots/*.png
+          path: dist/shots/**
           if-no-files-found: warn
           retention-days: 14

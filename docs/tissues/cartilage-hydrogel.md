@@ -351,6 +351,12 @@ halos empty, 160 agents at random positions. Statements are machine-checkable ta
 
 ### 2.7 Parameter table
 
+This table is the **specification**: every value with the measurement it answers to and its source.
+What the implementation actually runs is the generated block under it (rewritten by
+`node tools/check_params_doc.mjs --write`, checked by `npm test`) — the two are allowed to differ,
+because tuning a scenario against its `checks` is how a value earns its place, but the difference is
+now visible instead of silent.
+
 | symbol | value (engine units) | plausible real range | source |
 |---|---|---|---|
 | `L`, agents | 300 µm; 160 agents ≈ 3–10 cells each | 10–60 × 10⁶ cells/mL | Mauck 2003b; Buschmann 1992 |
@@ -376,6 +382,39 @@ halos empty, 160 agents at random positions. Statements are machine-checkable ta
 | `E_gag`, `E_col2`, `E_col1`, `E0` | 600, 400, 80, 0.5 kPa | native 0.5–1 MPa; constructs 0.1–1.3 MPa; fibrocartilage inferior | Athanasiou 1991; Lima 2007; Armiento 2019 |
 | `v0` | 0.05 L/d × (1 − phi)(1 − scaf) | chondrocytes essentially stationary | Morales 2007 |
 | `fCrowd` scale | 1.6 | product inhibition at physiological GAG | Nikolaev 2010 |
+
+<!-- params:cartilage -->
+<!-- Generated from src/tissues/cartilage.js by `node tools/check_params_doc.mjs --write`.
+     Do not edit inside the markers: `npm test` compares every number with the code. -->
+**As built** — what `src/tissues/cartilage.js` runs today (10 engine + 78 params). The sourced table in this
+section says what the numbers have to answer to; this block says what they are.
+
+```text
+engine  N = 12            dt = 0.02         rhoMax = 2        kLoadFib = 0
+        loadExp = 2       fEvery = 6        rCell = 0.03      kRep = 0.5
+        trace = 'fiber'   vox = 2
+params  tRGa = 7          tRGb = 28         tRGc = 130        kRG = 0.357
+        sOff = 2.3        kLoadDeg = 0.5    kEnz = 0.0015     mK = 0.1
+        sG = 0.7          sC2 = 0.12        sC1 = 0.45        tgfHalf = 0.25
+        fT0 = 0.45        aStar = 0.1       aInj = 0.18       kStim = 1
+        kInj = 0.6        kEarly = 1        matHalf = 0.15    aHyp = 0.8
+        o2Half = 0.25     o2Anox = 0.03     kIL = 0.8         crowd = 2.2
+        Pcap = 1          kRel = 0.5        kGagLoss = 0.045  cRet = 0.06
+        gSelf = 1.2       kWash = 2         kGagDeg = 0.4     mTimp = 0.05
+        kWashNew = 0.68   haloBridge = 0.8  wC2 = 2.5         kCol2Deg = 0.095
+        gProt = 0.2       kCol1Deg = 0.1    mMin = 0.02       kO2 = 0.7
+        o2Km = 0.1        kTauto = 0.4      kTup = 0.05       mBasal = 0.35
+        kMxl = 20         mInfl = 8         mFib = 1.5        phi0 = 0.35
+        cTgf = 0.3        cHyp = 0.3        cRound = 0.25     cLoad = 0.1
+        cSpread = 0.5     cSerum = 0.3      cCat = 0.35       cInj = 0.3
+        roundHalf = 0.15  ESpread = 20      col1Half = 0.2    tauPhiDown = 7
+        tauPhiUp = 8      tauCatUp = 1      tauCatDown = 6    E0 = 0.5
+        EscafA = 5        EscafB = 60       Egag = 600        EgagBase = 0.25
+        Ecol2Half = 0.3   Ecol2 = 400       Ecol1 = 80        kStrain = 0.5
+        ampRef = 0.2      v0 = 0.35         sigmaP = 1.5      kGuide = 3
+        kAlign = 0.5      polC1 = 0.8
+```
+<!-- /params:cartilage -->
 
 ---
 

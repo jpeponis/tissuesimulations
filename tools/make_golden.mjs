@@ -1,7 +1,18 @@
 // Records reference statistics of a tissue for the golden regression test (tests/engine.test.mjs).
 //   node tools/make_golden.mjs [--tissue fibrous] [--out FILE] [--seed 7]     (default FILE: tests/golden/<tissue>.json)
-// Re-run DELIBERATELY when the model changes on purpose; the test compares within tolerance
-// (3 % relative or 0.01 absolute, whichever is larger) at every recorded day.
+// Re-run DELIBERATELY when the model changes on purpose.
+//
+// TWO KINDS OF GOLDEN, two tolerances (docs/REVIEW.md D2):
+//   tests/golden/fibrous.json         recorded from v0.1 model.js. "Is this still the same MODEL?"
+//                                     — compared within 3 % / 0.01. NEVER re-record it: the 3 %
+//                                     agreement with v0.1 is the claim, and this tool cannot
+//                                     reproduce it (it would just record the engine as it is now).
+//   tests/golden/<tissue>.engine.json recorded from THIS engine. "Is this still the same
+//                                     ARITHMETIC?" — compared at 1e-5 relative / 1e-7 absolute on
+//                                     every recorded stat path. Re-record it (and say so in the
+//                                     commit message) whenever a change to the engine or to the
+//                                     tissue's parameters is meant to move the numbers.
+//     node tools/make_golden.mjs --tissue fibrous --out tests/golden/fibrous.engine.json
 //
 // Protocol (shared with the test): reset(scenario, { dials, init }); record at t = 0; then for each
 // day: step one day, fire the run's events whose `at` equals that day (dial changes / injury), and
@@ -29,6 +40,12 @@ const TISSUE_KEY = args.tissue ?? TISSUE_DEFAULT;
 const tissue = TISSUES[TISSUE_KEY];
 if (!tissue) { console.error(`unknown tissue '${TISSUE_KEY}'; registered: ${Object.keys(TISSUES).join(', ')}`); process.exit(1); }
 const out = args.out || new URL(`../tests/golden/${TISSUE_KEY}.json`, import.meta.url).pathname;
+if (/(^|\/)fibrous\.json$/.test(out) && args.force !== 'true') {
+  console.error(`refusing to overwrite ${out}: it is the v0.1 reference (see the header).\n` +
+    `Record the engine reference instead:\n  node tools/make_golden.mjs --tissue ${TISSUE_KEY} --out tests/golden/${TISSUE_KEY}.engine.json\n` +
+    '(--force overrides this, but nothing in the repo should need it.)');
+  process.exit(2);
+}
 const SEED = +(args.seed ?? 7);
 const EVERY = 5;
 

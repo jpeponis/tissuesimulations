@@ -27,10 +27,22 @@ Two synthetic tissues:
       pericellular pool) fills by day 15 and is released by day 40.
 
 Usage:
-  python3 blender/make_sample_trajectory.py                     # -> blender/sample_trajectory.json
-  python3 blender/make_sample_trajectory.py --tissue cartilage  # -> blender/sample_trajectory_cartilage.json
+  python3 blender/make_sample_trajectory.py                     # -> blender/sample_synthetic_fibrous.json
+  python3 blender/make_sample_trajectory.py --tissue cartilage  # -> blender/sample_synthetic_cartilage.json
   python3 blender/make_sample_trajectory.py --out X.json --frames 12 --days 60 --cells 160 --seed 7
 Never overwrites an existing file unless --force is given.
+
+NOTE (docs/REVIEW.md E6): the default output names are deliberately NOT the committed fixtures.
+`blender/sample_trajectory.json` is a real engine export -- regenerate it with
+
+    node tools/run_headless.mjs --tissue fibrous --only maturation --blender blender/sample_trajectory.json
+
+-- and `blender/sample_trajectory_cartilage.json` is this generator's cartilage output, written
+once with `--tissue cartilage --out blender/sample_trajectory_cartilage.json --force`. Neither
+can be clobbered by running this script with no arguments any more.
+
+What this generator CANNOT produce: diffusible fields (frames[i].fields / meta.fields, v0.4).
+Use a real export if you want to exercise `import_tissue.py --fields`.
 """
 import argparse
 import json
@@ -55,7 +67,8 @@ TISSUES = {
         ],
         "dials": {"Gext": 0.5, "strain": 0.6, "protease": 0.4},
         "loadDial": "strain",
-        "default_out": "sample_trajectory.json",
+        "loadRange": [0.0, 1.0],
+        "default_out": "sample_synthetic_fibrous.json",
     },
     "cartilage": {
         "key": "cartilage",
@@ -73,7 +86,8 @@ TISSUES = {
         ],
         "dials": {"Gext": 0.5, "compression": 0.3, "protease": 0.2},
         "loadDial": "compression",
-        "default_out": "sample_trajectory_cartilage.json",
+        "loadRange": [0.0, 0.5],
+        "default_out": "sample_synthetic_cartilage.json",
     },
 }
 
@@ -367,6 +381,7 @@ def pack(tissue, raw_frames, dt_frame, N, K, L, n_cells, seed):
         "scenario": tissue["scenario"],
         "dials": dials,
         "loadDial": tissue["loadDial"],
+        "loadRange": list(tissue["loadRange"]),   # v0.4: the reader normalises the arrows over it
         "species": tissue["species"],
         "cellTypes": tissue["cellTypes"],
         "exportEveryDays": r4(dt_frame),
@@ -388,8 +403,9 @@ def main(argv=None):
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tissue", choices=sorted(TISSUES), default="fibrous")
-    ap.add_argument("--out", help="output JSON (default: blender/sample_trajectory.json for fibrous, "
-                                  "blender/sample_trajectory_cartilage.json for cartilage)")
+    ap.add_argument("--out", help="output JSON (default: blender/sample_synthetic_fibrous.json for fibrous, "
+                                  "blender/sample_synthetic_cartilage.json for cartilage; the committed "
+                                  "sample_trajectory*.json fixtures are never the default target)")
     ap.add_argument("--N", type=int, default=12)
     ap.add_argument("--K", type=int, default=3)
     ap.add_argument("--frames", type=int, default=12)

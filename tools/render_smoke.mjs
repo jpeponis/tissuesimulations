@@ -8,12 +8,26 @@
 //
 // Serves the repo root over http (ES modules do not load from file://), opens
 // tools/render_smoke.html in headless Chromium with SwiftShader WebGL, takes
-// screenshots of both fake tissues at three moments each (plus field / gel-style
-// variants), verifies frames are not blank, checks that three.js loads from
+// screenshots of both fake tissues at three moments each (plus field / gel-style /
+// wound variants), verifies frames are not blank, checks that three.js loads from
 // jsdelivr (through any HTTPS_PROXY, with a local cache fallback), exercises the
 // §4 API (setTissue, layers, legendSwatches, rebuild, dispose, framing at aspect
 // 0.6 and 2.4, prefers-reduced-motion) and measures update() CPU time per layer
 // set. Exit code 1 on failure.
+//
+// It also checks the v0.4 renderer work (docs/REVIEW.md §3 package B):
+//   B1  with `state.revision` unchanged, update() uploads nothing — the instance buffers'
+//       `.version` counters and stats.updates/skipped prove it — and a state WITHOUT
+//       `revision` still rebuilds every frame (the fallback this page uses by default)
+//   B2  the focused canvas orbits on the arrow keys, dollies on +/−, reframes on Home, and
+//       leaves Space / R / I / digits to the app (no preventDefault, no camera move)
+//   B3  a key press stops auto-rotate and fires opts.onAutoRotate
+//   B4  the wound marker follows state.wound, decays to a persistent outline, and hides when
+//       the state has no wound or the `wound` layer is off
+//   B5  fields[].pointScale and the species `render` hints (minDensity / radiusScale / opacity)
+//   E2  renderer.layoutParams() is the src/recipe.js `meta.render` shape
+//   E4  saturation factors default to 1.0 and TissueRenderer.toneMap() matches the GPU tone
+//       curve (ACES / AgX / none) to ≤ 1/255 per channel, which is what legendSwatches() uses
 import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -165,6 +179,8 @@ async function main() {
     { name: 'fibrous_03_t60_dense_aligned', params: 'tissue=fibrous&t=60' },
     { name: 'fibrous_04_t25_fields_g_m', params: 'tissue=fibrous&t=25&fields=g,m' },
     { name: 'fibrous_05_t40_cells_only', params: 'tissue=fibrous&t=40&fibers=0' },
+    { name: 'fibrous_06_t6_wound_marker', params: 'tissue=fibrous&t=6' },
+    { name: 'fibrous_07_t45_wound_faded', params: 'tissue=fibrous&t=45' },
     // cartilage in a dissolving hydrogel: three times
     { name: 'cartilage_01_t0_scaffold', params: 'tissue=cartilage&t=0' },
     { name: 'cartilage_02_t20_dissolving', params: 'tissue=cartilage&t=20' },
@@ -306,7 +322,167 @@ async function main() {
     await rm.close();
     if (fn.reducedMotionAutoRotate !== false || fn.reducedMotionExplicitOptIn !== true) problem('prefers-reduced-motion default failed: ' + JSON.stringify({ a: fn.reducedMotionAutoRotate, b: fn.reducedMotionExplicitOptIn }));
 
-    fn.dispose = await page.evaluate(() => { try { const r = window.__smoke.renderer; r.dispose(); r.render(); r.update(window.__smoke.state); r.resize(); return 'ok'; } catch (e) { return 'threw: ' + e.message; } });
+    // --- B4: the wound marker follows state.wound and fades to a persistent outline -----------
+    await open('tissue=fibrous&t=6');
+    fn.wound = { fresh: await page.evaluate(() => window.__smoke.woundState()) };
+    await page.evaluate(() => window.__smoke.setTime(45));
+    await page.evaluate(() => window.__smoke.waitFrames(2));
+    fn.wound.old = await page.evaluate(() => window.__smoke.woundState());
+    await page.evaluate(() => window.__smoke.setTime(1));            // before the injury: no wound
+    await page.evaluate(() => window.__smoke.waitFrames(2));
+    fn.wound.none = await page.evaluate(() => window.__smoke.woundState());
+    await open('tissue=fibrous&t=6&woundLayer=0');
+    fn.wound.layerOff = await page.evaluate(() => window.__smoke.woundState());
+    {
+      const w = fn.wound, exp = (age) => 0.15 + 0.55 * Math.exp(-age / 7);
+      if (!w.fresh.visible || Math.abs(w.fresh.opacity - exp(2)) > 1e-3 || Math.abs(w.fresh.scale - 0.24) > 1e-3
+          || Math.abs(w.fresh.pos[0] - 0.72) > 1e-3 || Math.abs(w.fresh.pos[1] - 0.32) > 1e-3)
+        problem('wound marker (fresh) wrong: ' + JSON.stringify(w.fresh));
+      if (!w.old.visible || Math.abs(w.old.opacity - exp(41)) > 1e-3) problem('wound marker did not fade to the persistent outline: ' + JSON.stringify(w.old));
+      if (w.none.visible) problem('wound marker shown for a state without a wound: ' + JSON.stringify(w.none));
+      if (w.layerOff.visible) problem('wound marker shown with the wound layer off: ' + JSON.stringify(w.layerOff));
+    }
+
+    // --- B2/B3: keyboard camera on the focused canvas, and it stops auto-rotate ---------------
+    await open('tissue=fibrous&t=20&auto=1');
+    await page.evaluate(() => window.__smoke.focusCanvas());
+    fn.keyboard = { focused: await page.evaluate(() => document.activeElement && document.activeElement.id) };
+    fn.keyboard.autoRotateBefore = await page.evaluate(() => window.__smoke.renderer.controls.autoRotate);
+    // the first key stops the auto-rotation (B3); Home then puts the camera back on the default
+    // framing, which is the fixed reference the orbit/dolly assertions below start from
+    await page.keyboard.press('ArrowLeft');
+    await page.keyboard.press('Home');
+    await page.evaluate(() => window.__smoke.waitFrames(2));
+    fn.keyboard.start = await page.evaluate(() => window.__smoke.cameraState());
+    await page.keyboard.press('ArrowRight');
+    await page.evaluate(() => window.__smoke.waitFrames(2));
+    fn.keyboard.afterRight = await page.evaluate(() => window.__smoke.cameraState());
+    await page.keyboard.press('ArrowUp');
+    await page.evaluate(() => window.__smoke.waitFrames(2));
+    fn.keyboard.afterUp = await page.evaluate(() => window.__smoke.cameraState());
+    await page.keyboard.press('-');
+    await page.evaluate(() => window.__smoke.waitFrames(2));
+    fn.keyboard.afterMinus = await page.evaluate(() => window.__smoke.cameraState());
+    await page.keyboard.press('+');
+    await page.keyboard.press('Home');
+    await page.evaluate(() => window.__smoke.waitFrames(2));
+    fn.keyboard.afterHome = await page.evaluate(() => window.__smoke.cameraState());
+    fn.keyboard.autoRotateEvents = await page.evaluate(() => window.__smoke.autoRotateEvents.slice());
+    // keys the app owns must not be swallowed, and must not move the camera
+    fn.keyboard.appKeys = await page.evaluate(async () => {
+      const seen = [];
+      const h = (e) => seen.push(`${e.key}:${e.defaultPrevented}`);
+      window.addEventListener('keydown', h);
+      const before = window.__smoke.cameraState();
+      for (const k of [' ', 'r', 'i', '1']) window.__smoke.renderer.canvas.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+      window.removeEventListener('keydown', h);
+      const after = window.__smoke.cameraState();
+      return { seen, moved: JSON.stringify(before.pos) !== JSON.stringify(after.pos) };
+    });
+    {
+      const k = fn.keyboard, d = (a, b) => Math.hypot(a.pos[0] - b.pos[0], a.pos[1] - b.pos[1], a.pos[2] - b.pos[2]);
+      if (k.focused !== 'c') problem('canvas did not take focus: ' + k.focused);
+      if (!(d(k.start, k.afterRight) > 0.05) || Math.abs(k.afterRight.pos[2] - k.start.pos[2]) > 1e-3)
+        problem('ArrowRight did not orbit around the up axis: ' + JSON.stringify([k.start, k.afterRight]));
+      if (!(k.afterUp.pos[2] > k.afterRight.pos[2] + 0.05) || Math.abs(k.afterUp.dist - k.start.dist) > 1e-3)
+        problem('ArrowUp did not lift the camera at a constant distance: ' + JSON.stringify([k.afterRight, k.afterUp]));
+      if (!(k.afterMinus.dist > k.afterUp.dist * 1.05)) problem('"-" did not dolly out: ' + JSON.stringify([k.afterUp, k.afterMinus]));
+      // OrbitControls' damping keeps bleeding a little of the stopped auto-rotation for a few
+      // frames, so "back to the default framing" is within a fraction of a voxel, not exact
+      if (d(k.afterHome, k.start) > 0.02) problem('Home did not restore the default framing: ' + JSON.stringify([k.start, k.afterHome]));
+      if (k.autoRotateBefore !== true || k.afterRight.autoRotate !== false || k.autoRotateEvents[0] !== false)
+        problem('a key press did not stop auto-rotate / fire onAutoRotate: ' + JSON.stringify([k.autoRotateBefore, k.autoRotateEvents]));
+      if (k.appKeys.moved || k.appKeys.seen.some((x) => x.endsWith(':true')))
+        problem('the renderer swallowed or acted on an app shortcut: ' + JSON.stringify(k.appKeys));
+    }
+
+    // --- B1: with state.revision unchanged, update() uploads nothing --------------------------
+    await open('tissue=fibrous&t=20&revision=1&auto=0');
+    await page.evaluate(() => window.__smoke.waitFrames(4));
+    const b0 = await page.evaluate(() => window.__smoke.bufferVersions());
+    await page.evaluate(() => window.__smoke.waitFrames(20));
+    const b1 = await page.evaluate(() => window.__smoke.bufferVersions());
+    await page.evaluate(() => window.__smoke.setTime(21));
+    await page.evaluate(() => window.__smoke.waitFrames(3));
+    const b2 = await page.evaluate(() => window.__smoke.bufferVersions());
+    // layer toggles must not be skipped either
+    await page.evaluate(() => window.__smoke.setLayers({ fibers: false }));
+    await page.evaluate(() => window.__smoke.waitFrames(3));
+    const b3 = await page.evaluate(() => window.__smoke.bufferVersions());
+    fn.dirty = { paused: b1, afterTime: b2, afterLayer: b3, skippedFrames: b1.skipped - b0.skipped, updatesWhilePaused: b1.updates - b0.updates };
+    if (!(fn.dirty.skippedFrames >= 15) || fn.dirty.updatesWhilePaused !== 0 || b1.fibers !== b0.fibers || b1.cells !== b0.cells)
+      problem('paused frames still rebuilt instance buffers: ' + JSON.stringify(fn.dirty));
+    // Chromium quantises performance.now() to 100 µs, so one tick is the floor a skipped
+    // update() can report; the buffer versions above are the exact proof that it did nothing.
+    if (!(b1.updateMs <= 0.15)) problem(`update() while paused took ${b1.updateMs} ms (expected ≈ 0)`);
+    if (b2.updates !== b1.updates + 1 || b2.fibers <= b1.fibers) problem('a new revision did not rebuild: ' + JSON.stringify([b1, b2]));
+    if (b3.updates !== b2.updates + 1) problem('a layer change did not rebuild: ' + JSON.stringify([b2, b3]));
+    // without `revision` (the default for this page) every frame must still update
+    await open('tissue=fibrous&t=20&auto=0');
+    const c0 = await page.evaluate(() => window.__smoke.bufferVersions());
+    await page.evaluate(() => window.__smoke.waitFrames(10));
+    const c1 = await page.evaluate(() => window.__smoke.bufferVersions());
+    fn.dirty.fallbackUpdates = c1.updates - c0.updates;
+    if (!(fn.dirty.fallbackUpdates >= 8) || c1.skipped !== c0.skipped)
+      problem('a state without `revision` must always update: ' + JSON.stringify(fn.dirty));
+
+    // --- E4: legend swatches carry the same tone curve the GPU applies ------------------------
+    fn.tone = {};
+    for (const mode of ['aces', 'agx', 'none']) {
+      const r = await page.evaluate((m) => window.__smoke.toneCurveCheck(m, 1.08), mode);
+      fn.tone[mode] = { maxDelta: r.maxDelta, sample: r.entries[0] };
+      if (r.maxDelta > 1) problem(`CPU tone curve '${mode}' differs from the GPU by ${r.maxDelta}/255: ` + JSON.stringify(r.entries));
+    }
+    fn.saturationDefaults = await page.evaluate(() => {
+      const o = window.__smoke.renderer.opts;
+      return { fiber: o.fiberSaturation, cell: o.cellSaturation, gel: o.gelSaturation, scaffold: o.scaffoldSaturation };
+    });
+    if (Object.values(fn.saturationDefaults).some((v) => v !== 1))
+      problem('saturation factors must default to 1.0 so the definition hex is the colour: ' + JSON.stringify(fn.saturationDefaults));
+
+    // --- B5 / E2: field pointScale, species render hints, meta.render recipe ------------------
+    fn.hints = await page.evaluate(() => {
+      const S = window.__smoke, r = S.renderer, out = {};
+      const T = JSON.parse(JSON.stringify(S.tissues.cartilage));
+      r.setTissue(T);
+      r.update(S.makeFakeState(12, 160, 20, {}, 'cartilage'), { fields: { tgf: true } });
+      out.sizeDefault = r.fields[0].mat.uniforms.uSize.value;
+      out.gelMinDefault = r.opts.gelMin;
+      T.fields[0].pointScale = 2.5;
+      T.species.find((s) => s.kind === 'gel').render = { minDensity: 0.4, radiusScale: 0.5, opacity: 0.5 };
+      T.species.find((s) => s.kind === 'scaffold').render = { minDensity: 0.5 };
+      r.setTissue(T);
+      r.update(S.makeFakeState(12, 160, 20, {}, 'cartilage'), { fields: { tgf: true } });
+      out.sizeScaled = r.fields[0].mat.uniforms.uSize.value;
+      out.gelOpacity = r.gelMat.uniforms.uOpacity.value;
+      out.gelVisibleHinted = r.stats.gelVisible;
+      out.strutsVisibleHinted = r.stats.strutsVisible;
+      out.recipe = r.layoutParams();
+      S.setTissue('fibrous');
+      r.update(S.makeFakeState(12, 160, 20, {}, 'fibrous'));
+      out.fibrousRecipe = r.layoutParams();
+      return out;
+    });
+    {
+      const h = fn.hints;
+      if (Math.abs(h.sizeScaled - h.sizeDefault * 2.5) > 1e-9) problem('fields[].pointScale ignored: ' + JSON.stringify(h));
+      if (Math.abs(h.gelOpacity - 0.28 * 0.5) > 1e-9) problem('species render.opacity ignored: ' + JSON.stringify(h));
+      if (!(h.gelVisibleHinted < 1728) || !(h.strutsVisibleHinted < 5616)) problem('species render.minDensity ignored: ' + JSON.stringify(h));
+      if (h.fibrousRecipe.recipe !== 'fiber-v1' || h.fibrousRecipe.K !== 3 || h.fibrousRecipe.seed !== 90210
+          || Math.abs(h.fibrousRecipe.fiber.radiusScale - 0.6) > 1e-9)
+        problem('layoutParams() is not the src/recipe.js shape: ' + JSON.stringify(h.fibrousRecipe));
+    }
+    await open('tissue=fibrous&t=20');
+
+    fn.dispose = await page.evaluate(() => {
+      try {
+        const r = window.__smoke.renderer;
+        r.dispose(); r.render(); r.update(window.__smoke.state); r.resize(); r.resetView();
+        const before = JSON.stringify(window.__smoke.cameraState());
+        r.canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+        return JSON.stringify(window.__smoke.cameraState()) === before ? 'ok' : 'key listener still attached after dispose()';
+      } catch (e) { return 'threw: ' + e.message; }
+    });
     if (fn.dispose !== 'ok') problem('dispose(): ' + fn.dispose);
     summary.functional = fn;
     console.log('functional:', JSON.stringify(fn));

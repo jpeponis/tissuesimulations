@@ -34,18 +34,6 @@ except ImportError:  # pragma: no cover
 # Categorical palette in fixed slot order (validated, colour-blind safe in adjacent pairs).
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#4a3aa7", "#e34948", "#00807a"]
 
-# Run order and labels where we know them; anything else keeps its file name and lands after these.
-RUNS = {
-    # fibrous
-    "maturation": "Scaffold to tissue", "unloading": "Unloading", "fibrosis": "Fibrosis (Gext→0.2 @45 d)",
-    "wound": "Wound (injure @5 d)", "sandbox": "Sandbox",
-    "maturation_lowG": "Maturation, Gext 0.2", "maturation_protease0": "Maturation, protease 0",
-    "maturation_protease1": "Maturation, protease 1", "fibrosis_nodrop": "Fibrosis, no drop",
-    "fibrosis_lowG": "Fibrosis, Gext 0.2", "sandbox_evaporate": "Sandbox, dials 0",
-    # cartilage
-    "race": "Hydrogel to cartilage (the race)", "toofast": "Scaffold degrades too fast",
-    "toodense": "Scaffold too dense", "drift": "Fibrocartilage drift", "inflamed": "Inflammatory breakdown",
-}
 GRID = dict(color="#e6e6e3", linewidth=0.6)
 TEXT = "#0b0b0b"
 MUTED = "#52514e"
@@ -79,6 +67,20 @@ def read_meta(path):
         return None
 
 
+def run_label(name, meta):
+    """The legend text for a run: the title run_headless.mjs wrote, else the tissue's own scenario
+    title, else the file name. No table of run names lives here — a new scenario or a new tissue
+    labels itself (docs/REVIEW.md D6)."""
+    meta = meta or {}
+    return meta.get("title") or meta.get("scenarioTitle") or meta.get("scenario") or name
+
+
+def run_order(name, meta):
+    """Runs come out in the order run_headless.mjs ran them; anything without an order lands last."""
+    order = (meta or {}).get("order")
+    return (order if isinstance(order, int) else 10_000, name)
+
+
 def style(ax, title, ylabel=None, ylim=None):
     ax.set_title(title, fontsize=10.5, color=TEXT, loc="left", pad=5)
     ax.grid(True, **GRID)
@@ -108,18 +110,18 @@ def main():
 
     names = [os.path.splitext(os.path.basename(p))[0] for p in sorted(glob.glob(os.path.join(d, "*.csv")))]
     names = [n for n in names if not n.endswith("_traj") and (only is None or n in only)]
-    names.sort(key=lambda n: (list(RUNS).index(n) if n in RUNS else len(RUNS), n))
-    data, metas = {}, {}
+    metas = {n: read_meta(os.path.join(d, f"{n}.json")) for n in names}
+    names.sort(key=lambda n: run_order(n, metas.get(n)))
+    data = {}
     for n in names:
         cols = read_csv(os.path.join(d, f"{n}.csv"))
         if cols:
             data[n] = cols
-            metas[n] = read_meta(os.path.join(d, f"{n}.json"))
     if not data:
         sys.exit(f"no CSVs found in {d}; run `node tools/run_headless.mjs --tissue {a.tissue or 'fibrous'} --out {d}` first")
     color = {n: PALETTE[i % len(PALETTE)] for i, n in enumerate(data)}
     dash = {n: ("-" if i < len(PALETTE) else "--") for i, n in enumerate(data)}
-    label = {n: RUNS.get(n, n) for n in data}
+    label = {n: run_label(n, metas.get(n)) for n in data}
     meta = next((m for m in metas.values() if m), None)
     tissue = (meta or {}).get("tissue", a.tissue or "?")
     species = (meta or {}).get("species") or [
@@ -131,7 +133,9 @@ def main():
     # ---------------------------------------------------------------- figure 1: panel per readout series
     panels = [("species.total", "Total matrix density", "1 ≈ native content")]
     panels += [(f"species.{k}", f"{s.get('label', k)}  ({k})", "density") for k, s in zip(skeys, species)]
-    panels += [("logE", "Stiffness  log10 E", "log10 kPa"), ("fa", "Fibre alignment (mean FA)", "0–1")]
+    panels += [("logE", "Stiffness  log10 E", "log10 kPa"),
+               ("globalFA", "Alignment, whole tissue (globalFA)", "0–1"),
+               ("fa", "Local anisotropy (mean per-voxel FA)", "0–1")]
     panels += [(f"cells.{x}", f"Cell state {x}", "0–1") for x in ("a", "b", "c")]
     panels += [(f"fields.{k}", f"Field {k}", "field units") for k in fkeys]
     panels += [("flux", "Deposition (solid) vs degradation (dashed)", "density/day")]

@@ -35,17 +35,24 @@ npm run serve     # http://localhost:8000/  (ES modules do not load from file://
 | command | what it does |
 |---|---|
 | `npm test` | `node --test tests/*.test.mjs` — conformance for every registered tissue, the golden regression, the engine API, the build constraints and the tools |
-| `npm run build` | `node tools/build_single.mjs` — writes `dist/tissue-weather.html` and `dist/tissue-weather.artifact.html` |
+| `npm run build` | `node tools/build_single.mjs` — writes `dist/tissue-weather.html` and `dist/tissue-weather.artifact.html`. It throws (with a `src/file:line`) on a local import the bundle does not carry, on any `import`/`export` statement that survived the strip, and on a bundle that does not `node --check` |
+| `node tools/build_single.mjs --vendor` | also writes `dist/tissue-weather.offline.html` with Three.js inlined — the copy for a room with no network. Not committed; build it when you need it |
 | `npm run check-dist` | rebuilds into a temp directory and fails if the committed `dist/` is stale |
 | `npm run headless` | `node tools/run_headless.mjs` — every scenario in Node → CSV + trajectory JSON under `scratch/<tissue>/` |
-| `npm run golden` | `node tools/make_golden.mjs` — re-record the golden reference (read the section below first) |
+| `npm run golden` | `node tools/make_golden.mjs` — re-record a golden reference (read the section below first) |
+| `node tools/check_params_doc.mjs --write` | regenerate the `<!-- params:<tissue> -->` as-built blocks in the docs after changing a parameter (`npm test` fails while they disagree) |
 | `npm run new-tissue -- <key> "<Name>"` | scaffold and register a new tissue definition |
 | `npm run screenshot` | drive the real app in headless Chromium and save screenshots |
 | `npm run serve` | `python3 -m http.server 8000` from the repository root |
 
-Extra flags go after `--`, e.g. `npm run headless -- --tissue fibrous --days 40 --only maturation`.
-Every tool also runs directly (`node tools/run_headless.mjs …`); its flags are documented in the
-header comment at the top of the file, which is the only place they are documented.
+Extra flags go after `--`, e.g. `npm run headless -- --tissue fibrous --days 40 --only maturation`
+(`--key=value` works too, and `--help` prints the options and the runs). Every tool also runs
+directly (`node tools/run_headless.mjs …`); its flags are documented in the header comment at the
+top of the file, which is the only place they are documented.
+
+`tools/screenshot_app.mjs` and `tools/render_smoke.mjs` drive a real headless Chromium; the plumbing
+they share (finding Playwright, serving the repo, the CDN cache in `os.tmpdir()`, closing everything
+again) lives in `tools/lib/browser.mjs` — see `tools/lib/README.md`.
 
 ## Coding constraints (docs/EXTENDING.md §0) — and why
 
@@ -129,27 +136,33 @@ GitHub Pages serves and what an instructor downloads. Run `npm run build` whenev
 `index.html` or anything in `src/`, and commit the result — `npm run check-dist` (and CI) will
 tell you if you forget.
 
-## The golden regression
+## The two golden regressions
 
-`tests/golden/fibrous.json` holds reference statistics recorded from the v0.1 model with seed 7.
-The test replays every recorded run and compares `species.total`, `species.mat`, `fa` and
-`cells.a` at every recorded day, within 3 % relative or 0.01 absolute — whichever is larger.
-It exists so that refactors (the v0.1 `model.js` → engine + tissue split, for one) cannot
-quietly change the biology the lesson is built on.
+There are two reference files for the fibrous tissue, and they answer different questions.
+
+| file | recorded from | tolerance | question it answers | re-record? |
+|---|---|---|---|---|
+| `tests/golden/fibrous.json` | the **v0.1 `model.js`**, seed 7 | 3 % relative or 0.01 absolute | "is this still the same **model**?" | **Never.** The 3 % agreement with v0.1 *is* the claim, and no tool here can reproduce that recording — `make_golden.mjs` would simply write down the engine as it is today. If it fails, the model moved |
+| `tests/golden/fibrous.engine.json` | the **current engine**, seed 7 | 1e-5 relative / 1e-7 absolute, on every recorded stat path | "is this still the same **arithmetic**?" | Yes, deliberately, when a change is *meant* to move the numbers |
+
+The tight file is what makes a refactor safe: a change that is supposed to preserve behaviour has
+to leave it bit-identical, and 0.1 % of drift shows up immediately instead of hiding inside the
+3 % band.
 
 ```bash
-node tools/make_golden.mjs                     # rewrites tests/golden/fibrous.json
-node tools/make_golden.mjs --tissue mytissue   # a new golden for a new tissue
+node --test --test-name-pattern 'golden' tests/engine.test.mjs        # just the goldens
+node tools/make_golden.mjs --tissue fibrous --out tests/golden/fibrous.engine.json   # re-record the tight one
+node tools/make_golden.mjs --tissue mytissue                          # a golden for a new tissue
 ```
 
-**Regenerating it is legitimate when** you deliberately changed the fibrous model or its
-parameters and can say, in the PR, what changed in the biology and why the new curves are
-right; when you add a tissue and want a golden of its own; or when the recorded format changes
-(the current file is format 2). **It is not legitimate** as a way to make a failing test pass.
-A golden mismatch after a refactor that was supposed to preserve behaviour is the test doing
-its job: find the difference instead. If you do regenerate, say so explicitly in the PR
-description, include the before/after numbers for the days that moved most, and check that the
-scenario `checks` and `docs/TEACHING.md` still describe what the simulation now does.
+**Re-recording `*.engine.json` is legitimate when** you deliberately changed the model, its
+parameters or the engine arithmetic and can say, in the PR, what changed and why the new curves are
+right; when you add a tissue and want a golden of its own; or when the recorded format changes.
+**It is not legitimate** as a way to make a failing test pass. A mismatch after a refactor that was
+supposed to preserve behaviour is the test doing its job: find the difference instead. If you do
+re-record, say so explicitly in the PR description, include the before/after numbers for the days
+that moved most, and check that the scenario `checks`, `docs/TEACHING.md` and
+`tests/fidelity.test.mjs` still describe what the simulation now does.
 
 ## Pull request checklist
 
@@ -158,7 +171,9 @@ scenario `checks` and `docs/TEACHING.md` still describe what the simulation now 
 - [ ] Changes to `src/` respect the four constraints above (`tests/build.test.mjs` is the referee).
 - [ ] A change to the engine/renderer/app/export contract is reflected in `docs/EXTENDING.md`, and the file map in `docs/ARCHITECTURE.md` still matches reality.
 - [ ] A new or changed tissue has at least two scenarios, each with `checks` that encode the teaching claim.
-- [ ] The golden was not regenerated — or it was, and the PR says what changed in the model and why.
+- [ ] `tests/golden/fibrous.json` (the v0.1 reference) was **not** regenerated, and if `fibrous.engine.json` was, the PR says what changed in the model and why.
+- [ ] A parameter change was followed by `node tools/check_params_doc.mjs --write`.
+- [ ] A change to a teaching claim is measured, not asserted: `tests/fidelity.test.mjs` says what the model actually does.
 - [ ] New biology claims carry a DOI in `docs/MODEL.md` or the tissue's spec under `docs/tissues/`.
 - [ ] Student-facing copy stays plain, second person and concrete; the app still works with the keyboard and reads correctly to a screen reader (`node tools/screenshot_app.mjs` probes both).
 - [ ] Screenshots in `docs/img/` updated if the look changed materially.

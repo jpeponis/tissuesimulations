@@ -80,6 +80,19 @@ Activated cells migrate less ([Rønnov-Jessen & Petersen 1996](https://doi.org/1
 harder ([Hinz et al. 2001, Mol Biol Cell](https://doi.org/10.1091/mbc.12.9.2730)) — the basis of
 `v = v0(1 − 0.6·alpha)` and of the `kappa·alpha` self-tension term.
 
+**How the model renders the two inputs — TGF-β *gates*, tension *potentiates*.** The literature above
+is usually summarised as "both are required", and the implementation is deliberately not a logical
+AND. Activation is `tanh(gsat·(aG + aE·H) − soft)` (§2.3): the growth-factor saturation `gsat`
+MULTIPLIES the whole activating term, so it is a gate — with the bath at 0 the cells stay under
+α = 0.05 at any load, for any length of time — while the tension term `H` only raises the ceiling
+the gate lets through. Measured on the shipped parameters, at the maturation preset: bath 0, load 1
+→ α < 0.01; bath 0.5, load 0 → α ≈ 0.49 rising to 0.53 over eight weeks; bath 0.5, load 0.6 →
+α ≈ 0.89. That "half way on the bath alone" is the honest reading of the model, and it is what
+`docs/TEACHING.md` objective 3 and the `unloading` scenario now say. A true AND gate has no low
+state at Gext 0.2 and therefore no hysteresis, which is why the multiplicative form was chosen
+(Hinz's TGF-β × mechanics crosstalk rather than an additive sum; see §4.4 and the tuning log in
+`src/tissues/fibrous.js`).
+
 ### 1.4 ECM maturation sequence and the MMP/TIMP balance
 Fibrin/fibronectin provisional matrix (hours–days) → fibroblast invasion and collagen-III-rich granulation
 tissue (days 3–7) → collagen I accumulation (weeks) → lysyl-oxidase (LOX) cross-linking and remodelling
@@ -162,6 +175,16 @@ Stiffness (kPa):
 
 $$E = E_0 + E_{scale}\,\rho^{2}\,(1 + k_{Mat}\,\phi_{mat})\,(1 + k_{Strain}\,\varepsilon).$$
 
+*As built* (`src/tissues/fibrous.js`, and the block in §3): the same law with
+$E_0 = 0.3$, $E_{scale} = 20$, $k_{Mat} = 3$ and $k_{Strain} = \mathbf{0.5}$ (not 1), evaluated on the
+POST-update densities of the step, and reported by the readout as the mean of $\log_{10}E$ over the
+voxels — a **geometric** mean in kPa, not an arithmetic one. Landmarks with those numbers, at load 0:
+$\rho = 0.15$ immature → 0.75 kPa, $\rho = 0.5$ immature → 5.3 kPa, $\rho = 1$ immature → 20.3 kPa,
+$\rho = 1$ fully mature → 80.3 kPa; at load 0.6 the last is 104 kPa. Where the scenarios actually end
+(seed 7): maturation 82 kPa at day 60 and 126 kPa at day 90, wound 124 kPa at day 60, fibrosis 145 kPa
+at day 90 — i.e. the model's "mature tissue" is scar-to-hypertrophic-scar stiffness, above the 43 kPa
+burn scar and well above the ~10 kPa of normal dermis in §3. Read it as a scar model, not as dermis.
+
 *Annotation.* $E\propto\rho^2$: acellular collagen gels follow $E\propto c^{2.1-2.2}$ over 0.5–12 kPa
 ([Raub et al. 2010](https://doi.org/10.1016/j.actbio.2010.07.004)); fibrin rigidity $\propto c^{2}$
 ([Fukada & Kaibara 1973](https://doi.org/10.3233/bir-1973-10207)), exponent ~1–1.2 at ≤3 mg/mL
@@ -176,6 +199,20 @@ $\rho=1$ mature → 80 kPa (scar), see §3.
 $$\partial_t g = D_g\nabla^2 g + k_{bath}(G_{ext}-g) + k_{Gcell}\sum_i \alpha_i\,\delta_i + k_{Grel}\,\mathrm{deg} - k_{Gdec}\,g$$
 
 $$\partial_t m = D_m\nabla^2 m + \sum_i\big[m_{basal}P + m_{act}(1-\mathrm{tensionSat}_i)\big]\delta_i + (\text{injury burst}) - k_{Mdec}\,m$$
+
+*As built*: $k_{bath} = 4$/d, $k_{Gdec} = 0$ (no decay term at all — the bath relaxation is what
+clears it), autocrine source $k_{Gcell}\,\alpha_i H_i = 12\,\alpha_i H_i$ per cell (H-gated: only
+contractile cells on stiff matrix free latent TGF-β), release on degradation $k_{Grel} = 2$ per unit
+of matrix cut, and $D_g = 0.05\ L^2$/d. For the protease field, per cell
+$20\,P^3 + 3.5\,(1-H)/(1 + (\alpha/0.25)^2)$ with $k_{Mdec} = 1$/d, $D_m = 0.05$, plus a background
+$m_{min} = 0.02$ added inside the degradation rule.
+
+**Which term carries the hysteresis.** The two cell-facing sources are not remotely equal. In the
+fibrosis scenario 15 days after the bath drops from 0.9 to 0.2, the field sits at $g \approx 0.41$,
+so in steady state the bath is draining $k_{bath}(g - G_{ext}) \approx 0.82$/day and the cells must be
+supplying that much. The release term is $k_{Grel}\cdot\mathrm{deg} \approx 0.007$/day — **under 1 %**.
+The memory of a fibrotic tissue in this model is autocrine (Wipff 2007; Hinz 2015), not matrix-stored;
+`docs/TEACHING.md` §3 and the tissue's metaphor-break copy say so, and `tests/fidelity.test.mjs` pins it.
 
 *Annotation.* `g` is active, cell-available TGF-β1: bath = exogenous TGF-β/serum (Desmoulière 1993);
 autocrine term = contraction-mediated release by activated cells on stiff matrix (Wipff 2007; Hinz 2015);
@@ -194,6 +231,25 @@ $$\mathrm{tension}_i = \frac{E_{loc}}{E_{ref}}\,(\varepsilon + \kappa\,\alpha_i)
 
 $$\alpha_i^{*} = \operatorname{clamp}\!\Big(a_E\,\mathrm{tensionSat}_i + a_G\,\frac{g}{g+g_{half}} - a_{soft}\,[E_{loc}<E_{soft}],\;0,\;1\Big),\qquad
 \frac{d\alpha_i}{dt} = \frac{\alpha_i^{*}-\alpha_i}{\tau_\alpha}.$$
+
+*As built* — the spec's additive, clamped sum was replaced by a multiplicative, saturating one
+(the change that gives the model a low state, and therefore hysteresis):
+
+$$H_i = \frac{\tau_i^2}{1+\tau_i^2},\quad \tau_i = \frac{E_{loc}}{10}\,(\varepsilon + 0.12\,\alpha_i),\qquad
+g\text{sat} = \frac{g^2}{g^2 + 0.5^2},$$
+
+$$\alpha_i^{*} = \max\!\Big(0,\ \tanh\big(g\text{sat}\,(1.15 + 0.6\,H_i) - 0.1\tfrac{0.5}{E_{loc}+0.5}\big)\Big),\qquad
+\frac{d\alpha_i}{dt} = \frac{\alpha_i^{*}-\alpha_i}{\tau_\alpha},\ \ \tau_\alpha = 2\ \text{d up},\ 4\ \text{d down}.$$
+
+`gsat` multiplies the whole bracket, so the growth factor GATES and the tension POTENTIATES (§1.3):
+no bath, no activation at any load; bath alone reaches α ≈ 0.5. Secretion is
+$s_i = (0.005 + 2.5\,\alpha_i^{2})\,(0.5 + 0.5\,H_i)\,(1 - \rho/1.6)^{2}$ — $\alpha^2$ rather than
+$\alpha$, a tension factor, and a crowding factor that lets a loaded tissue settle near $\rho = 1$
+instead of running into the trace clamp — with $\mathrm{pol}_i = 0.2 + 0.6\,\alpha_i$ as in the spec.
+Traction realignment uses $k_{Align} = 0.6$/d (spec 0.4; it pulls fibres onto the CELL's axis, so it is
+not a lever on the alignment readout — see the tuning log). Migration keeps the spec's law times a grip
+factor $0.5 + 0.5\min(1, \rho/0.5)$, with $k_{Guide} = 6$/d, $k_{LoadAlign} = 10\,\varepsilon^2 H$ and
+$\sigma = 2.5$ rad/√d.
 
 *Annotation.* Cell-sensed stress ≈ stiffness × (imposed + self-generated strain) is the tensional-homeostasis
 picture (Brown 1998; Humphrey 2014); $\kappa\alpha$ is the higher traction of α-SMA-positive cells
@@ -252,6 +308,21 @@ $$\frac{dT}{dt} = \mathrm{depos} - \frac{\mathrm{deg}}{\rho}\,T + k_{LoadFib}\,\
 
 with clamps $\operatorname{tr}T\le 2$, $0\le\rho_{mat}\le\rho$.
 
+*As built*, with $\mathrm{tr} = \rho_{new} + \rho_{mat}$, $m_{eff} = 0.02 + m$ and a load shield
+$\mathrm{sh} = 1 - 0.5\,\varepsilon\,T_{zz}/\mathrm{tr}$ (strained, aligned fibres resist proteolysis —
+the Loerakker/Ristori term the spec omits):
+
+$$\mathrm{dv} = 0.5\,m_{eff}(\rho_{new} + 0.05\,\rho_{mat})\,\mathrm{sh},\qquad
+\mathrm{deg}_{mat} = 0.5\,m_{eff}\cdot 0.05\,\rho_{mat}\ \ (\text{unshielded, as in v0.1}),$$
+
+$$\mathrm{mat} = \tfrac{1}{14}\,\rho_{new}\,(0.1 + 12\,\textstyle\sum_{i \in \text{voxel}}\alpha_i),\qquad
+\dot\rho_{mat} = \mathrm{mat} - \mathrm{deg}_{mat},\qquad
+\dot\rho_{new} = -\mathrm{dv} - \mathrm{mat} + \mathrm{deg}_{mat},$$
+
+and $k_{LoadFib} = 0.06\,\varepsilon^{2}$ (spec $0.5\,\varepsilon$) for the passive load alignment. Cross-linking
+therefore needs LOX from activated cells: a cell-free gel never matures. The engine applies the trace
+clamp $\mathrm{tr}\,T \le 2$ and re-derives FA and the principal axis afterwards (EXTENDING §2.5).
+
 *Annotation.* First-order MMP kinetics on matrix density (Dallon et al. 2001,
 [Wound Repair Regen 9:278](https://doi.org/10.1046/j.1524-475x.2001.00278.x);
 [McDougall et al. 2006](https://doi.org/10.1098/rsta.2006.1773)); protease resistance of cross-linked collagen
@@ -266,15 +337,40 @@ relaxation of $T$ toward $\rho\hat z\hat z^{\mathsf T}$. Loerakker 2014 and Rist
 
 ## 3. Parameter table
 
-> **Where these values live now.** The "Spec default" column is the v0.1 specification, and the
-> "as built" values are listed in `docs/SPEC.md` §3. In v0.2 both are implemented as the `params`
-> block of [`src/tissues/fibrous.js`](../src/tissues/fibrous.js) (with the engine-level numerics —
-> `N`, `dt`, `rhoMax`, `kLoadFib`, `loadExp`, `fEvery`, `rCell`, `kRep` — in that file's `engine`
-> block, defaults in `ENGINE_DEFAULTS` in `src/engine.js`). That file's header carries the full
-> tuning log and says which recommendation of §4 was adopted. Change a number there, not here;
-> then re-run `npm test`, because `tests/golden/fibrous.json` holds the fibrous model to the
-> behaviour this table describes. The table itself stays: it is the measured range each constant
-> has to answer to.
+> **Where these values live now.** The single source of truth is the `params` and `engine` block of
+> [`src/tissues/fibrous.js`](../src/tissues/fibrous.js) (engine defaults: `ENGINE_DEFAULTS` in
+> `src/engine.js`); that file's header carries the tuning log and says which recommendation of §4
+> was adopted, and `docs/SPEC.md` §3 records what was changed relative to the v0.1 spec and why.
+> The block immediately below is **generated** from the code by
+> `node tools/check_params_doc.mjs --write` and checked by `npm test`, so it cannot drift; the
+> "Spec default" column of the table is the v0.1 specification and stays as it is. Change a number
+> in the tissue definition, re-run the checker, and re-run `npm test` — `tests/golden/fibrous.json`
+> (3 % against v0.1) and `tests/golden/fibrous.engine.json` (1e-5 against the current engine) hold
+> the model to the behaviour this table describes.
+
+<!-- params:fibrous -->
+<!-- Generated from src/tissues/fibrous.js by `node tools/check_params_doc.mjs --write`.
+     Do not edit inside the markers: `npm test` compares every number with the code. -->
+**As built** — what `src/tissues/fibrous.js` runs today (9 engine + 43 params). The sourced table in this
+section says what the numbers have to answer to; this block says what they are.
+
+```text
+engine  N = 12             dt = 0.02          rhoMax = 2         kLoadFib = 0.06
+        loadExp = 2        fEvery = 4         rCell = 0.03       kRep = 0.5
+        trace = 'fiber'
+params  E0 = 0.3           Escale = 20        kMat = 3           kStrain = 0.5
+        Eref = 10          kGcell = 12        kGrel = 2          mBasal = 20
+        protExp = 3        mAct = 3.5         mAlphaHalf = 0.25  mMin = 0.02
+        kappa = 0.12       nHill = 2          aE = 0.6           aG = 1.15
+        gHalf = 0.5        gHill = 2          aSoft = 0.1        Esoft = 0.5
+        tauAlphaUp = 2     tauAlphaDown = 4   sBasal = 0.005     sAct = 2.5
+        sTens = 0.5        rhoCrowd = 1.6     depCrowd = 2       polBase = 0.2
+        polAct = 0.6       kAlign = 0.6       v0 = 0.7           rhoStar = 0.5
+        vFloor = 0.5       sigmaP = 2.5       kGuide = 6         kLoadAlign = 10
+        kDeg = 0.5         rMat = 0.05        kProt = 0.5        kMat0 = 0.0714286
+        kMatBase = 0.1     kLox = 12          eps = 0.000001
+```
+<!-- /params:fibrous -->
 
 Physical conversions assume $L = 300\ \mu$m, so $h = 25\ \mu$m (about one fibroblast body width;
 cells in 3D are spindles 50–100 µm long) and 1 L/d = 12.5 µm/h.

@@ -93,7 +93,9 @@ for (const [regKey, t] of Object.entries(CONFORMANCE)) {
       for (const sc of t.scenarios) assert.ok(Array.isArray(sc.checks) && sc.checks.length > 0, `scenario '${sc.key}' has no checks`);
       assert.ok(t.readouts && t.readouts.length > 0, 'readouts');
       assert.ok(t.copy && t.copy.intro && t.copy.legend && t.copy.vocabulary, 'copy blocks');
-      assert.ok(t.dials.some((d) => d.role === 'cellCount'), 'a cellCount dial');
+      // a way to seed cells: the cellCount dial, or (v0.4) absolute cellTypes[].count values
+      assert.ok(t.dials.some((d) => d.role === 'cellCount') || t.cellTypes.some((c) => Number.isInteger(c.count)),
+        "a role:'cellCount' dial or cellTypes[].count");
       // the export meta names the dials with roles, and every cell scalar resolves to a label + range
       const meta = engineFor(t).exportMeta();
       assert.equal(meta.loadDial, (t.dials.find((d) => d.role === 'load') || {}).key ?? null, 'meta.loadDial');
@@ -151,8 +153,12 @@ for (const [regKey, t] of Object.entries(CONFORMANCE)) {
 }
 
 // ---------------------------------------------------------------- golden regression (fibrous, seed 7)
-describe('golden regression: fibrous vs tests/golden/fibrous.json', () => {
-  const golden = JSON.parse(readFileSync(new URL('./golden/fibrous.json', import.meta.url), 'utf8'));
+// Two files, two jobs (docs/REVIEW.md D2):
+//   golden/fibrous.json         recorded from v0.1 model.js — "still the same MODEL", 3 % / 0.01
+//   golden/fibrous.engine.json  recorded from this engine (tools/make_golden.mjs) — "still the same
+//                               ARITHMETIC", 1e-5 relative / 1e-7 absolute on every recorded stat path
+const goldenSuite = (file, label, tolOf) => describe(`golden regression: fibrous vs tests/golden/${file} (${label})`, () => {
+  const golden = JSON.parse(readFileSync(new URL(`./golden/${file}`, import.meta.url), 'utf8'));
   // v0.1 stats names → stat paths; format-2 goldens already use stat paths
   const LEGACY = { meanRho: 'species.total', meanRhoMat: 'species.mat', meanFA: 'fa', meanAlpha: 'cells.a' };
   /** Normalise a run descriptor to { scenario, days, dials, init, events: [{ at, dials | injure }] }. */
@@ -196,7 +202,7 @@ describe('golden regression: fibrous vs tests/golden/fibrous.json', () => {
           const path = LEGACY[gk] || gk;
           const ev = TissueEngine.statFrom(s, path);
           if (ev === undefined) continue;
-          const tol = Math.max(0.01, 0.03 * Math.abs(gv));
+          const tol = tolOf(gv);
           const err = Math.abs(ev - gv), rel = Math.abs(gv) > 1e-9 ? err / Math.abs(gv) : 0;
           if (!worst[path] || rel > worst[path]) worst[path] = rel;
           if (err > tol) failures.push(`t=${g.t} ${path}: golden ${gv.toFixed(5)} engine ${ev.toFixed(5)} (rel ${(100 * rel).toFixed(2)} %)`);
@@ -208,6 +214,8 @@ describe('golden regression: fibrous vs tests/golden/fibrous.json', () => {
     });
   }
 });
+goldenSuite('fibrous.json', 'v0.1 model.js, 3 %', (gv) => Math.max(0.01, 0.03 * Math.abs(gv)));
+goldenSuite('fibrous.engine.json', 'this engine, 1e-5', (gv) => Math.max(1e-7, 1e-5 * Math.abs(gv)));
 
 // ---------------------------------------------------------------- engine API (using fibrous)
 describe('engine API', () => {
@@ -713,6 +721,360 @@ describe('engine v0.3: species transport, per-species orientation, accumulators'
     assert.ok(has(win([10, 20], 'median'), /agg min\|max\|mean\|first/), 'unknown agg');
     assert.ok(has(win(10, 'min'), /agg only applies/), 'agg without a range');
     assert.deepEqual(TissueEngine.validate(LAB), [], 'the fixture itself stays valid');
+  });
+});
+
+// ---------------------------------------------------------------- v0.4 engine work package A
+// A throw-away fixture with one mechanism wired at a time (nothing here is registered, so the
+// conformance suite above is untouched). `o` overrides any block of the definition.
+function bench(o = {}) {
+  return Object.assign({
+    key: 'bench', name: 'Bench tissue', short: 'one mechanism at a time', version: '0.4.0',
+    species: [{ key: 'x', label: 'X', kind: 'gel', color: '#888888' }],
+    fields: [],
+    cellTypes: [{ key: 'c', label: 'C', colors: ['#000000', '#ffffff'], shape: { by: 'a', aspectMin: 1, aspectMax: 1 }, radius: 0.01, motile: true }],
+    dials: [{ key: 'bath', label: 'Bath', min: 0, max: 1, step: 0.01, default: 1, format: 'fixed2' },
+      { key: 'nCells', label: 'Cells', min: 0, max: 400, step: 1, default: 0, format: 'cells', role: 'cellCount' }],
+    scenarios: [{ key: 'run', title: 'Run', goal: 'g', steps: ['a'], question: 'q', expect: 'e',
+      dials: {}, init: { species: {} }, checks: [{ at: 1, stat: 'fa', op: 'lt', value: 2 }] }],
+    readouts: [{ key: 'flux', label: 'Flux', unit: 'per day', meaning: 'm', type: 'flux' }],
+    copy: { intro: { tagline: 't', paragraphs: ['p'] }, legend: { fibers: 'f', cells: 'c' },
+      vocabulary: { matrix: 'matrix', cellsActive: 'active', cellsQuiet: 'quiet' } },
+    engine: {}, params: {},
+    makeRules: () => ({ cell(ctx) { ctx.out.speed = 0; }, voxel(ctx) { ctx.out.E = 1; } }),
+  }, o);
+}
+/** A bench engine carrying one field, with `rule` writing its sources in the voxel hook. */
+function fieldBench(field, engine, rule) {
+  const t = bench({ fields: [field], engine });
+  assert.deepEqual(TissueEngine.validate(t), [], 'fixture valid');
+  const M = new TissueEngine(t, { seed: 1 });
+  M.reset('run');
+  if (rule) M.rules.voxel = (ctx) => { ctx.out.E = 1; rule(ctx); };
+  return M;
+}
+const pick = (m) => ({ mode: m.mode, nSub: m.nSub });
+const zColumn = (M, f = 0) => { const N = M.N, out = []; for (let k = 0; k < N; k++) out.push(M.fields[f][(((N >> 1) * N) + (N >> 1)) * N + k]); return out; };
+
+describe('engine A1: the field solver picks an integration mode instead of clamping D', () => {
+  test('the mode follows lam = D·dt/h² and the definition may override it', () => {
+    // fibrous: lam = 0.05·0.02/(1/12)² = 0.144 ≤ 1/6 → the explicit v0.3 path, unchanged
+    const F = new TissueEngine(TISSUES.fibrous, { seed: SEED });
+    for (const m of F.fieldModes) { assert.equal(m.mode, 'explicit'); assert.equal(m.nSub, 1); assert.ok(Math.abs(m.lam - 0.144) < 1e-9, `lam ${m.lam}`); }
+    const fld = (D, extra) => Object.assign({ key: 'g', label: 'G', color: '#3fd6c4', D, bath: null, kBath: 0, decay: 1 }, extra);
+    const modeOf = (D, extra, engine) => fieldBench(fld(D, extra), Object.assign({ N: 16, dt: 0.05, L: 1 }, engine)).fieldModes[0];
+    assert.deepEqual(pick(modeOf(0.01)), { mode: 'explicit', nSub: 1 }, 'lam 0.128 stays explicit');
+    assert.deepEqual(pick(modeOf(0.05)), { mode: 'subcycled', nSub: 4 }, 'lam 0.64 → ceil(6·lam) sub-steps');
+    assert.deepEqual(pick(modeOf(0.5)), { mode: 'quasiSteady', nSub: 1 }, 'lam 6.4 would need 39 sub-steps → steady solve');
+    assert.deepEqual(pick(modeOf(5)), { mode: 'quasiSteady', nSub: 1 }, 'lam 64 → far too fast to integrate');
+    // …but only when the steady problem is well posed; otherwise it sub-cycles as far as the cap
+    assert.deepEqual(pick(modeOf(0.5, { decay: 0 })), { mode: 'subcycled', nSub: 20 }, 'no decay, no bath, no face: 39 wanted, capped at 20');
+    // explicit overrides
+    assert.deepEqual(pick(modeOf(5, { mode: 'explicit' })), { mode: 'explicit', nSub: 1 }, "mode 'explicit' keeps the v0.3 clamp");
+    assert.deepEqual(pick(modeOf(5, { mode: 'subcycled' })), { mode: 'subcycled', nSub: 20 }, "mode 'subcycled' never goes steady");
+    assert.deepEqual(pick(modeOf(0.05, { mode: 'quasiSteady' })), { mode: 'quasiSteady', nSub: 1 }, 'a slow field may still be solved steady');
+    // a steady solve needs somewhere for the flux to go: no face, no bath, no decay → sub-cycle
+    assert.deepEqual(pick(modeOf(5, { mode: 'quasiSteady', decay: 0 })), { mode: 'subcycled', nSub: 20 }, 'quasiSteady falls back when it is not well posed');
+    assert.ok(TissueEngine.warnings(bench({ fields: [fld(0.5, { decay: 0 })], engine: { N: 16, dt: 0.05 } }))[0].includes('capped at 20'), 'and the cap is reported');
+    assert.deepEqual(pick(modeOf(5, { decay: 0, bath: 'bath', kBath: 2 })), { mode: 'quasiSteady', nSub: 1 }, 'a bath relaxation makes it well posed');
+    // species transport gets the same treatment (but never a steady solve: transport moves mass)
+    const sp = (D, mode) => new TissueEngine(bench({ species: [{ key: 'x', label: 'X', kind: 'gel', color: '#888888', D, mode }], engine: { N: 16, dt: 0.05 } }), { seed: 1 }).speciesModes[0];
+    assert.deepEqual(pick(sp(0.01)), { mode: 'explicit', nSub: 1 });
+    assert.deepEqual(pick(sp(0.05)), { mode: 'subcycled', nSub: 4 });
+    assert.deepEqual(pick(sp(5, 'explicit')), { mode: 'explicit', nSub: 1 });
+    // and the schema knows the new keys
+    assert.ok(TissueEngine.validate(bench({ fields: [fld(1, { mode: 'sometimes' })] })).some((e) => /mode must be auto\|explicit\|subcycled\|quasiSteady/.test(e)));
+    assert.ok(TissueEngine.validate(bench({ species: [{ key: 'x', label: 'X', kind: 'gel', color: '#888888', D: 1, mode: 'quasiSteady' }] })).some((e) => /no quasiSteady/.test(e)));
+  });
+
+  test('a plane source with decay reaches the analytic decay length √(D/decay) (N=16, dt=0.05)', () => {
+    // steady state of ∂g/∂t = D∇²g − k·g with a source in the z = 0 layer: g ∝ exp(−z/ℓ), ℓ = √(D/k).
+    // On the 6-neighbour stencil the exact discrete length is h / acosh(1 + h²k/2D).
+    const measure = (D, k, mode) => {
+      const N = 16, h = 1 / N;
+      const M = fieldBench({ key: 'g', label: 'G', color: '#3fd6c4', D, bath: null, kBath: 0, decay: k, mode },
+        { N, dt: 0.05, L: 1 }, (ctx) => { if (ctx.v % N === 0) ctx.out.fieldSrc[0] = 100; });
+      M.step(600);
+      const col = zColumn(M);
+      return { mode: M.fieldModes[0].mode, ell: h / Math.log(col[3] / col[4]), col };
+    };
+    const cont = Math.sqrt(0.05 / 3.2);                                  // 0.125
+    const disc = (1 / 16) / Math.acosh(1 + (1 / 256) * 3.2 / (2 * 0.05)); // 0.12628 (same for the ×100 pair)
+    const sub = measure(0.05, 3.2);            // lam 0.64 → sub-cycled
+    const qs = measure(5, 320);                // lam 64, same ℓ → quasi-steady
+    assert.equal(sub.mode, 'subcycled'); assert.equal(qs.mode, 'quasiSteady');
+    assert.ok(Math.abs(sub.ell - cont) / cont < 0.02, `sub-cycled ℓ ${sub.ell} vs analytic ${cont}`);
+    assert.ok(Math.abs(qs.ell - cont) / cont < 0.02, `quasi-steady ℓ ${qs.ell} vs analytic ${cont}`);
+    assert.ok(Math.abs(sub.ell - disc) / disc < 1e-3, `sub-cycled ℓ ${sub.ell} vs the exact discrete ${disc}`);
+    assert.ok(Math.abs(qs.ell - sub.ell) / sub.ell < 1e-3, 'the two modes agree with each other');
+    // this is the A1 defect: one explicit step with lam clamped at 1/6 integrates a much smaller D
+    const clamped = measure(0.05, 3.2, 'explicit');
+    assert.equal(clamped.mode, 'explicit');
+    assert.ok(clamped.ell < 0.6 * cont, `the clamped mode is ~2× short: ${clamped.ell}`);
+    for (const c of [...sub.col, ...qs.col, ...clamped.col]) assert.ok(Number.isFinite(c) && c >= 0);
+  });
+
+  test('a face-fed field with uniform consumption settles on the steady parabola', () => {
+    // 0 = D∇²g − q with zero flux at z = 0 and the top LAYER held at the bath value g0:
+    // g(z) = g0 + q/(2D)·(z² − zTop²) at the voxel centres z = (k+½)h, zTop = (N−½)h — and that is
+    // the exact solution of the discrete stencil too, so the check can be tight.
+    const run = (D, q, N, dt) => {
+      const M = fieldBench({ key: 'o2', label: 'O₂', color: '#6f9ce8', D, bath: 'bath', kBath: 0, decay: 0, boundary: 'face:+z' },
+        { N, dt, L: 1 }, (ctx) => { ctx.out.fieldSrc[0] = -q; });
+      M.setDials({ bath: 1 });
+      M.step(Math.round(40 / dt));
+      const h = 1 / N, zTop = (N - 0.5) * h, col = zColumn(M);
+      let worst = 0;
+      for (let k = 0; k < N; k++) {
+        const z = (k + 0.5) * h;
+        worst = Math.max(worst, Math.abs(col[k] - (1 + (q / (2 * D)) * (z * z - zTop * zTop))));
+      }
+      return { mode: M.fieldModes[0].mode, worst, top: col[N - 1], monotone: col.every((v, k) => k === 0 || v >= col[k - 1]) };
+    };
+    const sub = run(0.06, 0.02, 12, 0.02);      // cartilage-like O₂: lam 0.173 → 2 sub-steps
+    const qs = run(1000, 300, 12, 0.02);        // physiological O₂: lam 2880 → steady solve
+    assert.equal(sub.mode, 'subcycled'); assert.equal(qs.mode, 'quasiSteady');
+    assert.ok(sub.worst < 1e-3, `sub-cycled parabola off by ${sub.worst}`);
+    assert.ok(qs.worst < 1e-3, `quasi-steady parabola off by ${qs.worst}`);
+    assert.equal(sub.top, 1); assert.equal(qs.top, 1, 'the Dirichlet layer stays at the bath value (1 is exact in float32)');
+    assert.ok(sub.monotone && qs.monotone, 'oxygen falls away from the medium face');
+  });
+
+  test('the quasi-steady solve handles a saturating consumption that exhausts the field', () => {
+    // Michaelis-Menten uptake makes the source depend on the field, so the solve is a lagged
+    // fixed point. Compare with a Newton solve of the same nonlinear discrete steady problem.
+    const N = 12, h = 1 / N, D = 1, q = 20, Km = 0.02, bath = 0.24, c = D / (h * h);
+    const M = fieldBench({ key: 'o2', label: 'O₂', color: '#6f9ce8', D, bath: 'bath', kBath: 0, decay: 0, boundary: 'face:+z', mode: 'quasiSteady' },
+      { N, dt: 0.02, L: 1 }, (ctx) => { const o = ctx.field[0]; ctx.out.fieldSrc[0] = -q * o / (o + Km); });
+    M.setDials({ bath });
+    M.step(2000);
+    const col = zColumn(M);
+    for (let v = 0; v < M.NV; v++) assert.ok(M.fields[0][v] >= 0 && Number.isFinite(M.fields[0][v]), 'field stays ≥ 0 and finite');
+    assert.ok(Math.abs(col[N - 1] - bath) < 1e-6, 'the medium face is held at the bath value');
+    assert.ok(col.every((v, k) => k === 0 || v >= col[k - 1] - 1e-6), 'monotone toward the medium face');
+    // Newton solve of c·(Σ neighbours − cnt·g) = q·g/(g+Km) on the same stencil (1-D in z)
+    const g = new Float64Array(N).fill(0.1); g[N - 1] = bath;
+    for (let it = 0; it < 4000; it++) {
+      for (let k = 0; k < N - 1; k++) {
+        const sg = (k > 0 ? g[k - 1] : 0) + g[k + 1], cnt = k > 0 ? 2 : 1;
+        let x = g[k];
+        for (let s = 0; s < 60; s++) {
+          const f = c * (sg - cnt * x) - q * x / (x + Km);
+          const nx = Math.max(0, x - f / (-c * cnt - q * Km / ((x + Km) * (x + Km))));
+          if (Math.abs(nx - x) < 1e-15) { x = nx; break; }
+          x = nx;
+        }
+        g[k] = x;
+      }
+    }
+    for (let k = N - 3; k < N; k++) assert.ok(Math.abs(col[k] - g[k]) < 0.05 * g[k] + 1e-3, `layer ${k}: solver ${col[k]} vs Newton ${g[k]}`);
+    assert.ok(col[0] < 0.01 * bath, `the deep half is starved (${col[0]})`);
+  });
+
+  test('validate() warns once, naming the field, its lam and the mode it chose', () => {
+    const warned = [];
+    const real = console.warn;
+    console.warn = (...a) => warned.push(a.join(' '));
+    try {
+      const t = bench({ fields: [{ key: 'o2', label: 'O₂', color: '#6f9ce8', D: 5, bath: 'bath', kBath: 0, decay: 0, boundary: 'face:+z' }], engine: { N: 16, dt: 0.05 } });
+      assert.deepEqual(TissueEngine.validate(t), []);
+      assert.deepEqual(TissueEngine.validate(t), [], 'validating again is silent');
+      new TissueEngine(t, { seed: 1 });
+      assert.equal(warned.length, 1, `warned once, got ${warned.length}: ${warned.join(' | ')}`);
+      assert.match(warned[0], /field 'o2'/); assert.match(warned[0], /lam = D·dt\/h² = 64/); assert.match(warned[0], /quasiSteady/);
+      // a definition that asks for 'explicit' above the limit is told that D is being clamped
+      const clamp = bench({ fields: [{ key: 'g', label: 'G', color: '#3fd6c4', D: 5, bath: null, kBath: 0, decay: 1, mode: 'explicit' }], engine: { N: 16, dt: 0.05 } });
+      TissueEngine.validate(clamp);
+      assert.match(warned[1], /CLAMPED at 1\/6/);
+      // and the overrides the engine will really run with are the ones reported
+      const w = TissueEngine.warnings(TISSUES.fibrous, { overrides: { dt: 0.2 } });
+      assert.ok(w.some((x) => /field 'g'.*subcycled/.test(x)), w.join(' | '));
+      assert.deepEqual(TissueEngine.warnings(TISSUES.fibrous), [], 'fibrous as built is quiet');
+    } finally { console.warn = real; }
+  });
+});
+
+describe('engine A2: resumable init.from pre-runs (warmFrom / warmScenarios)', () => {
+  const t = TISSUES.fibrous;
+  const from = t.scenarios.find((s) => s.key === 'unloading').init.from;
+
+  test('warmFrom in 500-step slices lands on exactly the synchronous pre-run', () => {
+    const sync = new TissueEngine(t, { seed: SEED });
+    sync.reset('unloading');
+    const warm = new TissueEngine(t, { seed: SEED });
+    const slices = [];
+    for (let i = 0; i < 7; i++) slices.push(warm.warmFrom(from, 500));
+    assert.equal(slices.filter((r) => !r.done).length, 5, 'six slices of 500 cover the 3000-step pre-run');
+    assert.equal(slices.reduce((a, r) => a + r.steps, 0), 3000, 'and no step is run twice');
+    assert.equal(slices[6].steps, 0, 'calling again once it is warm does nothing');
+    assert.equal(warm._fromCache.size, 1);
+    assert.equal(warm._warm.size, 0, 'the partial pre-run is dropped once it is cached');
+    const t0 = process.hrtime.bigint();
+    warm.reset('unloading');
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    assert.ok(ms < 60, `the reset was served from the cache (${ms.toFixed(0)} ms)`);
+    for (let s = 0; s < sync.species.length; s++) assert.deepEqual(warm.species[s], sync.species[s], `species ${s}`);
+    for (let f = 0; f < sync.fields.length; f++) assert.deepEqual(warm.fields[f], sync.fields[f], `field ${f}`);
+    for (const k of ['Txx', 'Tyy', 'Tzz', 'Txy', 'Txz', 'Tyz', 'fa', 'fx', 'fy', 'fz', 'E']) assert.deepEqual(warm[k], sync[k], k);
+    assert.deepEqual(warm.state.cx, sync.state.cx); assert.deepEqual(warm.state.cp, sync.state.cp);
+    assert.deepEqual(warm.state.ca, sync.state.ca); assert.deepEqual(warm.stats(), sync.stats());
+  });
+
+  test('warmScenarios walks the tissue and reports when everything is cached', () => {
+    const M = new TissueEngine(t, { seed: SEED });
+    let calls = 0, r;
+    do { r = M.warmScenarios(400); calls++; } while (!r.done && calls < 50);
+    assert.ok(r.done && calls > 1, `finished after ${calls} calls`);
+    assert.equal(M._fromCache.size, 1, 'unloading and wound share one maturation/60 pre-run');
+    assert.deepEqual(M.warmScenarios(400), { done: true, scenario: null, steps: 0, remaining: 0 }, 'idempotent once warm');
+    const before = M.stats();
+    M.warmScenarios(400);
+    assert.deepEqual(M.stats(), before, 'warming never touches the engine that is being watched');
+    // events are replayed on the same day boundaries as the synchronous pre-run
+    const ev = { scenario: 'fibrosis', days: 50, events: true };
+    const a = new TissueEngine(t, { seed: SEED }), b = new TissueEngine(t, { seed: SEED });
+    a.warmFrom(ev, Infinity);
+    while (!b.warmFrom(ev, 137).done);
+    assert.deepEqual(b._fromCache.get(b._fromKey(ev)).species[1], a._fromCache.get(a._fromKey(ev)).species[1]);
+  });
+});
+
+describe('engine A4/A5/B1/E1/E5: load mode, cell types, revision, export', () => {
+  test('engine.loadMode: tension aligns the tensor with z, compression with the plane ⊥ to it', () => {
+    const fz = (loadMode) => {
+      const M = new TissueEngine(TISSUES.fibrous, { seed: SEED, overrides: loadMode ? { loadMode } : {} });
+      M.reset('maturation');
+      M.step(40 * Math.round(1 / M.dt));
+      return M.stats().fz;
+    };
+    const tension = fz(), compression = fz('compression');
+    assert.equal(fz(), fz('tension'), "'tension' is the default and changes nothing");
+    assert.ok(tension > 0.4, `tension pulls the tensor onto z (fz ${tension})`);
+    assert.ok(compression < 1 / 3, `compression pushes it off z (fz ${compression})`);
+    assert.ok(TissueEngine.validate(bench({ engine: { loadMode: 'shear' } })).some((e) => /loadMode/.test(e)));
+    assert.deepEqual(TissueEngine.validate(bench({ engine: { loadMode: 'compression' } })), []);
+  });
+
+  test("cellTypes[].motile: false pins a cell in place, including under repulsion", () => {
+    const types = [
+      { key: 'walker', label: 'Walker', colors: ['#000000', '#ffffff'], shape: { by: 'a', aspectMin: 1, aspectMax: 1 }, radius: 0.02, motile: true, fraction: 1 },
+      { key: 'anchor', label: 'Anchor', colors: ['#000000', '#ffffff'], shape: { by: 'a', aspectMin: 1, aspectMax: 1 }, radius: 0.02, motile: false, fraction: 1 },
+    ];
+    const t = bench({ cellTypes: types, makeRules: () => ({ cell(ctx) { ctx.out.speed = 0.4; ctx.out.noise = 2; }, voxel(ctx) { ctx.out.E = 1; } }) });
+    const M = new TissueEngine(t, { seed: 4 });
+    M.reset('run', { dials: { nCells: 60 } });
+    const x0 = Float32Array.from(M.state.cx), p0 = Float32Array.from(M.state.cp), ty = Uint8Array.from(M.state.ctype);
+    M.step(200);
+    let moved = 0, still = 0;
+    for (let i = 0; i < M.nCells; i++) {
+      const d = Math.hypot(M.state.cx[3 * i] - x0[3 * i], M.state.cx[3 * i + 1] - x0[3 * i + 1], M.state.cx[3 * i + 2] - x0[3 * i + 2]);
+      if (ty[i] === 1) { assert.equal(d, 0, `anchored cell ${i} moved by ${d}`); still++; } else if (d > 0.05) moved++;
+    }
+    assert.ok(still > 20 && moved > 20, `${still} anchored, ${moved} walkers moved`);
+    for (let i = 0; i < M.nCells; i++) if (ty[i] === 1) for (let d = 0; d < 3; d++) assert.equal(M.state.cp[3 * i + d], p0[3 * i + d], 'and its polarity is untouched');
+    // an overlapping pair: only the motile partner is pushed away
+    const P = new TissueEngine(t, { seed: 4 });
+    P.reset('run', { dials: { nCells: 2 } });
+    P.rules.cell = (ctx) => { ctx.out.speed = 0; ctx.out.noise = 0; };
+    P._cx.set([0.5, 0.5, 0.5, 0.51, 0.5, 0.5]);
+    const anchor = P.state.ctype[0] === 1 ? 0 : 1, walker = 1 - anchor;
+    const at0 = [P.state.cx[0], P.state.cx[3]];
+    P.step(1);
+    assert.equal(P.state.cx[3 * anchor], at0[anchor], 'the anchor stayed');
+    assert.ok(Math.abs(P.state.cx[3 * walker] - at0[walker]) > 1e-4, 'the walker was pushed');
+  });
+
+  test('cellTypes[].count seeds an absolute number and survives the cell-count dial', () => {
+    const types = [
+      { key: 'pinned', label: 'Pinned', colors: ['#000000', '#ffffff'], shape: { by: 'a', aspectMin: 1, aspectMax: 1 }, radius: 0.01, motile: true, count: 10 },
+      { key: 'rest', label: 'Rest', colors: ['#000000', '#ffffff'], shape: { by: 'a', aspectMin: 1, aspectMax: 1 }, radius: 0.01, motile: true },
+    ];
+    const M = new TissueEngine(bench({ cellTypes: types }), { seed: 4 });
+    M.reset('run', { dials: { nCells: 40 } });
+    const n = () => { const b = M.stats().cells.byType; return [b.pinned.n, b.rest.n]; };
+    assert.deepEqual(n(), [10, 30], 'the counted type is seeded first, the rest share what is left');
+    M.setDials({ nCells: 20 });
+    assert.deepEqual(n(), [10, 10], 'shrinking the total only removes cells that are above target');
+    M.setDials({ nCells: 40 });
+    assert.deepEqual(n(), [10, 30]);
+    M.setDials({ nCells: 6 });
+    assert.deepEqual(n(), [6, 0], 'a total below the declared count scales the counted type down');
+    // without any count the share array IS the fraction array: the v0.3 seeding path is untouched
+    const plain = new TissueEngine(TISSUES.fibrous, { seed: SEED });
+    assert.equal(plain._typeShare, plain._typeFraction);
+    assert.ok(TissueEngine.validate(bench({ cellTypes: [Object.assign({}, types[0], { count: 2.5 })] })).some((e) => /count must be an integer/.test(e)));
+    assert.ok(TissueEngine.validate(bench({ cellTypes: [Object.assign({}, types[0], { fraction: 1 })] })).some((e) => /both count and fraction/.test(e)));
+    assert.ok(TissueEngine.warnings(bench({ cellTypes: types })).some((w) => /cellCount' dial and cellTypes\[\]\.count/.test(w)));
+  });
+
+  test('cellTypes[].rCell: per-type repulsion radius, with a warning when it no longer fits a voxel', () => {
+    const mk = (rCell) => bench({
+      cellTypes: [{ key: 'big', label: 'Big', colors: ['#000000', '#ffffff'], shape: { by: 'a', aspectMin: 1, aspectMax: 1 }, radius: 0.01, motile: true, rCell }],
+      makeRules: () => ({ cell(ctx) { ctx.out.speed = 0; }, voxel(ctx) { ctx.out.E = 1; } }),
+    });
+    const gap = (rCell) => {
+      const M = new TissueEngine(mk(rCell), { seed: 4 });
+      M.reset('run', { dials: { nCells: 2 } });
+      M._cx.set([0.5, 0.5, 0.5, 0.55, 0.5, 0.5]);
+      M.step(1);
+      return M.state.cx[3] - M.state.cx[0];
+    };
+    // pair at 0.05 apart, kRep 0.5: a contact distance d0 opens the gap by kRep·(d0 − d)/d·d
+    assert.ok(Math.abs(gap(0.01) - 0.05) < 1e-6, 'contact distance 0.02 < 0.05: the pair is left alone');
+    assert.ok(Math.abs(gap(0.03) - 0.055) < 1e-6, 'rCell 0.03 = the engine default → the v0.3 push');
+    assert.ok(Math.abs(gap(0.04) - 0.065) < 1e-6, 'a larger per-type radius pushes harder');
+    assert.deepEqual(TissueEngine.warnings(mk(0.03)), [], 'the default fits inside a voxel');
+    assert.ok(TissueEngine.warnings(mk(0.05)).some((w) => /27-bin neighbour search/.test(w)), '2·0.05 ≥ h = 1/12');
+    assert.ok(TissueEngine.validate(mk(-1)).some((e) => /rCell must be/.test(e)));
+  });
+
+  test('stats().cells.byType and its stat paths', () => {
+    const M = engineFor(TISSUES.fibrous); M.reset('maturation'); M.step(20);
+    const s = M.stats();
+    assert.deepEqual(Object.keys(s.cells.byType), ['fibroblast']);
+    assert.equal(s.cells.byType.fibroblast.n, s.cells.n);
+    assert.equal(s.cells.byType.fibroblast.a, s.cells.a);
+    assert.equal(M.stat('cells.byType.fibroblast'), s.cells.n, 'the bare path is the count');
+    assert.equal(M.stat('cells.byType.fibroblast.a'), s.cells.a);
+    assert.equal(TissueEngine.statFrom(s, 'cells.byType.nope'), undefined);
+    assert.throws(() => M.stat('cells.byType.nope.a'), /unknown stat path/);
+    // a scenario check may use the path
+    assert.deepEqual(TissueEngine.validate(Object.assign({}, TISSUES.fibrous, {
+      scenarios: TISSUES.fibrous.scenarios.map((sc, i) => (i ? sc : Object.assign({}, sc, { checks: [{ at: 5, stat: 'cells.byType.fibroblast.a', op: 'gt', value: 0 }] }))),
+    })), []);
+  });
+
+  test('state.revision is bumped by step / reset / injure / setDials (B1)', () => {
+    const M = new TissueEngine(TISSUES.fibrous, { seed: SEED });
+    const r = () => M.state.revision;
+    const r0 = r();
+    assert.ok(Number.isInteger(r0) && r0 > 0);
+    M.step(1); assert.equal(r(), r0 + 1);
+    M.step(5); assert.equal(r(), r0 + 6, 'one per simulated step');
+    M.setDials({ Gext: 0.7 }); assert.equal(r(), r0 + 7);
+    M.setDials({ nope: 1 }); assert.equal(r(), r0 + 7, 'an unknown dial changes nothing');
+    M.injure([0.5, 0.5, 0.5]); assert.equal(r(), r0 + 8);
+    M.reset('maturation'); assert.equal(r(), r0 + 9);
+    assert.equal(M.revision, M.state.revision);
+  });
+
+  test('snapshot().fields and the export meta additions (E1, E5, E6)', () => {
+    const M = engineFor(TISSUES.fibrous); M.reset('maturation'); M.step(10);
+    const f = M.snapshot(), meta = M.exportMeta();
+    assert.deepEqual(Object.keys(f.fields), meta.fields.map((x) => x.key), 'one grid per declared field');
+    for (const k of Object.keys(f.fields)) { assert.equal(f.fields[k].length, M.NV); assert.ok(f.fields[k].every(Number.isFinite)); }
+    const g = M.fields[M.fieldIndex.g];
+    for (let v = 0; v < M.NV; v++) assert.ok(Math.abs(f.fields.g[v] - g[v]) < 1e-4, 'rounded, not resampled');
+    assert.deepEqual(meta.fields, TISSUES.fibrous.fields.map((x) => ({ key: x.key, label: x.label, color: x.color })));
+    const load = TISSUES.fibrous.dials.find((d) => d.role === 'load');
+    assert.deepEqual(meta.loadRange, [load.min, load.max]);
+    assert.equal(meta.tissueName, TISSUES.fibrous.name);
+    assert.equal(meta.scenarioTitle, 'Scaffold to tissue');
+    M.reset('wound'); assert.equal(M.exportMeta().scenarioTitle, M.scenarioDef('wound').title);
+    // additive only: the cellTypes entries keep exactly the keys format-2 readers expect
+    assert.deepEqual(Object.keys(meta.cellTypes[0]).sort(), ['colors', 'key', 'label', 'radius', 'shape']);
+    const T = new TissueEngine(TISSUE_TEMPLATE, { seed: 1 }).exportMeta();
+    assert.ok(Array.isArray(T.fields) && T.loadRange !== undefined);
   });
 });
 

@@ -7,21 +7,45 @@
 // Public API:
 //   new TissueRenderer(canvasEl, opts)   opts: see the defaults in the constructor
 //   .setTissue(tissue)                   (re)build layers from tissue.species / cellTypes / fields / dials
-//   .update(state, layers)               state → instances; layers { fibers, cells, scaffold, gel, fields: { <key>: bool } }
-//                                        (fibers/cells/scaffold/gel default on, fields default off)
+//   .update(state, layers)               state → instances; layers { fibers, cells, scaffold, gel, wound, fields: { <key>: bool } }
+//                                        (fibers/cells/scaffold/gel/wound default on, fields default off)
 //   Load arrows read the role:'load' dial through its own [min, max] (cartilage compresses
 //   0 … 0.2), so the arrow length/opacity is the NORMALISED value, not the raw one.
 //   A cell type's `radius` may be a number or { by: 'a'|'b', min, max } (radius by state).
 //   .render()                            one frame (controls damping/autorotate + draw)
 //   .resize()                            fit canvas to its parent, keep the cube framed (aspect 0.6 … 2.4)
-//   .setAutoRotate(bool)
+//   .setAutoRotate(bool)                 fires opts.onAutoRotate(bool) when the value changes
+//   .resetView()                         camera back to the default framing (Home key, "Reset view" button)
+//   .layoutParams()                      the fiber recipe actually in use → export meta.render (src/recipe.js)
+//   .markDirty()                         force the next update() to rebuild (see the dirty check below)
 //   .screenshot()                        → PNG data URL of the current frame
 //   .legendSwatches()                    → [{ key, kind, label, css }] for the app legend
 //   .dispose()
-//   .stats                               read-only { updateMs, fibersVisible, cells, gelVisible, strutsVisible }
+//   .stats                               read-only { updateMs, updates, skipped, fibersVisible, cells, gelVisible, strutsVisible }
 //   TissueRenderer.tissueFromState(state) fallback definition when no tissue was set (all species as grey fibers)
+//
+// Dirty check (docs/REVIEW.md B1). update() rebuilds instance buffers only when something it
+// draws changed: it compares `state.revision` (the engine's monotonic counter), N, the cell
+// count and the layer set with the last call and returns early otherwise — the load arrows and
+// the wound marker (both O(1)) are still refreshed. A state WITHOUT `revision` (tools/
+// render_smoke.html, any hand-built state) always takes the full path, so nothing that fed the
+// renderer before v0.4 needs to change. stats.updates / stats.skipped count the two paths.
+//
+// Keyboard (docs/REVIEW.md B2, WCAG 2.1.1). With the canvas focused: ←/→/↑/↓ orbit, +/− dolly,
+// Home reframes (resetView). Implemented on camera.position via THREE.Spherical around
+// controls.target — OrbitControls' own key support is a no-op with enablePan off and its
+// rotateLeft/dollyIn are closure-private in r160. Everything else (Space, R, I, digits) is left
+// alone so the app's shortcuts still reach it; any key on the canvas stops auto-rotate, like a
+// pointerdown (WCAG 2.2.2), through setAutoRotate → opts.onAutoRotate.
+//
+// Colour (docs/REVIEW.md E4). The definition's hex IS the colour: fiber/cell/gel saturation
+// factors default to 1.0, and legendSwatches() puts each hex through the same exposure and tone
+// curve as the GPU (a CPU copy of three's ACES / AgX), so a swatch matches the unlit colour of
+// the thing it labels to ≤ 1/255 per channel (tools/render_smoke.mjs asserts it). Scene lighting,
+// the rim term and the depth cue are NOT applied — a lit fiber is brighter than its swatch.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RECIPE_FIBER, recipeFiberLayout, recipeFiberScales, recipeFiberRadius, recipeFiberLength, recipeFiberFade, recipeFiberDir, recipeRenderMeta } from './recipe.js';
 
 // Depth cue (Beer–Lambert): path length from an instance centre to the face of
 // the unit block along the direction toward the camera. Instances seen deep in
@@ -136,13 +160,17 @@ export class TissueRenderer {
     this.canvas = canvasEl;
     const reduced = (typeof window !== 'undefined' && typeof window.matchMedia === 'function')
       ? window.matchMedia('(prefers-reduced-motion: reduce)').matches : false;
+    this._optSet = new Set(Object.keys(opts));   // which opts the caller passed explicitly
     this.opts = Object.assign({
-      K: 3,                 // fiber instances per voxel
+      K: RECIPE_FIBER.K,    // fiber instances per voxel
       maxCells: 512,        // initial cell instance capacity (grows on demand)
-      maxPixelRatio: 2,
-      seed: 90210,
+      maxPixelRatio: 1.5,   // start at min(dpr, 1.5) — MSAA at dpr 2 costs more than it shows (REVIEW §5); pass 2 to opt out
+      seed: RECIPE_FIBER.seed,
       autoRotate: undefined, // default: on, unless prefers-reduced-motion matches (explicit true/false overrides)
       autoRotateSpeed: 0.5, // OrbitControls units: 2.0 = 30 s per orbit
+      onAutoRotate: null,   // (on: boolean) => void, called by setAutoRotate when the value changes
+      keyOrbitStep: Math.PI / 24,  // radians per arrow key press
+      keyDollyStep: 1.12,   // distance factor per +/− press
       background: 0x0b0f14,
       fov: 36,
       cameraDistance: 2.75, // framing distance at aspect ≥ 0.87; resize() scales it for narrow viewports
@@ -150,19 +178,20 @@ export class TissueRenderer {
       exposure: 1.0,
       fogDepth: 2.8,        // fog fully in at (camera distance + fogDepth); smaller = stronger depth cue
       depthCue: 0.55,       // Beer–Lambert darkening per unit path length into the block (0 = off)
-      // --- fibers (v0.1 look) ---
-      minRho: 0.03,           // hide fibers below this total fiber density
-      fiberRadiusScale: 0.6,  // × SPEC radius 0.12 h sqrt(rho)
-      fiberLengthScale: 1.35, // × SPEC length h (0.5 + 0.9 FA)
-      fiberMinRadius: 0.025,  // × h, floor so sparse fibers stay visible hairlines
+      // --- fibers (v0.1 look; the layout and the laws live in src/recipe.js) ---
+      minRho: RECIPE_FIBER.minDensity,             // full-strength fibers at or above this total fiber density
+      minRhoRamp: RECIPE_FIBER.minDensityRamp,     // fade in from minRho × this instead of popping in (1 = v0.1 hard cut)
+      fiberRadiusScale: RECIPE_FIBER.radiusScale,  // × SPEC radius 0.12 h sqrt(rho)
+      fiberLengthScale: RECIPE_FIBER.lengthScale,  // × SPEC length h (0.5 + 0.9 FA)
+      fiberMinRadius: RECIPE_FIBER.minRadius,      // × h, floor so sparse fibers stay visible hairlines
       fiberShape: 'cylinder', // 'cylinder' | 'capsule'
       fiberRoughness: 0.5, fiberEmissive: 0.2, fiberRim: 0.5,
-      fiberAlbedo: 1.0, fiberSaturation: 1.25,
+      fiberAlbedo: 1.0, fiberSaturation: 1.0,      // 1.0: the definition hex is the colour (REVIEW E4)
       // --- cells ---
       cellRoughness: 0.55, cellEmissive: 0.35, cellRim: 0.45,
       cellRimGel: 1.05,       // rim strength used instead of cellRim when the tissue has a gel species
       cellRimTint: 0.7,       // 0 = the rim takes the cell's own colour, 1 = a white rim (contrast against a same-hue haze)
-      cellAlbedo: 0.55, cellSaturation: 1.15,
+      cellAlbedo: 0.55, cellSaturation: 1.0,
       cellRamp: 'oklab',      // 'oklab' | 'oklch' | 'rgb' — interpolation space for colors[0] → colors[1]
       cellMidLift: 0.06,      // OKLab lightness lift at the ramp midpoint (bell-shaped), 0 = none
       cellColorMid: '#f1e3d3', // explicit mid colour the ramp passes through (OKLab, piecewise); null = straight OKLab lerp (+lift)
@@ -175,7 +204,7 @@ export class TissueRenderer {
       gelEdgeFade: 1.6,       // alpha ∝ |n·v|^fade — softens silhouettes into a haze
       gelCellFade: 0.55,      // gel alpha × (1 − this) in a voxel that holds a cell (≈ one cell radius: cells keep contrast in dense gel)
       gelAmbient: 0.62, gelDiffuse: 0.22, gelRim: 0.0,
-      gelSaturation: 1.2,
+      gelSaturation: 1.0,
       gelPointSize: 2.6, gelPointOpacity: 0.5, gelPointSoft: 6.0,
       // --- scaffold lattice ---
       scaffoldMin: 0.025,     // hide struts below this density
@@ -194,11 +223,21 @@ export class TissueRenderer {
       pointOpacity: 0.45, pointSize: 1.8, // field point clouds (size × h)
       wireColor: 0x4a5a70,
       loadColor: '#d9c9a3',
+      // --- wound marker (state.wound; hidden when the state has none) ---
+      woundColor: '#ff8f7a',
+      woundOpacity: 0.15,     // persistent outline: the wound stays marked after it has healed
+      woundOpacityPeak: 0.55, // extra opacity right after the injury …
+      woundFadeDays: 7,       // … decaying with this time constant (opacity = 0.15 + 0.55·e^(−age/7))
+      woundGhost: 0.35,       // × that opacity, drawn again without depth test so the outline reads
+                              // through the matrix in front of it (0 = only the occluded version)
+      woundMeridians: 6, woundRings: 3, woundSegments: 48,
     }, opts);
     if (this.opts.autoRotate === undefined) this.opts.autoRotate = !reduced;
-    this.stats = { updateMs: 0, fibersVisible: 0, cells: 0, gelVisible: 0, strutsVisible: 0 };
+    this.stats = { updateMs: 0, updates: 0, skipped: 0, fibersVisible: 0, cells: 0, gelVisible: 0, strutsVisible: 0 };
     this._disposed = false;
     this.tissue = null;
+    // dirty check (B1): last (revision, N, cell count, layer key) fed to the full update path
+    this._dirty = true; this._lastRev = undefined; this._lastKey = -1; this._lastN = -1; this._lastCells = -1;
 
     // --- renderer -----------------------------------------------------------
     const renderer = new THREE.WebGLRenderer({
@@ -223,11 +262,17 @@ export class TissueRenderer {
     const camera = new THREE.PerspectiveCamera(this.opts.fov, 1, 0.05, 40);
     camera.up.set(0, 0, 1);
     this._tmpV = new THREE.Vector3();
+    this._viewDir = new THREE.Vector3(0.64, -0.70, 0.32).normalize();   // default framing direction (Blender parity: E5)
     this._fitDist = this.opts.cameraDistance;
-    this._tmpV.set(0.64, -0.70, 0.32).normalize().multiplyScalar(this._fitDist).add(this.center);
+    this._tmpV.copy(this._viewDir).multiplyScalar(this._fitDist).add(this.center);
     camera.position.copy(this._tmpV);
     camera.lookAt(this.center);
     this.camera = camera;
+    // keyboard orbit works in a y-up spherical frame, like OrbitControls: rotate the offset into
+    // it, edit theta/phi, rotate back — so "up" is the camera's up (z here), not three's default
+    this._sph = new THREE.Spherical();
+    this._upQuat = new THREE.Quaternion().setFromUnitVectors(camera.up, new THREE.Vector3(0, 1, 0));
+    this._upQuatInv = this._upQuat.clone().invert();
 
     const controls = new OrbitControls(camera, canvasEl);
     controls.target.copy(this.center);
@@ -240,8 +285,10 @@ export class TissueRenderer {
     controls.autoRotateSpeed = this.opts.autoRotateSpeed;
     controls.update();
     this.controls = controls;
-    this._onPointerDown = () => { this.controls.autoRotate = false; };
+    this._onPointerDown = () => { this.setAutoRotate(false); };
     canvasEl.addEventListener('pointerdown', this._onPointerDown, { passive: true });
+    this._onCanvasKey = (e) => this._handleKey(e);
+    canvasEl.addEventListener('keydown', this._onCanvasKey);
 
     // --- lights ---------------------------------------------------------------
     const hemi = new THREE.HemisphereLight(this.opts.hemiSky, this.opts.hemiGround, this.opts.hemiIntensity);
@@ -297,6 +344,7 @@ export class TissueRenderer {
     scene.add(wire);
     this._wire = { geo: edges, mat: wireMat, obj: wire };
     this._buildLoad();
+    this._buildWound();
 
     // --- dynamic content -----------------------------------------------------
     this.fibers = null;     // { mesh, geo, base, rvec, jit, N, K, V, h, count, geoHeight }
@@ -314,6 +362,11 @@ export class TissueRenderer {
     this._fieldDefs = [];
     this._loadKey = null; this._loadMin = 0; this._loadSpan = 1;
     this._gelFade = 0;
+    // optional per-species `render` hints (EXTENDING §1, B5), collapsed to one set per kind
+    this._fiberHint = TissueRenderer._noHint(); this._gelHint = TissueRenderer._noHint(); this._scafHint = TissueRenderer._noHint();
+    this._gelStyle = this.opts.gelStyle;
+    this._fiberSc = recipeFiberScales(1, null);   // replaced per grid in _buildFibers
+    this._dir3 = new Float64Array(3);             // scratch for recipeFiberDir (no per-instance allocation)
     this._spKeysRef = null; this._fdKeysRef = null; this._indicesDirty = true;
 
     // --- sizing ---------------------------------------------------------------
@@ -354,6 +407,94 @@ export class TissueRenderer {
   static _lin(css, sat = 1) {
     const c = new THREE.Color(css);
     return TissueRenderer._saturate([c.r, c.g, c.b], sat);
+  }
+
+  /**
+   * CPU copy of three r160's tone mapping (tonemapping_pars_fragment.glsl), linear RGB in and
+   * out, so a legend swatch can be encoded exactly the way the GPU encodes an unlit surface of
+   * the same colour (REVIEW E4). `mode` is the renderer's `toneMapping` opt: 'aces' (default),
+   * 'agx' or 'none'; anything else falls back to ACES, which is what the constructor selects.
+   * Verified against the GPU in tools/render_smoke.mjs (≤ 1/255 per channel after encoding).
+   */
+  static toneMap(rgb, mode = 'aces', exposure = 1) {
+    const sat = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+    // NoToneMapping drops the whole tonemapping_fragment include, exposure and all
+    if (mode === 'none') return [sat(rgb[0]), sat(rgb[1]), sat(rgb[2])];
+    let r = rgb[0] * exposure, g = rgb[1] * exposure, b = rgb[2] * exposure;
+    if (mode === 'agx') {
+      // LINEAR_SRGB_TO_LINEAR_REC2020 is applied BEFORE the exposure in three r160
+      let x = 0.6274 * rgb[0] + 0.3293 * rgb[1] + 0.0433 * rgb[2];
+      let y = 0.0691 * rgb[0] + 0.9195 * rgb[1] + 0.0113 * rgb[2];
+      let z = 0.0164 * rgb[0] + 0.0880 * rgb[1] + 0.8956 * rgb[2];
+      x *= exposure; y *= exposure; z *= exposure;
+      const ir = 0.856627153315983 * x + 0.0951212405381588 * y + 0.0482516061458583 * z;
+      const ig = 0.137318972929847 * x + 0.761241990602591 * y + 0.101439036467562 * z;
+      const ib = 0.11189821299995 * x + 0.0767994186031903 * y + 0.811302368396859 * z;
+      const lo = -12.47393, span = 4.026069 - (-12.47393);
+      const norm = (v) => {
+        const u = (Math.log2(Math.max(v, 1e-10)) - lo) / span;
+        return u < 0 ? 0 : u > 1 ? 1 : u;
+      };
+      const poly = (u) => {
+        const u2 = u * u, u4 = u2 * u2;
+        return 15.5 * u4 * u2 - 40.14 * u4 * u + 31.96 * u4 - 6.868 * u2 * u + 0.4298 * u2 + 0.1191 * u - 0.00232;
+      };
+      const cr = poly(norm(ir)), cg = poly(norm(ig)), cb = poly(norm(ib));
+      const or_ = 1.1271005818144368 * cr - 0.11060664309660323 * cg - 0.016493938717834573 * cb;
+      const og = -0.1413297634984383 * cr + 1.157823702216272 * cg - 0.016493938717834257 * cb;
+      const ob = -0.14132976349843826 * cr - 0.11060664309660294 * cg + 1.2519364065950405 * cb;
+      const p = (v) => Math.pow(Math.max(0, v), 2.2);
+      const pr = p(or_), pg = p(og), pb = p(ob);
+      return [sat(1.6605 * pr - 0.5876 * pg - 0.0728 * pb),
+        sat(-0.1246 * pr + 1.1329 * pg - 0.0083 * pb),
+        sat(-0.0182 * pr - 0.1006 * pg + 1.1187 * pb)];
+    }
+    // ACESFilmicToneMapping
+    r /= 0.6; g /= 0.6; b /= 0.6;
+    const ir = 0.59719 * r + 0.35458 * g + 0.04823 * b;
+    const ig = 0.07600 * r + 0.90834 * g + 0.01566 * b;
+    const ib = 0.02840 * r + 0.13383 * g + 0.83777 * b;
+    const fit = (v) => (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.4329510) + 0.238081);
+    const fr = fit(ir), fg = fit(ig), fb = fit(ib);
+    return [sat(1.60475 * fr - 0.53108 * fg - 0.07367 * fb),
+      sat(-0.10208 * fr + 1.10813 * fg - 0.00605 * fb),
+      sat(-0.00327 * fr - 0.07276 * fg + 1.07602 * fb)];
+  }
+
+  // A legend swatch: the definition colour through this renderer's exposure + tone curve, sRGB.
+  _swatchCss(rgb, alpha) {
+    return TissueRenderer._css(TissueRenderer.toneMap(rgb, this.opts.toneMapping, this.opts.exposure), alpha);
+  }
+
+  // The per-kind defaults when a species declares no `render` block.
+  static _noHint() {
+    return { minDensity: null, radiusScale: 1, opacity: 1, style: null };
+  }
+
+  /**
+   * Collapse the optional `render` hints of one species group into one set (EXTENDING §1, B5).
+   * A kind is drawn by ONE instanced layer whose instances mix every species of that kind, so a
+   * hint cannot be per species on screen: `minDensity` takes the LOWEST value declared (the
+   * layer must appear as soon as any of its species should), `radiusScale` and `opacity` the
+   * MEAN of the declared ones, `style` the first declared. Undeclared → the renderer opt.
+   */
+  static _hintOf(defs) {
+    const h = TissueRenderer._noHint();
+    let rs = 0, rsN = 0, op = 0, opN = 0;
+    for (const s of defs) {
+      const r = s && s.render;
+      if (!r || typeof r !== 'object') continue;
+      const md = +r.minDensity;
+      if (Number.isFinite(md) && md >= 0) h.minDensity = h.minDensity === null ? md : Math.min(h.minDensity, md);
+      const sc = +r.radiusScale;
+      if (Number.isFinite(sc) && sc > 0) { rs += sc; rsN++; }
+      const o = +r.opacity;
+      if (Number.isFinite(o) && o >= 0) { op += o; opN++; }
+      if (!h.style && typeof r.style === 'string') h.style = r.style;
+    }
+    if (rsN) h.radiusScale = rs / rsN;
+    if (opN) h.opacity = op / opN;
+    return h;
   }
 
   // linear RGB triple → CSS rgb()/rgba() string in sRGB (clamped).
@@ -530,6 +671,79 @@ export class TissueRenderer {
     this.load = { group, top, bottom, arrowMat, plateMat, geos: [shaftGeo, coneGeo, plateGeo] };
   }
 
+  // Latitude/longitude wire sphere of unit radius (meridians through the ±up poles + rings),
+  // as LineSegments positions. Cheap and read as a globe, unlike a triangulated wireframe.
+  static _wireSphereGeo(meridians, rings, seg) {
+    const pos = new Float32Array(6 * seg * (meridians + rings));
+    let o = 0;
+    const push = (x0, y0, z0, x1, y1, z1) => {
+      pos[o] = x0; pos[o + 1] = y0; pos[o + 2] = z0; pos[o + 3] = x1; pos[o + 4] = y1; pos[o + 5] = z1; o += 6;
+    };
+    for (let m = 0; m < meridians; m++) {
+      const a = Math.PI * m / meridians, ca = Math.cos(a), sa = Math.sin(a);
+      for (let s = 0; s < seg; s++) {
+        const t0 = 2 * Math.PI * s / seg, t1 = 2 * Math.PI * (s + 1) / seg;
+        push(Math.cos(t0) * ca, Math.cos(t0) * sa, Math.sin(t0), Math.cos(t1) * ca, Math.cos(t1) * sa, Math.sin(t1));
+      }
+    }
+    for (let r = 1; r <= rings; r++) {
+      const phi = -Math.PI / 2 + Math.PI * r / (rings + 1), z = Math.sin(phi), rr = Math.cos(phi);
+      for (let s = 0; s < seg; s++) {
+        const t0 = 2 * Math.PI * s / seg, t1 = 2 * Math.PI * (s + 1) / seg;
+        push(Math.cos(t0) * rr, Math.sin(t0) * rr, z, Math.cos(t1) * rr, Math.sin(t1) * rr, z);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    return g;
+  }
+
+  // Wound marker (REVIEW B4): a wire sphere on state.wound, opacity 0.15 + 0.55·e^(−age/7) —
+  // bright while the injury is fresh, then a faint outline that stays, so "find the hole" works
+  // long after the hole has filled in. Hidden when the state carries no wound (reset, fake states).
+  _buildWound() {
+    const o = this.opts;
+    const geo = TissueRenderer._wireSphereGeo(Math.max(2, o.woundMeridians | 0), Math.max(0, o.woundRings | 0), Math.max(8, o.woundSegments | 0));
+    const col = new THREE.Color(o.woundColor);
+    const mat = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: o.woundOpacity, depthWrite: false });
+    const obj = new THREE.LineSegments(geo, mat);
+    obj.renderOrder = 5;
+    obj.visible = false;
+    obj.frustumCulled = false;
+    // second, fainter pass without depth test: a wound buried in dense matrix would otherwise be
+    // completely hidden, and "find the hole" is the whole point of the marker. Child of `obj`, so
+    // it inherits the transform and the visibility.
+    let ghost = null, ghostMat = null;
+    if (+o.woundGhost > 0) {
+      ghostMat = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: o.woundOpacity * o.woundGhost, depthWrite: false, depthTest: false });
+      ghost = new THREE.LineSegments(geo, ghostMat);
+      ghost.renderOrder = 6;
+      ghost.frustumCulled = false;
+      obj.add(ghost);
+    }
+    this.scene.add(obj);
+    this.woundMarker = { obj, geo, mat, ghost, ghostMat };
+  }
+
+  // `wound` is state.wound ({ center, radius, time } in WORLD units) or null; `show` is the layer.
+  _updateWound(state, show) {
+    const W = this.woundMarker;
+    if (!W) return;
+    const w = show ? state.wound : null;
+    if (!w || !w.center || !(w.radius > 0)) { W.obj.visible = false; return; }
+    const invL = state.L > 0 ? 1 / state.L : 1;
+    W.obj.position.set(w.center[0] * invL, w.center[1] * invL, w.center[2] * invL);
+    const r = w.radius * invL;
+    W.obj.scale.set(r, r, r);
+    let age = (+state.time || 0) - (+w.time || 0);
+    if (!(age > 0)) age = 0;
+    const fade = this.opts.woundFadeDays > 0 ? Math.exp(-age / this.opts.woundFadeDays) : 0;
+    const op = this.opts.woundOpacity + this.opts.woundOpacityPeak * fade;
+    W.mat.opacity = op;
+    if (W.ghostMat) W.ghostMat.opacity = op * this.opts.woundGhost;
+    W.obj.visible = true;
+  }
+
   // ---------------------------------------------------------------------------
   // tissue definition → colour tables, layer plan
 
@@ -538,9 +752,20 @@ export class TissueRenderer {
     const T = tissue || { species: [], cellTypes: [], fields: [], dials: [] };
     const mk = (s, sat) => ({ key: s.key, label: s.label || s.key, color: s.color || '#cccccc', col: TissueRenderer._lin(s.color || '#cccccc', sat), idx: -1 });
     const species = T.species || [];
-    this._fiberSp = species.filter((s) => (s.kind || 'fiber') === 'fiber').map((s) => mk(s, this.opts.fiberSaturation));
-    this._gelSp = species.filter((s) => s.kind === 'gel').map((s) => mk(s, this.opts.gelSaturation));
-    this._scafSp = species.filter((s) => s.kind === 'scaffold').map((s) => mk(s, this.opts.scaffoldSaturation));
+    const rawFiber = species.filter((s) => (s.kind || 'fiber') === 'fiber');
+    const rawGel = species.filter((s) => s.kind === 'gel');
+    const rawScaf = species.filter((s) => s.kind === 'scaffold');
+    this._fiberHint = TissueRenderer._hintOf(rawFiber);
+    this._gelHint = TissueRenderer._hintOf(rawGel);
+    this._scafHint = TissueRenderer._hintOf(rawScaf);
+    // an explicit gelStyle opt wins over a species hint; otherwise the definition may ask for points
+    this._gelStyle = (!this._optSet.has('gelStyle') && (this._gelHint.style === 'points' || this._gelHint.style === 'spheres'))
+      ? this._gelHint.style : this.opts.gelStyle;
+    this.gelMat.uniforms.uOpacity.value = this.opts.gelOpacity * this._gelHint.opacity;
+    this.scaffoldMat.uniforms.uOpacity.value = this.opts.scaffoldOpacity * this._scafHint.opacity;
+    this._fiberSp = rawFiber.map((s) => mk(s, this.opts.fiberSaturation));
+    this._gelSp = rawGel.map((s) => mk(s, this.opts.gelSaturation));
+    this._scafSp = rawScaf.map((s) => mk(s, this.opts.scaffoldSaturation));
     this._fiberArr = new Array(this._fiberSp.length).fill(null);
     this._gelArr = new Array(this._gelSp.length).fill(null);
     this._scafArr = new Array(this._scafSp.length).fill(null);
@@ -569,7 +794,12 @@ export class TissueRenderer {
     this._uRimCell.value = hasGel ? this.opts.cellRimGel : this.opts.cellRim;
     this._uTintCell.value = hasGel ? this.opts.cellRimTint : 0;
     this._gelFade = hasGel && +this.opts.gelCellFade > 0 ? Math.min(0.95, +this.opts.gelCellFade) : 0;
-    this._fieldDefs = (T.fields || []).map((f) => ({ key: f.key, label: f.label || f.key, color: f.color || '#3fd6c4', idx: -1 }));
+    // fields: optional `pointScale` (B5) scales this field's sprites (1 = the renderer default)
+    this._fieldDefs = (T.fields || []).map((f) => ({
+      key: f.key, label: f.label || f.key, color: f.color || '#3fd6c4',
+      col: TissueRenderer._lin(f.color || '#3fd6c4', 1),
+      pointScale: +f.pointScale > 0 ? +f.pointScale : 1, idx: -1,
+    }));
     // load dial: any range (fibrous strain 0–1, cartilage compression 0–0.2) → normalise for the arrows
     const loadDial = (T.dials || []).find((d) => d.role === 'load');
     this._loadKey = loadDial ? loadDial.key : null;
@@ -578,7 +808,9 @@ export class TissueRenderer {
     this._loadMin = lMin;
     this._loadSpan = lMax > lMin ? lMax - lMin : 1;
     this._spKeysRef = null; this._fdKeysRef = null; this._indicesDirty = true;
+    this._dirty = true;    // the dirty check must not skip the first update after a tissue change
     this.load.group.visible = false;
+    if (this.woundMarker) this.woundMarker.obj.visible = false;   // no stale marker from the old tissue
     this._disposeGrid();   // rebuilt for state.N on the next update()
   }
 
@@ -660,27 +892,35 @@ export class TissueRenderer {
     return out;
   }
 
-  // Fixed per-instance jitter: offset inside the voxel, random unit vector r_j,
-  // and mild length/radius variation.
-  _buildFibers(N, centers) {
+  // Renderer opts + the fiber species' optional `render` hints → the src/recipe.js override bag.
+  _fiberOverrides() {
+    const o = this.opts, hint = this._fiberHint;
+    return {
+      seed: o.seed, K: o.K,
+      radiusScale: o.fiberRadiusScale * hint.radiusScale,
+      lengthScale: o.fiberLengthScale,
+      minRadius: o.fiberMinRadius,
+      minDensity: hint.minDensity !== null ? hint.minDensity : o.minRho,
+      minDensityRamp: o.minRhoRamp,
+    };
+  }
+
+  _fiberScales(h) {
+    return recipeFiberScales(h, this._fiberOverrides());
+  }
+
+  /** The fiber recipe actually in use, in the `meta.render` shape (src/recipe.js header, E2). */
+  layoutParams() {
+    return recipeRenderMeta(this._fiberOverrides());
+  }
+
+  // Per-instance layout (offset inside the voxel, random unit vector r_j, length/radius jitter)
+  // and the density/FA laws both come from src/recipe.js, so the Blender importer can reproduce
+  // this exact arrangement. `centers` is unused here — the recipe derives voxel centres itself.
+  _buildFibers(N, centers) {   // eslint-disable-line no-unused-vars
     const K = this.opts.K, V = N * N * N, count = V * K, h = 1 / N;
-    const rand = TissueRenderer._rng(this.opts.seed);
-    const base = new Float32Array(count * 3);
-    const rvec = new Float32Array(count * 3);
-    const jit = new Float32Array(count * 2);
-    for (let v = 0; v < V; v++) {
-      const cx = centers[3 * v], cy = centers[3 * v + 1], cz = centers[3 * v + 2];
-      for (let q = 0; q < K; q++) {
-        const o = v * K + q;
-        base[3 * o] = cx + (rand() - 0.5) * 0.9 * h;
-        base[3 * o + 1] = cy + (rand() - 0.5) * 0.9 * h;
-        base[3 * o + 2] = cz + (rand() - 0.5) * 0.9 * h;
-        const z = rand() * 2 - 1, ph = rand() * Math.PI * 2, s = Math.sqrt(Math.max(0, 1 - z * z));
-        rvec[3 * o] = s * Math.cos(ph); rvec[3 * o + 1] = s * Math.sin(ph); rvec[3 * o + 2] = z;
-        jit[2 * o] = 0.78 + 0.5 * rand();      // length factor
-        jit[2 * o + 1] = 0.85 + 0.3 * rand();  // radius factor
-      }
-    }
+    const { base, rvec, jit } = recipeFiberLayout(N, K, this.opts.seed);
+    this._fiberSc = this._fiberScales(h);
     const capsule = this.opts.fiberShape === 'capsule';
     const geo = capsule ? new THREE.CapsuleGeometry(1, 2, 2, 6) : new THREE.CylinderGeometry(1, 1, 1, 6, 1, false);
     const geoHeight = capsule ? 4 : 1;
@@ -696,15 +936,15 @@ export class TissueRenderer {
 
   _buildGel(N, centers) {
     const V = N * N * N, h = 1 / N;
-    if (this.opts.gelStyle === 'points') {
+    if (this._gelStyle === 'points') {
       const g = new THREE.BufferGeometry();
-      const pos = TissueRenderer._jitterPoints(N, centers, this.opts.seed ^ 0x27d4eb2d, 0.5 * this.opts.gelPointSize * h);
+      const pos = TissueRenderer._jitterPoints(N, centers, this.opts.seed ^ 0x27d4eb2d, 0.5 * this.opts.gelPointSize * h * this._gelHint.radiusScale);
       g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
       const valAttr = new THREE.BufferAttribute(new Float32Array(V), 1); valAttr.setUsage(THREE.DynamicDrawUsage);
       const colAttr = new THREE.BufferAttribute(new Float32Array(V * 3), 3); colAttr.setUsage(THREE.DynamicDrawUsage);
       g.setAttribute('aVal', valAttr); g.setAttribute('aCol', colAttr);
       g.boundingSphere = new THREE.Sphere(this.center.clone(), 1);
-      const mat = this._makePointMaterial(this.opts.gelPointOpacity, this.opts.gelPointSize * h, this.opts.gelPointSoft, 0.33);
+      const mat = this._makePointMaterial(this.opts.gelPointOpacity * this._gelHint.opacity, this.opts.gelPointSize * h * this._gelHint.radiusScale, this.opts.gelPointSoft, 0.33);
       const points = new THREE.Points(g, mat);
       points.frustumCulled = false; points.renderOrder = 2; points.visible = false;
       this.scene.add(points);
@@ -787,10 +1027,13 @@ export class TissueRenderer {
     });
   }
 
+  // A field's sprite size is `pointSize · h · (fields[i].pointScale ?? 1)` (B5): a field whose
+  // haze should read as a coarse cloud rather than a fine mist says so in the definition.
   _buildFields(N, centers) {
     const V = N * N * N, h = 1 / N;
-    const margin = 0.5 * this.opts.pointSize * h;
     this.fields = this._fieldDefs.map((f, i) => {
+      const size = this.opts.pointSize * h * f.pointScale;
+      const margin = 0.5 * size;
       const g = new THREE.BufferGeometry();
       // own jittered, clamped cloud per field: two hazes interleave instead of coinciding,
       // and no sprite hangs outside the cube
@@ -803,7 +1046,7 @@ export class TissueRenderer {
       for (let v = 0; v < V; v++) { colArr[3 * v] = c.r; colArr[3 * v + 1] = c.g; colArr[3 * v + 2] = c.b; }
       g.setAttribute('aCol', new THREE.BufferAttribute(colArr, 3));
       g.boundingSphere = new THREE.Sphere(this.center.clone(), 1);
-      const mat = this._makePointMaterial(this.opts.pointOpacity, this.opts.pointSize * h, 8.0, 1.0);
+      const mat = this._makePointMaterial(this.opts.pointOpacity, size, 8.0, 1.0);
       const points = new THREE.Points(g, mat);
       points.frustumCulled = false; points.renderOrder = 3; points.visible = false;
       this.scene.add(points);
@@ -869,6 +1112,30 @@ export class TissueRenderer {
   // ---------------------------------------------------------------------------
   // per-frame state → instances (no per-instance allocation)
 
+  /**
+   * Layer set as one integer, so the dirty check can compare it without allocating: bits 0-4 are
+   * fibers / cells / scaffold / gel / wound, bits 5+ one per field of the current tissue (in
+   * definition order; a tissue with more than 26 fields simply stops distinguishing them, which
+   * only costs a redundant update).
+   */
+  _layerKey(layers) {
+    let k = (layers.fibers !== false ? 1 : 0) | (layers.cells !== false ? 2 : 0)
+      | (layers.scaffold !== false ? 4 : 0) | (layers.gel !== false ? 8 : 0)
+      | (layers.wound !== false ? 16 : 0);
+    if (this.fields) {
+      const fl = layers.fields || RENDER_EMPTY;
+      const n = this.fields.length < 26 ? this.fields.length : 26;
+      for (let i = 0; i < n; i++) {
+        const key = this.fields[i].key;
+        if (!!fl[key] || (!layers.fields && !!layers[key])) k |= 1 << (5 + i);
+      }
+    }
+    return k;
+  }
+
+  /** Force the next update() to rebuild everything (after changing opts by hand, say). */
+  markDirty() { this._dirty = true; }
+
   update(state, layers = RENDER_EMPTY) {
     if (this._disposed || !state) return;
     const t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
@@ -877,10 +1144,26 @@ export class TissueRenderer {
     const showC = layers.cells !== false;
     const showS = layers.scaffold !== false;
     const showG = layers.gel !== false;
+    const showW = layers.wound !== false;
     const fl = layers.fields || RENDER_EMPTY;
     const N = state.N | 0;
-    if (N > 0 && this._gridN !== N) this._buildGrid(N);
+    if (N > 0 && this._gridN !== N) { this._buildGrid(N); this._dirty = true; }
     this._resolveIndices(state);
+
+    // B1: nothing the instance buffers depend on has changed → keep them, refresh only the two
+    // O(1) overlays. `revision` missing (render_smoke, hand-built states) → always rebuild.
+    const rev = state.revision;
+    const key = this._layerKey(layers);
+    const nC = state.nCells | 0;
+    if (rev !== undefined && !this._dirty && rev === this._lastRev && key === this._lastKey && N === this._lastN && nC === this._lastCells) {
+      this.stats.skipped++;
+      this._updateWound(state, showW);
+      this._updateLoad(this._loadKey && state.dials ? state.dials[this._loadKey] : 0);
+      if (t0) this.stats.updateMs = performance.now() - t0;
+      return;
+    }
+    this._dirty = false; this._lastRev = rev; this._lastKey = key; this._lastN = N; this._lastCells = nC;
+    this.stats.updates++;
 
     if (this.fibers) {
       this.fibers.mesh.visible = showF;
@@ -907,6 +1190,7 @@ export class TissueRenderer {
       }
     }
     if (showC) this._updateCells(state); else { this.cells.mesh.visible = false; this.stats.cells = 0; }
+    this._updateWound(state, showW);
     this._updateLoad(this._loadKey && state.dials ? state.dials[this._loadKey] : 0);
     if (t0) this.stats.updateMs = performance.now() - t0;
   }
@@ -919,24 +1203,23 @@ export class TissueRenderer {
     if (!total && nSp === 1) total = sp[0];
     const fa = state.fa, fx = state.fx, fy = state.fy, fz = state.fz;
     const base = F.base, rv = F.rvec, jit = F.jit;
-    const rMul = 0.12 * h * this.opts.fiberRadiusScale, minRho = this.opts.minRho;
-    const rMin = this.opts.fiberMinRadius * h;
-    const lMul = h * this.opts.fiberLengthScale / F.geoHeight;
+    const sc = this._fiberSc, lScale = 1 / F.geoHeight, dir = this._dir3;
     const c0 = nSp ? this._fiberSp[0].col : null;
     let visible = 0;
     for (let v = 0; v < V; v++) {
       let r;
       if (total) r = v < total.length ? total[v] : 0;
       else { r = 0; for (let s = 0; s < nSp; s++) { const arr = sp[s]; if (arr && v < arr.length) r += arr[v]; } }
-      if (!(r >= minRho)) { TissueRenderer._hideRange(M, v * K, K); continue; }
-      if (r > 2) r = 2;
+      // fade in over [minDensity·ramp, minDensity] instead of popping in at a hairline (REVIEW §5)
+      const fade = recipeFiberFade(r, sc);
+      if (!(fade > 0)) { TissueRenderer._hideRange(M, v * K, K); continue; }
       let a = fa ? fa[v] : 0;
       if (!(a > 0)) a = 0; else if (a > 1) a = 1;
       let ux = fx ? fx[v] : 0, uy = fy ? fy[v] : 0, uz = fz ? fz[v] : 1;
       const ul = ux * ux + uy * uy + uz * uz;
       if (!(ul > 1e-12)) { a = 0; ux = 0; uy = 0; uz = 1; }
       else if (Math.abs(ul - 1) > 1e-4) { const inv = 1 / Math.sqrt(ul); ux *= inv; uy *= inv; uz *= inv; }
-      const rad = Math.max(rMin, rMul * Math.sqrt(r)), len = lMul * (0.5 + 0.9 * a);
+      const rad = recipeFiberRadius(r, sc) * fade, len = recipeFiberLength(a, sc) * lScale;
       // colour = density-weighted mix of fiber species colours (linear RGB), × density brightness cue
       let cr = 0, cg = 0, cb = 0, wsum = 0;
       for (let s = 0; s < nSp; s++) {
@@ -950,15 +1233,10 @@ export class TissueRenderer {
       else { cr = cg = cb = 0.8; }
       const cue = 0.6 + 0.4 * Math.min(r, 1);
       cr *= cue; cg *= cue; cb *= cue;
-      const ia = 1 - a;
       for (let q = 0; q < K; q++) {
         const idx = v * K + q, o3 = idx * 3, o = idx * 16;
-        const rx = rv[o3], ry = rv[o3 + 1], rz = rv[o3 + 2];
-        const s = (ux * rx + uy * ry + uz * rz) < 0 ? -a : a;   // f_signed = f * sign(f·r)
-        let dx = s * ux + ia * rx, dy = s * uy + ia * ry, dz = s * uz + ia * rz;
-        const dl = dx * dx + dy * dy + dz * dz;
-        if (dl < 1e-10) { dx = rx; dy = ry; dz = rz; }
-        else { const inv = 1 / Math.sqrt(dl); dx *= inv; dy *= inv; dz *= inv; }
+        recipeFiberDir(dir, ux, uy, uz, a, rv[o3], rv[o3 + 1], rv[o3 + 2]);
+        const dx = dir[0], dy = dir[1], dz = dir[2];
         let ax, ay, az;
         if (dx < 0.9 && dx > -0.9) { const inv = 1 / Math.sqrt(dy * dy + dz * dz); ax = 0; ay = dz * inv; az = -dy * inv; }
         else { const inv = 1 / Math.sqrt(dx * dx + dz * dz); ax = -dz * inv; ay = 0; az = dx * inv; }
@@ -1014,7 +1292,7 @@ export class TissueRenderer {
 
   _updateGel(state) {
     const G = this.gel, V = G.V, h = G.h, defs = this._gelSp, arrs = this._gelArr;
-    const minD = this.opts.gelMin;
+    const minD = this._gelHint.minDensity !== null ? this._gelHint.minDensity : this.opts.gelMin;
     const occ = this._cellOccupancy(state, G, this._gridN);
     const keep = 1 - this._gelFade;
     let visible = 0;
@@ -1032,7 +1310,7 @@ export class TissueRenderer {
       return;
     }
     const M = G.mesh.instanceMatrix.array, C = G.mesh.instanceColor.array, AL = G.alpha.array;
-    const jit = G.jit, cen = G.centers, size = this.opts.gelSize * h;
+    const jit = G.jit, cen = G.centers, size = this.opts.gelSize * h * this._gelHint.radiusScale;
     for (let v = 0; v < V; v++) {
       const d = this._mixSpecies(defs, arrs, v);
       const o = v * 16;
@@ -1074,7 +1352,8 @@ export class TissueRenderer {
     const S = this.scaffold, n = S.count, h = S.h, V = S.V;
     const M = S.mesh.instanceMatrix.array, C = S.mesh.instanceColor.array, AL = S.alpha.array;
     const mid = S.mid, len = S.len, axis = S.axis, va = S.va, vb = S.vb, vd = S.vd, vc = S.vc;
-    const minD = this.opts.scaffoldMin, rMul = this.opts.scaffoldRadius * h, rMin = this.opts.scaffoldMinRadius * h;
+    const minD = this._scafHint.minDensity !== null ? this._scafHint.minDensity : this.opts.scaffoldMin;
+    const rMul = this.opts.scaffoldRadius * h * this._scafHint.radiusScale, rMin = this.opts.scaffoldMinRadius * h;
     const rExp = this.opts.scaffoldRadiusExp, aExp = this.opts.scaffoldAlphaExp, sqrtR = rExp === 0.5;
     const brk = this.opts.scaffoldBreak, brkInv = brk > 0 ? 1 / brk : 0;
     this._voxelMix(this._scafSp, this._scafArr, vd, vc, V);
@@ -1183,16 +1462,24 @@ export class TissueRenderer {
   // ---------------------------------------------------------------------------
   // legend
 
-  // [{ key, kind, label, css }] — CSS colour/gradient strings for the app legend.
+  /**
+   * [{ key, kind, label, css }] — CSS colour/gradient strings for the app legend (E4).
+   * Each colour is the definition's own hex (saturation factors default to 1.0) put through
+   * THIS renderer's exposure and tone curve on the CPU, then encoded to sRGB — the same two
+   * steps the GPU applies to an unlit surface of that colour, so the swatch and the thing it
+   * labels agree to ≤ 1/255 per channel (tools/render_smoke.mjs checks it against the GPU).
+   * Scene lighting, the rim term and the depth cue are deliberately NOT applied: they vary per
+   * pixel, and a legend that dimmed with the fog would stop being a key.
+   */
   legendSwatches() {
     const out = [];
-    for (const s of this._fiberSp) out.push({ key: `species:${s.key}`, kind: 'fiber', label: s.label, css: TissueRenderer._css(s.col) });
+    for (const s of this._fiberSp) out.push({ key: `species:${s.key}`, kind: 'fiber', label: s.label, css: this._swatchCss(s.col) });
     for (const s of this._gelSp) {
-      const c = TissueRenderer._css(s.col), c2 = TissueRenderer._css(s.col, 0.45);
+      const c = this._swatchCss(s.col), c2 = this._swatchCss(s.col, 0.45);
       out.push({ key: `species:${s.key}`, kind: 'gel', label: s.label, css: `radial-gradient(circle at 50% 50%, ${c} 0%, ${c2} 45%, transparent 78%)` });
     }
     for (const s of this._scafSp) {
-      const c = TissueRenderer._css(s.col);
+      const c = this._swatchCss(s.col);
       out.push({ key: `species:${s.key}`, kind: 'scaffold', label: s.label,
         css: `repeating-linear-gradient(90deg, ${c} 0 2px, transparent 2px 7px), repeating-linear-gradient(0deg, ${c} 0 2px, transparent 2px 7px)` });
     }
@@ -1200,18 +1487,17 @@ export class TissueRenderer {
       const stops = [];
       for (let i = 0; i <= 4; i++) {
         const j = Math.round((RENDER_LUT_N - 1) * i / 4);
-        stops.push(`${TissueRenderer._css([T.lut[3 * j], T.lut[3 * j + 1], T.lut[3 * j + 2]])} ${i * 25}%`);
+        stops.push(`${this._swatchCss([T.lut[3 * j], T.lut[3 * j + 1], T.lut[3 * j + 2]])} ${i * 25}%`);
       }
       out.push({ key: `cell:${T.key}`, kind: 'cell', label: T.label, css: `linear-gradient(90deg, ${stops.join(', ')})` });
     }
     for (const f of this._fieldDefs) {
-      const c = new THREE.Color(f.color);
       out.push({ key: `field:${f.key}`, kind: 'field', label: f.label,
-        css: `radial-gradient(circle at 50% 50%, ${TissueRenderer._cssOf(c)} 0%, ${TissueRenderer._cssOf(c, 0.55)} 40%, transparent 75%)` });
+        css: `radial-gradient(circle at 50% 50%, ${this._swatchCss(f.col)} 0%, ${this._swatchCss(f.col, 0.55)} 40%, transparent 75%)` });
     }
     if (this._loadKey) {
       const d = (this.tissue && this.tissue.dials || []).find((x) => x.key === this._loadKey);
-      out.push({ key: `load:${this._loadKey}`, kind: 'load', label: (d && d.label) || 'Load', css: this.opts.loadColor });
+      out.push({ key: `load:${this._loadKey}`, kind: 'load', label: (d && d.label) || 'Load', css: this._swatchCss(TissueRenderer._lin(this.opts.loadColor, 1)) });
     }
     return out;
   }
@@ -1229,8 +1515,81 @@ export class TissueRenderer {
     this.renderer.render(this.scene, this.camera);
   }
 
+  /** Auto-rotate on/off. Fires opts.onAutoRotate(on) when the value actually changes (B3), so a
+   *  UI toggle stays in sync when the renderer stops rotating by itself (pointerdown, keydown). */
   setAutoRotate(on) {
-    this.controls.autoRotate = !!on;
+    const v = !!on;
+    if (this.controls.autoRotate === v) return;
+    this.controls.autoRotate = v;
+    const cb = this.opts.onAutoRotate;
+    if (typeof cb === 'function') cb(v);
+  }
+
+  /** Default framing: target back on the cube's centre, camera on the default direction. */
+  resetView() {
+    if (this._disposed) return;
+    this.controls.target.copy(this.center);
+    this.camera.up.set(0, 0, 1);
+    this._tmpV.copy(this._viewDir).multiplyScalar(this._fitDist).add(this.center);
+    this.camera.position.copy(this._tmpV);
+    this.camera.lookAt(this.center);
+    this.controls.update();
+  }
+
+  /**
+   * Orbit the camera around controls.target by (dTheta, dPhi) radians, in the same y-up spherical
+   * frame OrbitControls uses (so "up" is camera.up = +z here). No allocation, no private
+   * OrbitControls state: move camera.position, then let controls.update() re-derive its own.
+   */
+  _orbit(dTheta, dPhi) {
+    const t = this.controls.target;
+    const off = this._tmpV.copy(this.camera.position).sub(t).applyQuaternion(this._upQuat);
+    const sp = this._sph.setFromVector3(off);
+    sp.theta += dTheta;
+    const eps = 1e-4;
+    sp.phi = Math.min(Math.PI - eps, Math.max(eps, sp.phi + dPhi));
+    sp.makeSafe();
+    off.setFromSpherical(sp).applyQuaternion(this._upQuatInv);
+    this.camera.position.copy(t).add(off);
+    this.camera.lookAt(t);
+    this.controls.update();
+  }
+
+  /** Dolly by a distance factor (>1 = further away), clamped to the controls' min/max distance. */
+  _dolly(factor) {
+    const t = this.controls.target;
+    const off = this._tmpV.copy(this.camera.position).sub(t);
+    const d = off.length() * factor;
+    off.setLength(Math.min(this.controls.maxDistance, Math.max(this.controls.minDistance, d)));
+    this.camera.position.copy(t).add(off);
+    this.controls.update();
+  }
+
+  /**
+   * Keyboard camera on the focused canvas (B2/B3). Arrows orbit, +/− dolly, Home reframes. The
+   * directions are three's own OrbitControls key mapping, which its rotateLeft/rotateUp would
+   * have produced: ArrowUp/ArrowDown move the camera toward the +z / −z pole (phi ∓ step),
+   * ArrowLeft/ArrowRight swing the azimuth (theta ∓ step). Every other key is left for the app's
+   * shortcuts (Space, R, I, digits) and never sees preventDefault; a modifier chord is ignored
+   * so browser shortcuts keep working. Any real key press stops auto-rotate, exactly as a
+   * pointerdown does — that is the WCAG 2.2.2 "stop the motion" mechanism for keyboard users.
+   */
+  _handleKey(e) {
+    if (this._disposed || e.defaultPrevented) return;
+    const k = e.key;
+    if (k === 'Tab' || k === 'Shift' || k === 'Control' || k === 'Alt' || k === 'Meta' || k === 'CapsLock') return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    this.setAutoRotate(false);
+    const rot = +this.opts.keyOrbitStep || 0, dolly = +this.opts.keyDollyStep || 1;
+    if (k === 'ArrowLeft') this._orbit(-rot, 0);
+    else if (k === 'ArrowRight') this._orbit(rot, 0);
+    else if (k === 'ArrowUp') this._orbit(0, -rot);
+    else if (k === 'ArrowDown') this._orbit(0, rot);
+    else if (k === '+' || k === '=' || k === 'Add') this._dolly(1 / dolly);
+    else if (k === '-' || k === '_' || k === 'Subtract') this._dolly(dolly);
+    else if (k === 'Home') this.resetView();
+    else return;               // not ours: no preventDefault, the app still gets it
+    e.preventDefault();
   }
 
   // PNG data URL of the current frame (renders first so no preserveDrawingBuffer needed).
@@ -1245,6 +1604,7 @@ export class TissueRenderer {
     if (this._ro) this._ro.disconnect();
     if (this._onWinResize) window.removeEventListener('resize', this._onWinResize);
     this.canvas.removeEventListener('pointerdown', this._onPointerDown);
+    this.canvas.removeEventListener('keydown', this._onCanvasKey);
     this.controls.dispose();
     this._disposeGrid();
     if (this.cells) { this.scene.remove(this.cells.mesh); this.cells.geo.dispose(); this.cells.mesh.dispose(); this.cells = null; }
@@ -1253,6 +1613,12 @@ export class TissueRenderer {
     this.gelMat.dispose();
     this.scaffoldMat.dispose();
     this._wire.geo.dispose(); this._wire.mat.dispose();
+    if (this.woundMarker) {
+      this.scene.remove(this.woundMarker.obj);
+      this.woundMarker.geo.dispose(); this.woundMarker.mat.dispose();
+      if (this.woundMarker.ghostMat) this.woundMarker.ghostMat.dispose();
+      this.woundMarker = null;
+    }
     for (const g of this.load.geos) g.dispose();
     this.load.arrowMat.dispose(); this.load.plateMat.dispose();
     this.renderer.dispose();

@@ -3,7 +3,11 @@
 //
 //   node tools/run_headless.mjs [--tissue fibrous] [--out DIR] [--days 90] [--snap 5]
 //                               [--csv-every 0.5] [--events true|false] [--seed 7] [--only a,b,c]
-//                               [--blender PATH] [--no-variants]
+//                               [--blender PATH] [--no-variants] [--help]
+//
+// Every option also takes the `--key=value` form. `--help` prints the usage above with this
+// tissue's runs and exits 0; an `--only` name that is not a run exits 2 and lists them, so a typo
+// cannot silently produce an empty output directory.
 //
 // Runs every scenario of the tissue plus the tissue-specific variants listed in
 // HEADLESS_VARIANTS. `--events` (default on; `--events false` or `--no-events` turns it off)
@@ -16,19 +20,54 @@
 //                         cells.c, cells.n, ratio, cumDeposition, cumDegradation, scaffoldFlux,
 //                         dial.<key>…
 //     <out>/<name>.json   format-2 trajectory (docs/EXTENDING.md §5), snapshot every --snap days.
-// It also writes <out>/<firstScenario>_traj.json (e.g. maturation_traj.json, for Blender) and,
-// with --blender PATH, copies it there. Default --out is $TISSUE_OUT or ./scratch/<tissue>.
+// With `--blender PATH` it also writes <out>/<firstScenario>_traj.json and copies it there (that
+// duplicate is written ONLY for --blender: it is the same multi-MB file as <firstScenario>.json).
+// Default --out is $TISSUE_OUT or ./scratch/<tissue>.
 import { mkdirSync, writeFileSync, copyFileSync, statSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { TissueEngine } from '../src/engine.js';
 import { TISSUES, TISSUE_DEFAULT } from '../src/tissues/index.js';
 
+const KNOWN_FLAGS = ['tissue', 'out', 'days', 'snap', 'csv-every', 'csv', 'events', 'no-events',
+  'seed', 'only', 'blender', 'no-variants', 'help', 'h'];
 const args = {};
+const badFlags = [];
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
-  if (a.startsWith('--')) { const k = a.slice(2); const v = process.argv[i + 1]; if (v !== undefined && !v.startsWith('--')) { args[k] = v; i++; } else args[k] = 'true'; }
+  if (!a.startsWith('--')) continue;
+  const eq = a.indexOf('=');
+  let k, v;
+  if (eq > 0) { k = a.slice(2, eq); v = a.slice(eq + 1); }            // --days=40
+  else {
+    k = a.slice(2);
+    const next = process.argv[i + 1];
+    if (next !== undefined && !next.startsWith('--')) { v = next; i++; } else v = 'true';
+  }
+  if (!KNOWN_FLAGS.includes(k)) badFlags.push(`--${k}`);
+  args[k] = v;
 }
-const TISSUE_KEY = args.tissue ?? TISSUE_DEFAULT;
+
+const USAGE = `usage: node tools/run_headless.mjs [options]
+
+  --tissue KEY      which tissue to run (default ${TISSUE_DEFAULT}); registered: ${Object.keys(TISSUES).join(', ')}
+  --only a,b,c      run only these runs (scenario keys and variant names, see below)
+  --days N          simulated days per run (default 90)
+  --snap N          trajectory snapshot every N days (default 5)
+  --csv-every N     CSV row every N days (default 0.5; alias --csv)
+  --events BOOL     apply each scenario's scripted events (default true; --no-events turns them off)
+  --no-variants     scenarios only, no HEADLESS_VARIANTS
+  --seed N          PRNG seed (default 7)
+  --out DIR         output directory (default $TISSUE_OUT or scratch/<tissue>)
+  --blender PATH    also write <out>/<firstScenario>_traj.json and copy it to PATH
+  --help            this text
+
+Options also take --key=value. Writes <out>/<run>.csv (stats over time) and <out>/<run>.json
+(format-2 trajectory, docs/EXTENDING.md §5) per run.`;
+
+const HELP = args.help === 'true' || args.h === 'true';
+if (badFlags.length && !HELP) { console.error(`unknown option${badFlags.length > 1 ? 's' : ''}: ${badFlags.join(', ')}\n\n${USAGE}`); process.exit(2); }
+
+const TISSUE_KEY = (HELP && !TISSUES[args.tissue]) ? TISSUE_DEFAULT : (args.tissue ?? TISSUE_DEFAULT);
 const tissue = TISSUES[TISSUE_KEY];
 if (!tissue) { console.error(`unknown tissue '${TISSUE_KEY}'; registered: ${Object.keys(TISSUES).join(', ')}`); process.exit(1); }
 const OUT = resolve(args.out ?? process.env.TISSUE_OUT ?? `scratch/${TISSUE_KEY}`);
@@ -37,25 +76,60 @@ const SNAP = +(args.snap ?? 5);
 const CSV_EVERY = +(args['csv-every'] ?? args.csv ?? 0.5);
 const EVENTS = args.events !== 'false' && args['no-events'] !== 'true';
 const SEED = +(args.seed ?? 7);
-const ONLY = args.only ? new Set(args.only.split(',')) : null;
+const ONLY = args.only && args.only !== 'true' ? new Set(args.only.split(',').map((s) => s.trim()).filter(Boolean)) : null;
 
-// Extra runs per tissue: { name: { scenario, dials?, init?, events? } } (events replace the scenario's).
+// Extra runs per tissue: { name: { scenario, dials?, init?, events?, label? } }
+// (`events` replaces the scenario's; `label` is the plot legend, else it is derived from the
+// scenario title and the dial overrides).
 const HEADLESS_VARIANTS = {
   fibrous: {
     maturation_lowG: { scenario: 'maturation', dials: { Gext: 0.2 } },
     maturation_protease0: { scenario: 'maturation', dials: { protease: 0 } },
     maturation_protease1: { scenario: 'maturation', dials: { protease: 1 } },
-    fibrosis_nodrop: { scenario: 'fibrosis', events: [] },
-    fibrosis_lowG: { scenario: 'fibrosis', dials: { Gext: 0.2 }, events: [] },
-    sandbox_evaporate: { scenario: 'sandbox', dials: { Gext: 0, strain: 0, protease: 0, nCells: 40 }, init: { species: { new: 0.15 } } },
+    fibrosis_nodrop: { scenario: 'fibrosis', events: [], label: 'Fibrosis, bath never lowered' },
+    fibrosis_lowG: { scenario: 'fibrosis', dials: { Gext: 0.2 }, events: [], label: 'Fibrosis dials at bath 0.2' },
+    sandbox_evaporate: { scenario: 'sandbox', dials: { Gext: 0, strain: 0, protease: 0, nCells: 40 }, init: { species: { new: 0.15 } }, label: 'Sandbox, every dial at zero' },
+    // Unloading with ONLY the load removed: the bath and the protease dial stay where the matured
+    // tissue had them (Gext 0.5, protease 0.4). This is the control behind the copy fix of
+    // docs/REVIEW.md F1 — off load alone the tissue holds its density and the cells stay activated,
+    // so the atrophy of the `unloading` scenario needs the bath drop too.
+    unloading_loadOnly: { scenario: 'unloading', dials: { Gext: 0.5, strain: 0, protease: 0.4 }, label: 'Unloading, load removed but bath kept' },
   },
 };
 
+// Every run carries a human `title` (the plot legend and the panel headings come from it, so
+// tools/plot_scenarios.py needs no table of run names of its own).
+const titleOf = (sc, v) => {
+  const base = (sc && sc.title) || v.scenario;
+  if (v.label) return v.label;
+  const dials = Object.entries(v.dials || {}).map(([k, x]) => `${k} ${x}`);
+  const parts = [];
+  if (dials.length) parts.push(dials.length > 3 ? `${dials.slice(0, 3).join(', ')}, …` : dials.join(', '));
+  if (v.events && v.events.length === 0 && sc && (sc.events || []).length) parts.push('no scripted events');
+  return parts.length ? `${base}, ${parts.join(', ')}` : base;
+};
+
 const RUNS = {};
-for (const sc of tissue.scenarios) RUNS[sc.key] = { scenario: sc.key, events: EVENTS ? sc.events || [] : [] };
+for (const sc of tissue.scenarios) RUNS[sc.key] = { scenario: sc.key, title: sc.title || sc.key, events: EVENTS ? sc.events || [] : [] };
 if (args['no-variants'] !== 'true') for (const [name, v] of Object.entries(HEADLESS_VARIANTS[TISSUE_KEY] || {})) {
-  RUNS[name] = Object.assign({ events: (tissue.scenarios.find((s) => s.key === v.scenario) || {}).events || [] }, v);
+  const sc = tissue.scenarios.find((s) => s.key === v.scenario);
+  RUNS[name] = Object.assign({ events: (sc || {}).events || [] }, v, { title: titleOf(sc, v) });
   if (!EVENTS) RUNS[name].events = [];
+}
+const RUN_ORDER = Object.keys(RUNS);
+
+if (HELP) {
+  console.log(`${USAGE}\n\nruns for '${TISSUE_KEY}': ${Object.keys(RUNS).join(', ')}`);
+  process.exit(0);
+}
+if (ONLY) {                                            // a typo in --only used to produce nothing at all
+  const unknown = [...ONLY].filter((k) => !RUNS[k]);
+  if (unknown.length) {
+    console.error(`unknown run${unknown.length > 1 ? 's' : ''} in --only: ${unknown.join(', ')}\n` +
+      `runs for '${TISSUE_KEY}': ${Object.keys(RUNS).join(', ')}` +
+      (args['no-variants'] === 'true' ? '\n(--no-variants is on, so the HEADLESS_VARIANTS names are not available)' : ''));
+    process.exit(2);
+  }
 }
 
 const speciesCols = tissue.species.map((s) => `species.${s.key}`), fieldCols = tissue.fields.map((f) => `fields.${f.key}`);
@@ -110,7 +184,9 @@ function runOne(name, cfg) {
   mkdirSync(OUT, { recursive: true });
   const csv = [CSV_COLS.join(',')].concat(rows.map((r) => CSV_COLS.map((c) => fmt(r[c])).join(','))).join('\n') + '\n';
   writeFileSync(join(OUT, `${name}.csv`), csv);
-  const traj = { meta: Object.assign(M.exportMeta({ exportEveryDays: SNAP }), { run: name, days: DAYS, initialDials: Object.assign({}, cfg.dials || {}), events: eventLog }), frames };
+  const traj = { meta: Object.assign(M.exportMeta({ exportEveryDays: SNAP }), {
+    run: name, title: cfg.title || name, order: RUN_ORDER.indexOf(name),
+    days: DAYS, initialDials: Object.assign({}, cfg.dials || {}), events: eventLog }), frames };
   writeFileSync(join(OUT, `${name}.json`), JSON.stringify(traj));
 
   const first = rows[0], last = rows[rows.length - 1], peak = Math.max(...rows.map((r) => r['species.total']));
@@ -128,12 +204,21 @@ for (const [name, cfg] of Object.entries(RUNS)) {
   results[name] = runOne(name, cfg);
 }
 
+// <first>_traj.json duplicates <first>.json byte for byte and is several MB, so it is written only
+// when something asks for it: --blender PATH (the Blender importer's documented input file).
 const firstKey = tissue.scenarios[0].key;
-if (results[firstKey]) {
+if (args.blender && args.blender !== 'true' && results[firstKey]) {
   const p = join(OUT, `${firstKey}_traj.json`);
   writeFileSync(p, JSON.stringify(results[firstKey].traj));
   const mb = statSync(p).size / 1e6;
   console.log(`wrote ${p} (${mb.toFixed(2)} MB, ${results[firstKey].traj.frames.length} frames, format 2)`);
-  if (args.blender) { copyFileSync(p, resolve(args.blender)); console.log(`copied to ${resolve(args.blender)}`); }
+  copyFileSync(p, resolve(args.blender));
+  console.log(`copied to ${resolve(args.blender)}`);
+} else if (args.blender === 'true') {
+  console.error('--blender needs a path, e.g. --blender blender/sample_trajectory.json');
+  process.exit(2);
+} else if (args.blender && !results[firstKey]) {
+  console.error(`--blender: '${firstKey}' was not run (--only ${[...(ONLY || [])].join(',')}), so there is nothing to copy`);
+  process.exit(2);
 }
 console.log(`outputs in ${OUT}`);
